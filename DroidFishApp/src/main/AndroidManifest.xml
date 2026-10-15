@@ -93,6 +93,10 @@
                 <data android:mimeType="application/x-chess-fen" />
             </intent-filter>
             </activity>
+        <activity android:name=".TournamentActivity"
+                  android:label="@string/option_tournament"
+                  android:exported="false"
+                  android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize" />
         <activity android:name=".activities.Preferences"
                   android:label="@string/preferences"
                   android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize">
