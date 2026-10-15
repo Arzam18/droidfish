@@ -26,6 +26,9 @@ import java.util.Map;
 public final class TournamentRunner {
     public interface Listener {
         void onGameStarted(TournamentManager.Pairing pairing, String whiteName, String blackName);
+        /** Current tournament position, copied so the UI can safely render it. */
+        void onPositionChanged(Position position, boolean whiteToMove, long whiteTimeMs, long blackTimeMs,
+                               String whiteName, String blackName);
         void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn);
         void onTournamentFinished();
         void onError(String message, Throwable error);
@@ -132,6 +135,7 @@ public final class TournamentRunner {
         whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.id);
         blackPlayer.queueStartEngine(activeBlackId, blackEngine.id);
         listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
+        notifyPosition();
         requestMove(game.currPos().whiteMove);
     }
 
@@ -220,6 +224,7 @@ public final class TournamentRunner {
             finishCurrentGame(resultForState(game.getGameState()));
             return;
         }
+        notifyPosition();
         if (game.getGameState() != Game.GameState.ALIVE) {
             finishCurrentGame(resultForState(game.getGameState()));
             return;
@@ -230,6 +235,15 @@ public final class TournamentRunner {
             return;
         }
         requestMove(game.currPos().whiteMove);
+    }
+
+    private void notifyPosition() {
+        if (game == null || pairing == null || whiteEngine == null || blackEngine == null) return;
+        CetClock activeClock = clock;
+        long whiteMs = activeClock == null ? 0 : activeClock.remainingMs(true);
+        long blackMs = activeClock == null ? 0 : activeClock.remainingMs(false);
+        listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove,
+                whiteMs, blackMs, whiteEngine.displayName, blackEngine.displayName);
     }
 
     private TournamentManager.Outcome resultForState(Game.GameState state) {
