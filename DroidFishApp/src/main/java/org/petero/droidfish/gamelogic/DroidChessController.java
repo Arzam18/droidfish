@@ -1036,6 +1036,19 @@ public class DroidChessController {
     private synchronized void makeComputerMove(int id, final String cmd, final Move ponder) {
         if (searchId != id)
             return;
+        // A late bestmove must not be accepted after the moving side's clock expired.
+        // Tournament mode uses CET's independent clock; normal games use DroidFish's clock.
+        boolean whiteToMove = game.currPos().whiteMove;
+        boolean outOfTime = game.timeController.getRemainingTime(whiteToMove, System.currentTimeMillis()) <= 0;
+        if (outOfTime) {
+            game.markTimeout(whiteToMove);
+            searchId++;
+            ponderMove = null;
+            listener.clearSearchInfo(searchId);
+            updateGameMode();
+            updateGUI();
+            return;
+        }
         searchId++;
         Position oldPos = new Position(game.currPos());
         Pair<Boolean,Move> res = game.processString(cmd);

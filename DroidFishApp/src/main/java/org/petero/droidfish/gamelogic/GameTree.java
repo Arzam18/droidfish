@@ -70,7 +70,7 @@ public class GameTree {
         }
     }
 
-    final void setPlayerNames(String white, String black) {
+    public final void setPlayerNames(String white, String black) {
         this.white = white;
         this.black = black;
         updateListener();
@@ -860,6 +860,8 @@ public class GameTree {
             // Player made null move to resign, causing whiteMove to toggle
             return pos.whiteMove ? GameState.RESIGN_BLACK : GameState.RESIGN_WHITE;
         }
+        if (action.equals("timeout white")) return GameState.TIMEOUT_WHITE;
+        if (action.equals("timeout black")) return GameState.TIMEOUT_BLACK;
         ArrayList<Move> moves = new MoveGen().legalMoves(pos);
         if (moves.size() == 0) {
             if (MoveGen.inCheck(pos)) {
@@ -924,10 +926,12 @@ public class GameTree {
                 break;
             case WHITE_MATE:
             case RESIGN_BLACK:
+            case TIMEOUT_BLACK:
                 gameResult = "1-0";
                 break;
             case BLACK_MATE:
             case RESIGN_WHITE:
+            case TIMEOUT_WHITE:
                 gameResult = "0-1";
                 break;
             case WHITE_STALEMATE:
@@ -1545,6 +1549,8 @@ public class GameTree {
                     case DRAW_REP:
                     case RESIGN_BLACK:
                     case RESIGN_WHITE:
+                    case TIMEOUT_BLACK:
+                    case TIMEOUT_WHITE:
                         currentNode.playerAction = "";
                         if ("--".equals(currentNode.moveStr)) {
                             Node child = currentNode;

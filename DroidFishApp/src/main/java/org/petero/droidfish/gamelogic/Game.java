@@ -405,7 +405,9 @@ public class Game {
         DRAW_NO_MATE,       // Draw by impossibility of check mate
         DRAW_AGREE,         // Draw by agreement
         RESIGN_WHITE,       // White resigns
-        RESIGN_BLACK        // Black resigns
+        RESIGN_BLACK,       // Black resigns
+        TIMEOUT_WHITE,      // White loses on time
+        TIMEOUT_BLACK       // Black loses on time
     }
 
     /**
@@ -413,6 +415,14 @@ public class Game {
      */
     public final GameState getGameState() {
         return tree.getGameState();
+    }
+
+    /** Adjudicate a flag fall for the side that was to move. */
+    public final synchronized void markTimeout(boolean whiteLost) {
+        if (getGameState() != GameState.ALIVE) return;
+        if (currPos().whiteMove != whiteLost) return;
+        tree.currentNode.playerAction = whiteLost ? "timeout white" : "timeout black";
+        updateTimeControl(true);
     }
 
     /**
