@@ -108,6 +108,7 @@ public class DroidComputerPlayer {
         int wInc;               // White time increment per move, milliseconds
         int bInc;               // Black time increment per move, milliseconds
         int movesToGo;          // Number of moves to next time control
+        boolean cetTimeManagement; // CET sends wtime/btime/winc/binc without movestogo
 
         String engine;          // Engine name (identifier)
         int elo;                // Engine UCI_Elo setting, or Integer.MAX_VALUE for full strength
@@ -175,6 +176,18 @@ public class DroidComputerPlayer {
             sr.ponderMove = ponderMove;
             sr.posHashList = null;
             sr.posHashListSize = 0;
+            return sr;
+        }
+
+        /** Build a search request using CET-compatible UCI clock fields. */
+        public static SearchRequest cetSearchRequest(int id, long now,
+                                                      Position prevPos, ArrayList<Move> mList,
+                                                      Position currPos, boolean drawOffer,
+                                                      int wTime, int bTime, int wInc, int bInc,
+                                                      String engine) {
+            SearchRequest sr = searchRequest(id, now, prevPos, mList, currPos, drawOffer,
+                    wTime, bTime, wInc, bInc, 0, false, null, engine, Integer.MAX_VALUE);
+            sr.cetTimeManagement = true;
             return sr;
         }
 
@@ -632,14 +645,25 @@ public class DroidComputerPlayer {
 
         if (isSearch) { // Search or ponder search
             StringBuilder posStr = new StringBuilder();
-            posStr.append("position fen ");
-            posStr.append(TextIO.toFEN(sr.prevPos));
+            String baseFen = TextIO.toFEN(sr.prevPos);
             int nMoves = sr.mList.size();
-            if (nMoves > 0) {
-                posStr.append(" moves");
+            if (sr.cetTimeManagement) {
+                if (TextIO.startPosFEN.equals(baseFen))
+                    posStr.append("position startpos moves");
+                else
+                    posStr.append("position fen ").append(baseFen).append(" moves");
                 for (int i = 0; i < nMoves; i++) {
                     posStr.append(" ");
                     posStr.append(TextIO.moveToUCIString(sr.mList.get(i)));
+                }
+            } else {
+                posStr.append("position fen ").append(baseFen);
+                if (nMoves > 0) {
+                    posStr.append(" moves");
+                    for (int i = 0; i < nMoves; i++) {
+                        posStr.append(" ");
+                        posStr.append(TextIO.moveToUCIString(sr.mList.get(i)));
+                    }
                 }
             }
             uciEngine.setOption("Ponder", sr.ponderEnabled);
@@ -649,11 +673,11 @@ public class DroidComputerPlayer {
             if (sr.bTime < 1) sr.bTime = 1;
             StringBuilder goStr = new StringBuilder(96);
             goStr.append(String.format(Locale.US, "go wtime %d btime %d", sr.wTime, sr.bTime));
-            if (sr.wInc > 0)
+            if (sr.cetTimeManagement || sr.wInc > 0)
                 goStr.append(String.format(Locale.US, " winc %d", sr.wInc));
-            if (sr.bInc > 0)
+            if (sr.cetTimeManagement || sr.bInc > 0)
                 goStr.append(String.format(Locale.US, " binc %d", sr.bInc));
-            if (sr.movesToGo > 0)
+            if (!sr.cetTimeManagement && sr.movesToGo > 0)
                 goStr.append(String.format(Locale.US, " movestogo %d", sr.movesToGo));
             if (sr.ponderMove != null)
                 goStr.append(" ponder");
