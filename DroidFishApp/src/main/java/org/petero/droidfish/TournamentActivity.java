@@ -20,6 +20,8 @@ import com.kalab.chess.enginesupport.ChessEngine;
 import com.kalab.chess.enginesupport.ChessEngineResolver;
 import org.petero.droidfish.book.BookOptions;
 import org.petero.droidfish.engine.EngineUtil;
+import org.petero.droidfish.gamelogic.Position;
+import org.petero.droidfish.ChessBoardPlay;
 import org.petero.droidfish.tournament.TournamentManager;
 import org.petero.droidfish.tournament.TournamentRunner;
 
@@ -36,7 +38,8 @@ public final class TournamentActivity extends Activity {
     private static final String ENGINE_DIR = "DroidFish/uci";
     private final ArrayList<EngineChoice> availableEngines = new ArrayList<>();
     private final ArrayList<EngineChoice> selectedEngines = new ArrayList<>();
-    private TextView selectedText, statusText, standingsText;
+    private TextView selectedText, statusText, standingsText, clockText;
+    private ChessBoardPlay tournamentBoard;
     private Spinner formatSpinner;
     private EditText gamesInput, baseInput, incrementInput, openingPliesInput, openingInput;
     private CheckBox repeatOpeningCheck;
@@ -69,6 +72,21 @@ public final class TournamentActivity extends Activity {
         root.addView(choose, fullWidth());
         selectedText = text("No engines selected"); root.addView(selectedText, fullWidth());
         choose.setOnClickListener(v -> chooseEngines());
+
+        // Render the runner's actual Game position on the tournament screen. Previously the
+        // runner maintained a private Game but the UI only showed its status and standings.
+        tournamentBoard = new ChessBoardPlay(this, null);
+        tournamentBoard.setClickable(false);
+        tournamentBoard.setFocusable(false);
+        tournamentBoard.highlightLastMove = true;
+        LinearLayout.LayoutParams boardParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(340));
+        boardParams.topMargin = dp(8);
+        boardParams.bottomMargin = dp(8);
+        root.addView(tournamentBoard, boardParams);
+        tournamentBoard.setPosition(new Position());
+        clockText = text("White: --:--   Black: --:--");
+        root.addView(clockText, fullWidth());
 
         root.addView(text("Tournament format"), fullWidth());
         formatSpinner = new Spinner(this);
@@ -211,6 +229,16 @@ public final class TournamentActivity extends Activity {
             @Override public void onGameStarted(TournamentManager.Pairing pairing, String white, String black) {
                 runOnUiThread(() -> statusText.setText("Game " + (pairing.index + 1) + ": " + white + " (White) vs " + black + " (Black)"));
             }
+            @Override public void onPositionChanged(Position position, boolean whiteToMove,
+                                                    long whiteTimeMs, long blackTimeMs,
+                                                    String whiteName, String blackName) {
+                runOnUiThread(() -> {
+                    tournamentBoard.setPosition(position);
+                    clockText.setText((whiteToMove ? "White to move — " : "Black to move — ") +
+                            whiteName + ": " + formatClock(whiteTimeMs) + "   " +
+                            blackName + ": " + formatClock(blackTimeMs));
+                });
+            }
             @Override public void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn) {
                 runOnUiThread(() -> {
                     statusText.setText("Game " + (pairing.index + 1) + " finished: " + outcome);
@@ -281,6 +309,13 @@ public final class TournamentActivity extends Activity {
     }
     private TextView text(String value) { TextView t = new TextView(this); t.setText(value); t.setTextSize(16); t.setPadding(0, dp(6), 0, dp(6)); return t; }
     private LinearLayout.LayoutParams fullWidth() { return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT); }
+    private String formatClock(long millis) {
+        long safe = Math.max(0, millis);
+        long totalSeconds = safe / 1000;
+        return String.format(java.util.Locale.US, "%d:%02d.%d", totalSeconds / 60,
+                totalSeconds % 60, (safe % 1000) / 100);
+    }
+
     private int dp(int value) { return (int)(value * getResources().getDisplayMetrics().density + 0.5f); }
     private int positiveInt(EditText field, String name, int minimum) {
         int v = Integer.parseInt(field.getText().toString().trim()); if (v < minimum) throw new IllegalArgumentException(name + " must be at least " + minimum); return v;
