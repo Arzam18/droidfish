@@ -1,0 +1,318 @@
+package org.petero.droidfish.tournament;
+
+import android.util.Pair;
+import org.petero.droidfish.EngineOptions;
+import org.petero.droidfish.PGNOptions;
+import org.petero.droidfish.book.BookOptions;
+import org.petero.droidfish.engine.DroidComputerPlayer;
+import org.petero.droidfish.gamelogic.Game;
+import org.petero.droidfish.gamelogic.GameTree;
+import org.petero.droidfish.gamelogic.Move;
+import org.petero.droidfish.gamelogic.PgnToken;
+import org.petero.droidfish.gamelogic.Position;
+import org.petero.droidfish.gamelogic.SearchListener;
+import org.petero.droidfish.gamelogic.TimeControlData;
+
+import java.io.IOException;
+import org.json.JSONException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * Runs a saved tournament with two independent UCI engine processes.
+ * Calls to Listener are made from the engine callback thread; marshal UI updates to the main thread.
+ */
+public final class TournamentRunner {
+    public interface Listener {
+        void onGameStarted(TournamentManager.Pairing pairing, String whiteName, String blackName);
+        void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn);
+        void onTournamentFinished();
+        void onError(String message, Throwable error);
+    }
+
+    private final TournamentManager tournament;
+    private final Listener listener;
+    private final EngineOptions engineOptions;
+    private final BookOptions bookOptions;
+    private final PGNOptions pgnOptions;
+    private final long baseTimeMs, incrementMs;
+    private final String openingPgn;
+    private final int openingPlies;
+    private final boolean repeatOpening;
+    private final DroidComputerPlayer whitePlayer, blackPlayer;
+    private Game game;
+    private volatile CetClock clock;
+    private TournamentManager.Pairing pairing;
+    private TournamentManager.Engine whiteEngine, blackEngine;
+    private int whiteSearchId, blackSearchId;
+    private volatile int activeWhiteId, activeBlackId;
+    private long turnGeneration;
+    private volatile boolean stopped, finished;
+
+    public TournamentRunner(TournamentManager tournament, Listener listener,
+                            EngineOptions engineOptions, BookOptions bookOptions,
+                            long baseTimeMs, long incrementMs,
+                            String openingPgn, int openingPlies) {
+        this(tournament, listener, engineOptions, bookOptions, baseTimeMs, incrementMs, openingPgn, openingPlies, false);
+    }
+
+    public TournamentRunner(TournamentManager tournament, Listener listener,
+                            EngineOptions engineOptions, BookOptions bookOptions,
+                            long baseTimeMs, long incrementMs,
+                            String openingPgn, int openingPlies, boolean repeatOpening) {
+        if (tournament == null || listener == null) throw new IllegalArgumentException("Tournament and listener are required");
+        if (baseTimeMs < 1 || baseTimeMs > Integer.MAX_VALUE || incrementMs < 0 || incrementMs > Integer.MAX_VALUE)
+            throw new IllegalArgumentException("Time values are outside supported UCI millisecond range");
+        this.tournament = tournament;
+        this.listener = listener;
+        this.engineOptions = engineOptions == null ? new EngineOptions() : engineOptions;
+        this.bookOptions = bookOptions == null ? new BookOptions() : bookOptions;
+        this.baseTimeMs = baseTimeMs;
+        this.incrementMs = incrementMs;
+        this.openingPgn = openingPgn == null ? "" : openingPgn;
+        this.openingPlies = Math.max(0, openingPlies);
+        this.repeatOpening = repeatOpening;
+        pgnOptions = new PGNOptions();
+        whitePlayer = new DroidComputerPlayer(new EngineListener(true));
+        blackPlayer = new DroidComputerPlayer(new EngineListener(false));
+        whitePlayer.setEngineOptions(this.engineOptions);
+        blackPlayer.setEngineOptions(this.engineOptions);
+        whitePlayer.setBookOptions(this.bookOptions);
+        blackPlayer.setBookOptions(this.bookOptions);
+    }
+
+    public synchronized void start() {
+        if (stopped) throw new IllegalStateException("Runner has been stopped");
+        startNextGame();
+    }
+
+    public synchronized void stop() {
+        stopped = true;
+        turnGeneration++;
+        whitePlayer.shutdownEngine();
+        blackPlayer.shutdownEngine();
+    }
+
+    private void startNextGame() {
+        if (stopped || finished) return;
+        pairing = tournament.current();
+        if (pairing == null) {
+            finished = true;
+            whitePlayer.shutdownEngine();
+            blackPlayer.shutdownEngine();
+            listener.onTournamentFinished();
+            return;
+        }
+        whiteEngine = findEngine(pairing.whiteEngineId);
+        blackEngine = findEngine(pairing.blackEngineId);
+        TimeControlData tc = new TimeControlData();
+        tc.setTimeControl((int)baseTimeMs, 0, (int)incrementMs);
+        game = new Game(new EmptyPgnReceiver(), tc);
+        game.tree.setPlayerNames(whiteEngine.displayName, blackEngine.displayName);
+        clock = new CetClock(baseTimeMs, incrementMs);
+        if (openingPlies > 0 && !openingPgn.isEmpty()) {
+            int openingIndex = repeatOpening ? Math.max(0, (pairing.gameNumber - 1) / 2) : pairing.index;
+            String selectedOpening = PgnOpeningBook.gameAt(openingPgn, openingIndex);
+            PgnOpeningBook.applyMainLine(selectedOpening, openingPlies, san -> {
+                Pair<Boolean, Move> result = game.processString(san);
+                return result != null && Boolean.TRUE.equals(result.first) && result.second != null;
+            });
+        }
+        if (game.getGameState() != Game.GameState.ALIVE) {
+            finishCurrentGame(resultForState(game.getGameState()));
+            return;
+        }
+        whitePlayer.setEngineOptions(engineOptions);
+        blackPlayer.setEngineOptions(engineOptions);
+        whitePlayer.uciNewGame();
+        blackPlayer.uciNewGame();
+        activeWhiteId = ++whiteSearchId;
+        activeBlackId = ++blackSearchId;
+        whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.id);
+        blackPlayer.queueStartEngine(activeBlackId, blackEngine.id);
+        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
+        requestMove(game.currPos().whiteMove);
+    }
+
+    private TournamentManager.Engine findEngine(String id) {
+        for (TournamentManager.Engine engine : tournament.engines()) if (engine.id.equals(id)) return engine;
+        throw new IllegalStateException("Tournament references unknown engine: " + id);
+    }
+
+    private synchronized void requestMove(boolean whiteToMove) {
+        if (stopped || finished || game == null || game.getGameState() != Game.GameState.ALIVE) return;
+        if (clock.isExpired()) {
+            game.markTimeout(whiteToMove);
+            finishCurrentGame(resultForState(game.getGameState()));
+            return;
+        }
+        Pair<Position, ArrayList<Move>> history = game.getUCIHistory();
+        // Snapshot before starting the turn: DroidComputerPlayer subtracts the engine-start
+        // delay from the moving side's UCI clock, matching the independently running watchdog.
+        int wTime = (int)Math.max(1, Math.min(Integer.MAX_VALUE, clock.remainingMs(true)));
+        int bTime = (int)Math.max(1, Math.min(Integer.MAX_VALUE, clock.remainingMs(false)));
+        int inc = (int)Math.min(Integer.MAX_VALUE, clock.incrementMs());
+        clock.startTurn(whiteToMove);
+        final long turnToken = ++turnGeneration;
+        int id;
+        DroidComputerPlayer player;
+        if (whiteToMove) {
+            id = ++whiteSearchId;
+            activeWhiteId = id;
+            player = whitePlayer;
+        } else {
+            id = ++blackSearchId;
+            activeBlackId = id;
+            player = blackPlayer;
+        }
+        DroidComputerPlayer.SearchRequest request = DroidComputerPlayer.SearchRequest.cetSearchRequest(
+                id, System.currentTimeMillis(), history.first, history.second,
+                new Position(game.currPos()), game.haveDrawOffer(), wTime, bTime, inc, inc,
+                whiteToMove ? whiteEngine.id : blackEngine.id);
+        player.queueSearchRequest(request);
+        startClockWatchdog(whiteToMove, turnToken);
+    }
+
+    /** Adjudicate flag fall even if an engine hangs and never emits bestmove. */
+    private void startClockWatchdog(final boolean whiteToMove, final long turnToken) {
+        Thread watchdog = new Thread(() -> {
+            while (true) {
+                synchronized (TournamentRunner.this) {
+                    if (stopped || finished || turnToken != turnGeneration || game == null ||
+                            game.getGameState() != Game.GameState.ALIVE || game.currPos().whiteMove != whiteToMove)
+                        return;
+                    if (clock.isExpired()) {
+                        game.markTimeout(whiteToMove);
+                        // A non-responsive engine may never answer stop; kill it so the next
+                        // pairing can start a clean process instead of inheriting a stuck search.
+                        (whiteToMove ? whitePlayer : blackPlayer).shutdownEngine();
+                        turnGeneration++;
+                        finishCurrentGame(resultForState(game.getGameState()));
+                        return;
+                    }
+                }
+                try { Thread.sleep(5); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            }
+        }, "CET-Clock-Watchdog");
+        watchdog.setDaemon(true);
+        watchdog.start();
+    }
+
+    private synchronized void onSearchResult(boolean whiteEngineSide, int id, String cmd,
+                                             boolean acceptedAtArrival) {
+        if (stopped || finished || game == null) return;
+        if (whiteEngineSide ? id != activeWhiteId : id != activeBlackId) return;
+        boolean whiteToMove = game.currPos().whiteMove;
+        if (whiteToMove != whiteEngineSide) return;
+        if (!acceptedAtArrival) {
+            game.markTimeout(whiteToMove);
+            turnGeneration++;
+            finishCurrentGame(resultForState(game.getGameState()));
+            return;
+        }
+        turnGeneration++; // Invalidate this turn's watchdog before changing the board.
+        Pair<Boolean, Move> result = game.processString(cmd);
+        if (result == null || !Boolean.TRUE.equals(result.first)) {
+            // Illegal engine output is a loss for the engine that produced it.
+            game.processString("resign");
+            finishCurrentGame(resultForState(game.getGameState()));
+            return;
+        }
+        if (game.getGameState() != Game.GameState.ALIVE) {
+            finishCurrentGame(resultForState(game.getGameState()));
+            return;
+        }
+        if (result.second == null) {
+            listener.onError("Engine returned a non-move command without ending the game: " + cmd, null);
+            stop();
+            return;
+        }
+        requestMove(game.currPos().whiteMove);
+    }
+
+    private TournamentManager.Outcome resultForState(Game.GameState state) {
+        switch (state) {
+            case WHITE_MATE:
+            case RESIGN_BLACK:
+            case TIMEOUT_BLACK: return TournamentManager.Outcome.WHITE_WIN;
+            case BLACK_MATE:
+            case RESIGN_WHITE:
+            case TIMEOUT_WHITE: return TournamentManager.Outcome.BLACK_WIN;
+            case WHITE_STALEMATE:
+            case BLACK_STALEMATE:
+            case DRAW_REP:
+            case DRAW_50:
+            case DRAW_NO_MATE:
+            case DRAW_AGREE: return TournamentManager.Outcome.DRAW;
+            default: return TournamentManager.Outcome.UNFINISHED;
+        }
+    }
+
+    private synchronized void finishCurrentGame(TournamentManager.Outcome outcome) {
+        if (stopped || finished || pairing == null || outcome == TournamentManager.Outcome.UNFINISHED) return;
+        turnGeneration++;
+        String pgn = game.tree.toPGN(pgnOptions);
+        try {
+            tournament.recordResult(pairing.index, outcome, pgn);
+        } catch (IOException | JSONException e) {
+            listener.onError("Could not save tournament result", e);
+            stop();
+            return;
+        }
+        TournamentManager.Pairing completed = pairing;
+        pairing = null;
+        listener.onGameFinished(completed, outcome, pgn);
+        startNextGame();
+    }
+
+    private final class EngineListener implements SearchListener {
+        private final boolean white;
+        EngineListener(boolean white) { this.white = white; }
+        @Override public void notifyDepth(int id, int depth) { }
+        @Override public void notifyCurrMove(int id, Position pos, Move move, int moveNr) { }
+        @Override public void notifyPV(int id, Position pos, ArrayList<PvInfo> pvInfo, Move ponderMove) { }
+        @Override public void notifyStats(int id, long nodes, int nps, long tbHits, int hash, int time, int seldepth) { }
+        @Override public void notifyBookInfo(int id, String bookInfo, ArrayList<Move> moveList, String eco, int distToEcoTree) { }
+        @Override public void notifySearchResult(int id, String cmd, Move ponder) {
+            // Stop the clock at bestmove arrival, not when the deferred board update runs.
+            long arrivalNs = System.nanoTime();
+            int activeId = white ? activeWhiteId : activeBlackId;
+            CetClock activeClock = clock;
+            boolean acceptedAtArrival = !stopped && !finished && id == activeId && activeClock != null &&
+                    activeClock.acceptMove(white, arrivalNs);
+            // DroidComputerPlayer invokes listeners before it returns its state to IDLE.
+            // Defer board/result handling so old-search cleanup cannot overwrite a new search.
+            DroidComputerPlayer player = white ? whitePlayer : blackPlayer;
+            Thread worker = new Thread(() -> {
+                try {
+                    while (player.computerBusy()) Thread.sleep(2);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                onSearchResult(white, id, cmd, acceptedAtArrival);
+            }, "CET-Tournament-Result");
+            worker.start();
+        }
+        @Override public void notifyEngineName(String engineName) { }
+        @Override public void reportEngineError(String errMsg) { listener.onError(errMsg, null); }
+        @Override public void notifyEngineInitialized() {
+            // UCI option discovery clears pending options, so apply the tournament baseline
+            // after each newly loaded engine has reported its supported options.
+            Map<String, String> options = new HashMap<>();
+            options.put("Threads", "1");
+            options.put("Hash", "16");
+            options.put("Ponder", "false");
+            (white ? whitePlayer : blackPlayer).setEngineUCIOptions(options);
+        }
+    }
+
+    private static final class EmptyPgnReceiver implements PgnToken.PgnTokenReceiver {
+        @Override public boolean isUpToDate() { return true; }
+        @Override public void clear() { }
+        @Override public void processToken(GameTree.Node node, int type, String token) { }
+        @Override public void setCurrent(GameTree.Node node) { }
+    }
+}
