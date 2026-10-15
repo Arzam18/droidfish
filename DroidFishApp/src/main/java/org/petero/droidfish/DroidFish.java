@@ -1460,6 +1460,7 @@ public class DroidFish extends Activity
         DRAW,
         SELECT_BOOK,
         MANAGE_ENGINES,
+        TOURNAMENT,
         SET_COLOR_THEME,
         ABOUT,
     }
@@ -1477,6 +1478,7 @@ public class DroidFish extends Activity
             new DrawerItem(DrawerItemId.FILE_MENU, R.string.option_file),
             new DrawerItem(DrawerItemId.SELECT_BOOK, R.string.option_select_book),
             new DrawerItem(DrawerItemId.MANAGE_ENGINES, R.string.option_manage_engines),
+            new DrawerItem(DrawerItemId.TOURNAMENT, R.string.option_tournament),
             new DrawerItem(DrawerItemId.SET_COLOR_THEME, R.string.option_color_theme),
             new DrawerItem(DrawerItemId.SETTINGS, R.string.option_settings),
             new DrawerItem(DrawerItemId.ABOUT, R.string.option_about),
@@ -1562,6 +1564,11 @@ public class DroidFish extends Activity
             else
                 reShowDialog(SELECT_ENGINE_DIALOG_NOMANAGE);
             break;
+        case TOURNAMENT: {
+            Intent i = new Intent(DroidFish.this, TournamentActivity.class);
+            startActivity(i);
+            break;
+        }
         case SET_COLOR_THEME:
             showDialog(SET_COLOR_THEME_DIALOG);
             break;
@@ -1832,6 +1839,12 @@ public class DroidFish extends Activity
             break;
         case RESIGN_BLACK:
             str = getString(R.string.resign_black);
+            break;
+        case TIMEOUT_WHITE:
+            str = getString(R.string.timeout_white);
+            break;
+        case TIMEOUT_BLACK:
+            str = getString(R.string.timeout_black);
             break;
         default:
             throw new RuntimeException();
