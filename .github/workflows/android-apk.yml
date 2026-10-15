@@ -29,11 +29,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 11
+      # Recent Android command-line tools (installed by setup-android@v3)
+      # require Java 17. Use JDK 17 while setting up and installing the SDK.
+      - name: Set up JDK 17 for Android SDK tools
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '11'
+          java-version: '17'
 
       - name: Cache Gradle and wrapper distribution
         uses: actions/cache@v4
@@ -52,6 +54,14 @@ jobs:
         run: |
           yes | sdkmanager --licenses >/dev/null
           sdkmanager "platform-tools" "platforms;android-${ANDROID_COMPILE_SDK}" "build-tools;${ANDROID_BUILD_TOOLS}" "ndk;${ANDROID_NDK_VERSION}"
+
+      # Gradle 7.2 predates full Java 17 runtime support. Switch back to JDK 11
+      # only after SDK setup; sdkmanager above has already run under JDK 17.
+      - name: Set up JDK 11 for Gradle 7.2
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
 
       # The wrapper's distributionUrl is Gradle 7.2. This command deliberately
       # downloads and validates the exact distribution before the Android build.
