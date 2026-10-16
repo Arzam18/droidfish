@@ -109,6 +109,7 @@ public class DroidComputerPlayer {
         int bInc;               // Black time increment per move, milliseconds
         int movesToGo;          // Number of moves to next time control
         boolean cetTimeManagement; // CET sends wtime/btime/winc/binc without movestogo
+        public String tournamentGoCommand; // Fixed tournament limit, if selected
 
         String engine;          // Engine name (identifier)
         int elo;                // Engine UCI_Elo setting, or Integer.MAX_VALUE for full strength
@@ -629,10 +630,10 @@ public class DroidComputerPlayer {
             long now = System.currentTimeMillis();
             int delay = (int)(now - searchRequest.startTime);
             boolean wtm = searchRequest.currPos.whiteMove ^ (searchRequest.ponderMove != null);
-            if (wtm)
-                searchRequest.wTime = Math.max(1, searchRequest.wTime - delay);
-            else
-                searchRequest.bTime = Math.max(1, searchRequest.bTime - delay);
+            if (searchRequest.tournamentGoCommand == null) {
+                if (wtm) searchRequest.wTime = Math.max(1, searchRequest.wTime - delay);
+                else searchRequest.bTime = Math.max(1, searchRequest.bTime - delay);
+            }
         }
 
         // Set strength and MultiPV parameters
@@ -672,13 +673,14 @@ public class DroidComputerPlayer {
             if (sr.wTime < 1) sr.wTime = 1;
             if (sr.bTime < 1) sr.bTime = 1;
             StringBuilder goStr = new StringBuilder(96);
-            goStr.append(String.format(Locale.US, "go wtime %d btime %d", sr.wTime, sr.bTime));
-            if (sr.cetTimeManagement || sr.wInc > 0)
-                goStr.append(String.format(Locale.US, " winc %d", sr.wInc));
-            if (sr.cetTimeManagement || sr.bInc > 0)
-                goStr.append(String.format(Locale.US, " binc %d", sr.bInc));
-            if (!sr.cetTimeManagement && sr.movesToGo > 0)
-                goStr.append(String.format(Locale.US, " movestogo %d", sr.movesToGo));
+            if (sr.tournamentGoCommand != null && !sr.tournamentGoCommand.isEmpty()) {
+                goStr.append(sr.tournamentGoCommand);
+            } else {
+                goStr.append(String.format(Locale.US, "go wtime %d btime %d", sr.wTime, sr.bTime));
+                if (sr.cetTimeManagement || sr.wInc > 0) goStr.append(String.format(Locale.US, " winc %d", sr.wInc));
+                if (sr.cetTimeManagement || sr.bInc > 0) goStr.append(String.format(Locale.US, " binc %d", sr.bInc));
+                if (!sr.cetTimeManagement && sr.movesToGo > 0) goStr.append(String.format(Locale.US, " movestogo %d", sr.movesToGo));
+            }
             if (sr.ponderMove != null)
                 goStr.append(" ponder");
             if (sr.searchMoves != null) {
