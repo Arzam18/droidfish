@@ -41,7 +41,10 @@ public final class TournamentActivity extends Activity {
     private final ArrayList<EngineChoice> selectedEngines = new ArrayList<>();
     private TextView selectedText, statusText, standingsText, clockText, tournamentTitleText;
     private TextView whiteClockText, blackClockText, whiteNameText, blackNameText, moveStatusText;
-    private TextView whiteAnalysisText, blackAnalysisText, moveTimeText, openingText;
+    private TextView whiteAnalysisText, blackAnalysisText, whiteMoveTimeText, blackMoveTimeText, openingText;
+    private CheckBox showTournamentArrowsCheck;
+    private Position latestPosition = new Position();
+    private float touchDownX, touchDownY;
     private Button previousMoveButton, nextMoveButton;
     private ChessBoardPlay tournamentBoard;
     private View setupView, playView;
@@ -95,6 +98,11 @@ public final class TournamentActivity extends Activity {
         openingInput = field("Opening PGN (paste one or more games)", "");
         openingInput.setMinLines(3); openingInput.setGravity(android.view.Gravity.TOP);
         root.addView(openingInput, fullWidth());
+        showTournamentArrowsCheck = new CheckBox(this);
+        showTournamentArrowsCheck.setText("Show engine thinking arrows on board");
+        showTournamentArrowsCheck.setChecked(getPreferences(MODE_PRIVATE).getBoolean("tournamentThinkingArrows", true));
+        showTournamentArrowsCheck.setOnCheckedChangeListener((button, checked) -> getPreferences(MODE_PRIVATE).edit().putBoolean("tournamentThinkingArrows", checked).apply());
+        root.addView(showTournamentArrowsCheck, fullWidth());
 
         startButton = new Button(this); startButton.setText("Start tournament"); root.addView(startButton, fullWidth());
         resumeButton = new Button(this); resumeButton.setText("Resume saved tournament"); root.addView(resumeButton, fullWidth());
@@ -106,6 +114,21 @@ public final class TournamentActivity extends Activity {
         resumeButton.setOnClickListener(v -> resumeTournament());
         stopButton.setOnClickListener(v -> stopTournament());
         exportButton.setOnClickListener(v -> exportTournamentPgn());
+        scroll.setOnTouchListener((v, event) -> {
+            if (event.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
+                touchDownX = event.getX(); touchDownY = event.getY(); return false;
+            }
+            if (event.getActionMasked() == android.view.MotionEvent.ACTION_UP) {
+                float dx = event.getX() - touchDownX;
+                float dy = event.getY() - touchDownY;
+                if (Math.abs(dx) > dp(80) && Math.abs(dx) > Math.abs(dy) * 1.25f) {
+                    setContentView(playView);
+                    return true;
+                }
+                return false;
+            }
+            return false;
+        });
         setupView = scroll;
         buildPlayUi();
         setContentView(setupView);
@@ -127,10 +150,13 @@ public final class TournamentActivity extends Activity {
         blackNameText = text("BLACK");
         blackNameText.setTextSize(14);
         page.addView(blackNameText, fullWidth());
-        blackClockText = text("00:30.0");
-        blackClockText.setTextSize(25);
-        blackClockText.setTypeface(null, android.graphics.Typeface.BOLD);
-        page.addView(blackClockText, fullWidth());
+        LinearLayout blackClockRow = new LinearLayout(this);
+        blackClockRow.setOrientation(LinearLayout.HORIZONTAL);
+        blackMoveTimeText = text("—"); blackMoveTimeText.setTextSize(25); blackMoveTimeText.setTypeface(null, android.graphics.Typeface.BOLD);
+        blackClockText = text("00:30.0"); blackClockText.setTextSize(25); blackClockText.setTypeface(null, android.graphics.Typeface.BOLD); blackClockText.setGravity(android.view.Gravity.RIGHT);
+        blackClockRow.addView(blackMoveTimeText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        blackClockRow.addView(blackClockText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        page.addView(blackClockRow, fullWidth());
         blackAnalysisText = text("BLACK analysis waiting…");
         blackAnalysisText.setTextSize(11);
         blackAnalysisText.setMaxLines(3);
@@ -156,18 +182,18 @@ public final class TournamentActivity extends Activity {
         whiteNameText = text("WHITE");
         whiteNameText.setTextSize(14);
         page.addView(whiteNameText, fullWidth());
-        whiteClockText = text("00:30.0");
-        whiteClockText.setTextSize(25);
-        whiteClockText.setTypeface(null, android.graphics.Typeface.BOLD);
-        page.addView(whiteClockText, fullWidth());
+        LinearLayout whiteClockRow = new LinearLayout(this);
+        whiteClockRow.setOrientation(LinearLayout.HORIZONTAL);
+        whiteMoveTimeText = text("—"); whiteMoveTimeText.setTextSize(25); whiteMoveTimeText.setTypeface(null, android.graphics.Typeface.BOLD);
+        whiteClockText = text("00:30.0"); whiteClockText.setTextSize(25); whiteClockText.setTypeface(null, android.graphics.Typeface.BOLD); whiteClockText.setGravity(android.view.Gravity.RIGHT);
+        whiteClockRow.addView(whiteMoveTimeText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        whiteClockRow.addView(whiteClockText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        page.addView(whiteClockRow, fullWidth());
         whiteAnalysisText = text("WHITE analysis waiting…");
         whiteAnalysisText.setTextSize(11);
         whiteAnalysisText.setMaxLines(3);
         whiteAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(whiteAnalysisText, fullWidth());
-        moveTimeText = text("Last move time: —");
-        moveTimeText.setTextSize(13);
-        page.addView(moveTimeText, fullWidth());
         openingText = text("Opening: Starting position");
         openingText.setTextSize(13);
         page.addView(openingText, fullWidth());
@@ -191,22 +217,29 @@ public final class TournamentActivity extends Activity {
         controls.setOrientation(LinearLayout.HORIZONTAL);
         playPauseButton = new Button(this); playPauseButton.setText("Pause");
         Button results = new Button(this); results.setText("Results");
-        Button export = new Button(this); export.setText("Export PGN");
-        Button setup = new Button(this); setup.setText("Setup");
         controls.addView(playPauseButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(results, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        controls.addView(export, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        controls.addView(setup, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(controls, fullWidth());
         playPauseButton.setOnClickListener(v -> togglePauseResume());
         results.setOnClickListener(v -> showStandingsDialog());
-        export.setOnClickListener(v -> exportTournamentPgn());
-        setup.setOnClickListener(v -> {
-            if (runner != null) {
-                Toast.makeText(this, "Stop the tournament before returning to setup", Toast.LENGTH_SHORT).show();
-            } else {
-                setContentView(setupView);
+        page.setOnTouchListener((v, event) -> {
+            switch (event.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    touchDownX = event.getX(); touchDownY = event.getY(); return false;
+                case android.view.MotionEvent.ACTION_UP:
+                    float dx = event.getX() - touchDownX;
+                    float dy = event.getY() - touchDownY;
+                    if (Math.abs(dx) > dp(80) && Math.abs(dx) > Math.abs(dy) * 1.25f) {
+                        if (dx < 0) { // swipe left to reveal tournament setup
+                            setContentView(setupView);
+                        } else { // swipe right to return to the live board
+                            setContentView(playView);
+                        }
+                        return true;
+                    }
+                    return false;
             }
+            return false;
         });
         playView = page;
     }
@@ -350,7 +383,8 @@ public final class TournamentActivity extends Activity {
                     statusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + ": " + white + " vs " + black);
                     moveStatusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + " · " + white + " vs " + black);
                     if (openingText != null) openingText.setText("Opening: Starting position");
-                    if (moveTimeText != null) moveTimeText.setText("Last move time: —");
+                    if (whiteMoveTimeText != null) whiteMoveTimeText.setText("—");
+                    if (blackMoveTimeText != null) blackMoveTimeText.setText("—");
                     whiteNameText.setText("WHITE  ·  " + white);
                     blackNameText.setText("BLACK  ·  " + black);
                 });
@@ -359,6 +393,7 @@ public final class TournamentActivity extends Activity {
                                                     long whiteTimeMs, long blackTimeMs,
                                                     String whiteName, String blackName) {
                 runOnUiThread(() -> {
+                    latestPosition = new Position(position);
                     tournamentBoard.setPosition(position);
                     whiteClockText.setText(formatClock(whiteTimeMs));
                     blackClockText.setText(formatClock(blackTimeMs));
@@ -372,21 +407,39 @@ public final class TournamentActivity extends Activity {
                 runOnUiThread(() -> {
                     TextView target = white ? whiteAnalysisText : blackAnalysisText;
                     if (target != null) target.setText(analysis);
+                    if (tournamentBoard != null && showTournamentArrowsCheck != null && showTournamentArrowsCheck.isChecked()) {
+                        try {
+                            int evalAt = analysis.indexOf("eval ");
+                            if (evalAt >= 0) {
+                                String pv = analysis.substring(evalAt + 5).trim();
+                                int space = pv.indexOf(' ');
+                                if (space >= 0) {
+                                    pv = pv.substring(space + 1).trim();
+                                    int end = pv.indexOf(' '); if (end >= 0) pv = pv.substring(0, end);
+                                    org.petero.droidfish.gamelogic.Move move = org.petero.droidfish.gamelogic.TextIO.stringToMove(new Position(latestPosition), pv);
+                                    if (move != null) tournamentBoard.setMoveHints(java.util.Collections.singletonList(move));
+                                }
+                            }
+                        } catch (RuntimeException ignored) { }
+                    } else if (tournamentBoard != null) tournamentBoard.setMoveHints(null);
                 });
             }
             @Override public void onReviewPosition(Position position, int ply, int totalPlies,
                                                    String whiteAnalysis, String blackAnalysis, long moveTimeMs) {
                 runOnUiThread(() -> {
+                    latestPosition = new Position(position);
                     tournamentBoard.setPosition(position);
                     whiteAnalysisText.setText(whiteAnalysis);
                     blackAnalysisText.setText(blackAnalysis);
                     moveStatusText.setText("PAUSED · Reviewing ply " + ply + "/" + totalPlies + " · Next/Previous to navigate");
-                    moveTimeText.setText("Move time: " + (ply == 0 ? "—" : formatDuration(moveTimeMs)));
+                    String used = ply == 0 ? "—" : formatClockDuration(moveTimeMs);
+                    if (ply > 0 && (ply % 2 == 1)) whiteMoveTimeText.setText(used); else if (ply > 0) blackMoveTimeText.setText(used);
                 });
             }
-            @Override public void onMoveTime(long moveTimeMs, String openingName) {
+            @Override public void onMoveTime(boolean whiteMoved, long moveTimeMs, String openingName) {
                 runOnUiThread(() -> {
-                    if (moveTimeText != null) moveTimeText.setText("Last move time: " + (moveTimeMs <= 0 ? "—" : formatDuration(moveTimeMs)));
+                    TextView target = whiteMoved ? whiteMoveTimeText : blackMoveTimeText;
+                    if (target != null) target.setText(moveTimeMs <= 0 ? "—" : formatClockDuration(moveTimeMs));
                     if (openingText != null) openingText.setText("Opening: " + (openingName == null || openingName.isEmpty() ? "Starting position" : openingName));
                 });
             }
@@ -470,6 +523,11 @@ public final class TournamentActivity extends Activity {
                 }).setNegativeButton("Cancel", null).show();
     }
 
+    private String formatClockDuration(long millis) {
+        long safe = Math.max(0, millis);
+        return String.format(java.util.Locale.US, "%d:%02d.%d", (safe / 60000), (safe / 1000) % 60, (safe % 1000) / 100);
+    }
+
     private String formatDuration(long millis) {
         long safe = Math.max(0, millis);
         return String.format(java.util.Locale.US, "%d.%03ds", safe / 1000, safe % 1000);
@@ -499,7 +557,21 @@ public final class TournamentActivity extends Activity {
                 .replaceAll("\\s+", " ").replaceAll("[ .]+$", "");
         if (safeName.isEmpty()) safeName = "Tournament";
         byte[] bytes = tournament.exportPgn().getBytes(Charset.forName("UTF-8"));
-        File publicFile = new File(new File(Environment.getExternalStorageDirectory(), "DroidFish/pgn"), safeName + ".pgn");
+        File pgnDir = new File(new File(Environment.getExternalStorageDirectory(), "DroidFish"), "pgn");
+        File publicFile = new File(pgnDir, safeName + ".pgn");
+        // Preserve an unrelated PGN with the same filename. Reuse this tournament's file
+        // only when it already carries this exact Event tag; otherwise choose a free suffix.
+        if (publicFile.exists()) {
+            String existing = readSmallText(publicFile);
+            String eventTag = "[Event \"" + tournament.title().replace("\\", "\\\\").replace("\"", "\\\"") + "\"]";
+            if (!existing.contains(eventTag)) {
+                int suffix = 2;
+                File candidate;
+                do { candidate = new File(pgnDir, safeName + " (" + suffix++ + ").pgn"); }
+                while (candidate.exists() && !readSmallText(candidate).contains(eventTag));
+                publicFile = candidate;
+            }
+        }
         try {
             File dir = publicFile.getParentFile();
             if (dir != null && !dir.exists() && !dir.mkdirs() && !dir.isDirectory())
@@ -517,6 +589,16 @@ public final class TournamentActivity extends Activity {
             writeSynced(fallback, bytes);
             return fallback;
         }
+    }
+
+    private String readSmallText(File file) {
+        try {
+            byte[] data = new byte[(int)Math.min(file.length(), 2 * 1024 * 1024)];
+            try (java.io.FileInputStream in = new java.io.FileInputStream(file)) {
+                int offset = 0; while (offset < data.length) { int n = in.read(data, offset, data.length - offset); if (n < 0) break; offset += n; }
+                return new String(data, 0, offset, Charset.forName("UTF-8"));
+            }
+        } catch (IOException ignored) { return ""; }
     }
 
     private void writeSynced(File file, byte[] bytes) throws IOException {
