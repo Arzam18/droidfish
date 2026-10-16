@@ -46,6 +46,7 @@ public final class TournamentRunner {
     private final long baseTimeMs, incrementMs;
     private final String openingPgn;
     private final int openingPlies;
+    private final int openingStartIndex;
     private final boolean repeatOpening;
     private final DroidComputerPlayer whitePlayer, blackPlayer;
     private Game game;
@@ -79,6 +80,13 @@ public final class TournamentRunner {
                             EngineOptions engineOptions, BookOptions bookOptions,
                             long baseTimeMs, long incrementMs,
                             String openingPgn, int openingPlies, boolean repeatOpening) {
+        this(tournament, listener, engineOptions, bookOptions, baseTimeMs, incrementMs, openingPgn, openingPlies, repeatOpening, tournament == null ? 1 : tournament.openingStartIndex());
+    }
+
+    public TournamentRunner(TournamentManager tournament, Listener listener,
+                            EngineOptions engineOptions, BookOptions bookOptions,
+                            long baseTimeMs, long incrementMs,
+                            String openingPgn, int openingPlies, boolean repeatOpening, int openingStartIndex) {
         if (tournament == null || listener == null) throw new IllegalArgumentException("Tournament and listener are required");
         if (baseTimeMs < 1 || baseTimeMs > Integer.MAX_VALUE || incrementMs < 0 || incrementMs > Integer.MAX_VALUE)
             throw new IllegalArgumentException("Time values are outside supported UCI millisecond range");
@@ -91,6 +99,7 @@ public final class TournamentRunner {
         this.openingPgn = openingPgn == null ? "" : openingPgn;
         this.openingPlies = Math.max(0, openingPlies);
         this.repeatOpening = repeatOpening;
+        this.openingStartIndex = Math.max(1, openingStartIndex);
         pgnOptions = new PGNOptions();
         whitePlayer = new DroidComputerPlayer(new EngineListener(true));
         blackPlayer = new DroidComputerPlayer(new EngineListener(false));
@@ -219,7 +228,7 @@ public final class TournamentRunner {
         clock = new CetClock(baseTimeMs, incrementMs);
         game.tree.setTournamentOpening(currentOpeningName);
         if (openingPlies > 0 && !openingPgn.isEmpty()) {
-            int openingIndex = repeatOpening ? Math.max(0, (pairing.gameNumber - 1) / 2) : pairing.index;
+            int openingIndex = (openingStartIndex - 1) + (repeatOpening ? Math.max(0, (pairing.gameNumber - 1) / 2) : pairing.index);
             String selectedOpening = PgnOpeningBook.gameAt(openingPgn, openingIndex);
             currentOpeningName = PgnOpeningBook.tagValue(selectedOpening, "Opening");
             if (currentOpeningName.isEmpty()) currentOpeningName = PgnOpeningBook.tagValue(selectedOpening, "ECO");
