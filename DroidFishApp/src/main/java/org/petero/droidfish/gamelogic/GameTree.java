@@ -76,6 +76,29 @@ public class GameTree {
         updateListener();
     }
 
+    /** Set tournament-specific PGN tags for an engine tournament game. */
+    public final void setTournamentMetadata(String eventName, String siteName, String roundName,
+                                            String eventType, String timeControlTag) {
+        event = eventName == null || eventName.trim().isEmpty() ? "DroidFish Tournament" : eventName.trim();
+        site = siteName == null || siteName.trim().isEmpty() ? "DroidFish" : siteName.trim();
+        round = roundName == null || roundName.trim().isEmpty() ? "?" : roundName.trim();
+        if (timeControlTag != null && !timeControlTag.trim().isEmpty()) timeControl = timeControlTag.trim();
+        if (eventType != null && !eventType.trim().isEmpty()) setTagPair("EventType", eventType.trim());
+        updateListener();
+    }
+
+    /** Add/update a final-game metadata tag before exporting tournament PGN. */
+    public final void setTournamentTermination(String termination) {
+        if (termination != null && !termination.trim().isEmpty()) setTagPair("Termination", termination.trim());
+    }
+
+    private void setTagPair(String name, String value) {
+        for (TagPair pair : tagPairs) {
+            if (pair.tagName.equals(name)) { pair.tagValue = value; return; }
+        }
+        TagPair pair = new TagPair(); pair.tagName = name; pair.tagValue = value; tagPairs.add(pair);
+    }
+
     /** Set start position. Drops the whole game tree. */
     final void setStartPos(Position pos) {
         event = "?";
@@ -292,6 +315,8 @@ public class GameTree {
     /** Walks the game tree in PGN export order. */
     public final void pgnTreeWalker(PGNOptions options, PgnToken.PgnTokenReceiver out) {
         String pgnResultString = getPGNResultStringMainLine();
+        // Include the main-line ply count, as tournament PGN viewers commonly expect it.
+        setTagPair("PlyCount", Integer.toString(currentNode.getPathFromRoot().size()));
 
         // Write seven tag roster
         addTagPair(out, "Event",  event);

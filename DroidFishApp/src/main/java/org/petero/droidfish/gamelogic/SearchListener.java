@@ -26,19 +26,19 @@ import java.util.ArrayList;
  */
 public interface SearchListener {
     public final static class PvInfo {
-        int depth;
-        int score;
-        int time;
-        long nodes;
-        int nps;
-        long tbHits;
-        int hash;
-        int seldepth;
-        boolean isMate;
-        boolean upperBound;
-        boolean lowerBound;
-        ArrayList<Move> pv;
-        String pvStr = "";
+        public int depth;
+        public int score;
+        public int time;
+        public long nodes;
+        public int nps;
+        public long tbHits;
+        public int hash;
+        public int seldepth;
+        public boolean isMate;
+        public boolean upperBound;
+        public boolean lowerBound;
+        public ArrayList<Move> pv;
+        public String pvStr = "";
 
         public PvInfo(int depth, int score, int time, long nodes, int nps, long tbHits, int hash, int seldepth,
                       boolean isMate, boolean upperBound, boolean lowerBound, ArrayList<Move> pv) {
