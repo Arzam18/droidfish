@@ -41,6 +41,7 @@ public final class TournamentActivity extends Activity {
     private final ArrayList<EngineChoice> selectedEngines = new ArrayList<>();
     private TextView selectedText, statusText, standingsText, clockText, tournamentTitleText;
     private TextView whiteClockText, blackClockText, whiteNameText, blackNameText, moveStatusText;
+    private TextView whiteAnalysisText, blackAnalysisText;
     private ChessBoardPlay tournamentBoard;
     private View setupView, playView;
     private Spinner formatSpinner;
@@ -129,6 +130,11 @@ public final class TournamentActivity extends Activity {
         blackClockText.setTextSize(25);
         blackClockText.setTypeface(null, android.graphics.Typeface.BOLD);
         page.addView(blackClockText, fullWidth());
+        blackAnalysisText = text("BLACK analysis waiting…");
+        blackAnalysisText.setTextSize(11);
+        blackAnalysisText.setMaxLines(3);
+        blackAnalysisText.setTextColor(0xFFD5D5D5);
+        page.addView(blackAnalysisText, fullWidth());
 
         FrameLayout boardFrame = new FrameLayout(this);
         LinearLayout.LayoutParams frameParams = new LinearLayout.LayoutParams(
@@ -153,6 +159,11 @@ public final class TournamentActivity extends Activity {
         whiteClockText.setTextSize(25);
         whiteClockText.setTypeface(null, android.graphics.Typeface.BOLD);
         page.addView(whiteClockText, fullWidth());
+        whiteAnalysisText = text("WHITE analysis waiting…");
+        whiteAnalysisText.setTextSize(11);
+        whiteAnalysisText.setMaxLines(3);
+        whiteAnalysisText.setTextColor(0xFFD5D5D5);
+        page.addView(whiteAnalysisText, fullWidth());
         moveStatusText = text("Waiting for tournament");
         page.addView(moveStatusText, fullWidth());
 
@@ -333,6 +344,12 @@ public final class TournamentActivity extends Activity {
                     blackClockText.setAlpha(whiteToMove ? 0.72f : 1.0f);
                     moveStatusText.setText((whiteToMove ? "White to move" : "Black to move") +
                             "  ·  " + whiteName + " vs " + blackName);
+                });
+            }
+            @Override public void onEngineAnalysis(boolean white, String analysis) {
+                runOnUiThread(() -> {
+                    TextView target = white ? whiteAnalysisText : blackAnalysisText;
+                    if (target != null) target.setText(analysis);
                 });
             }
             @Override public void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn) {
