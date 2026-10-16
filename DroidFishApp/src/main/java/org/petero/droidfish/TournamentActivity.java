@@ -41,7 +41,8 @@ public final class TournamentActivity extends Activity {
     private final ArrayList<EngineChoice> selectedEngines = new ArrayList<>();
     private TextView selectedText, statusText, standingsText, clockText, tournamentTitleText;
     private TextView whiteClockText, blackClockText, whiteNameText, blackNameText, moveStatusText;
-    private TextView whiteAnalysisText, blackAnalysisText;
+    private TextView whiteAnalysisText, blackAnalysisText, moveTimeText, openingText;
+    private Button previousMoveButton, nextMoveButton;
     private ChessBoardPlay tournamentBoard;
     private View setupView, playView;
     private Spinner formatSpinner;
@@ -164,8 +165,27 @@ public final class TournamentActivity extends Activity {
         whiteAnalysisText.setMaxLines(3);
         whiteAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(whiteAnalysisText, fullWidth());
+        moveTimeText = text("Last move time: —");
+        moveTimeText.setTextSize(13);
+        page.addView(moveTimeText, fullWidth());
+        openingText = text("Opening: Starting position");
+        openingText.setTextSize(13);
+        page.addView(openingText, fullWidth());
         moveStatusText = text("Waiting for tournament");
         page.addView(moveStatusText, fullWidth());
+
+        LinearLayout reviewControls = new LinearLayout(this);
+        reviewControls.setOrientation(LinearLayout.HORIZONTAL);
+        previousMoveButton = new Button(this); previousMoveButton.setText("◀ Move");
+        nextMoveButton = new Button(this); nextMoveButton.setText("Move ▶");
+        Button adjudicateButton = new Button(this); adjudicateButton.setText("Adjudicate");
+        reviewControls.addView(previousMoveButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        reviewControls.addView(nextMoveButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        reviewControls.addView(adjudicateButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        page.addView(reviewControls, fullWidth());
+        previousMoveButton.setOnClickListener(v -> { if (runner != null) runner.reviewPreviousMove(); });
+        nextMoveButton.setOnClickListener(v -> { if (runner != null) runner.reviewNextMove(); });
+        adjudicateButton.setOnClickListener(v -> showAdjudicationDialog());
 
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
@@ -329,6 +349,8 @@ public final class TournamentActivity extends Activity {
                     if (playPauseButton != null) playPauseButton.setText(runner != null && runner.isPaused() ? "Play" : "Pause");
                     statusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + ": " + white + " vs " + black);
                     moveStatusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + " · " + white + " vs " + black);
+                    if (openingText != null) openingText.setText("Opening: Starting position");
+                    if (moveTimeText != null) moveTimeText.setText("Last move time: —");
                     whiteNameText.setText("WHITE  ·  " + white);
                     blackNameText.setText("BLACK  ·  " + black);
                 });
@@ -350,6 +372,22 @@ public final class TournamentActivity extends Activity {
                 runOnUiThread(() -> {
                     TextView target = white ? whiteAnalysisText : blackAnalysisText;
                     if (target != null) target.setText(analysis);
+                });
+            }
+            @Override public void onReviewPosition(Position position, int ply, int totalPlies,
+                                                   String whiteAnalysis, String blackAnalysis, long moveTimeMs) {
+                runOnUiThread(() -> {
+                    tournamentBoard.setPosition(position);
+                    whiteAnalysisText.setText(whiteAnalysis);
+                    blackAnalysisText.setText(blackAnalysis);
+                    moveStatusText.setText("PAUSED · Reviewing ply " + ply + "/" + totalPlies + " · Next/Previous to navigate");
+                    moveTimeText.setText("Move time: " + (ply == 0 ? "—" : formatDuration(moveTimeMs)));
+                });
+            }
+            @Override public void onMoveTime(long moveTimeMs, String openingName) {
+                runOnUiThread(() -> {
+                    if (moveTimeText != null) moveTimeText.setText("Last move time: " + (moveTimeMs <= 0 ? "—" : formatDuration(moveTimeMs)));
+                    if (openingText != null) openingText.setText("Opening: " + (openingName == null || openingName.isEmpty() ? "Starting position" : openingName));
                 });
             }
             @Override public void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn) {
@@ -413,6 +451,28 @@ public final class TournamentActivity extends Activity {
                     .append(" pts  (+").append(s.wins).append(" =").append(s.draws).append(" -").append(s.losses).append(")\n");
         }
         return out.toString();
+    }
+
+    private void showAdjudicationDialog() {
+        if (runner == null || !runner.isPaused()) {
+            Toast.makeText(this, "Pause the tournament before adjudicating the current game", Toast.LENGTH_LONG).show();
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle("Adjudicate current game")
+                .setItems(new String[]{"White wins (1-0)", "Draw (1/2-1/2)", "Black wins (0-1)"}, (dialog, which) -> {
+                    String result = which == 0 ? "1-0" : which == 1 ? "1/2-1/2" : "0-1";
+                    new AlertDialog.Builder(this).setTitle("Confirm adjudication")
+                            .setMessage("Record result " + result + " and finish this game?")
+                            .setNegativeButton("Cancel", null)
+                            .setPositiveButton("Adjudicate", (d, w) -> {
+                                if (runner != null) runner.adjudicate(result);
+                            }).show();
+                }).setNegativeButton("Cancel", null).show();
+    }
+
+    private String formatDuration(long millis) {
+        long safe = Math.max(0, millis);
+        return String.format(java.util.Locale.US, "%d.%03ds", safe / 1000, safe % 1000);
     }
 
     private void togglePauseResume() {
