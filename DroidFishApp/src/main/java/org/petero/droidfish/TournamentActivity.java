@@ -98,7 +98,7 @@ public final class TournamentActivity extends Activity {
         timeModeSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
                 new String[]{"Time Clock: Time + Increment", "Time per move", "Depth per move", "Nodes per move"}));
         root.addView(timeModeSpinner, fullWidth());
-        baseInput = field("Base time per side (seconds)", "30"); root.addView(baseInput, fullWidth());
+        baseInput = field("Base time per side (minutes; e.g. 1 or 10)", "1"); root.addView(baseInput, fullWidth());
         incrementInput = field("Increment per move (seconds; e.g. 1 for +1)", "0.5"); root.addView(incrementInput, fullWidth());
         limitInput = field("Time per move (seconds), depth, or nodes", "2"); root.addView(limitInput, fullWidth());
         timeModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
@@ -113,12 +113,20 @@ public final class TournamentActivity extends Activity {
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
         });
-        openingPliesInput = field("PGN opening plies (0 = disabled)", "0"); root.addView(openingPliesInput, fullWidth());
+        openingPliesInput = field("Opening plies (full plies; 0 = disabled)", "0"); root.addView(openingPliesInput, fullWidth());
         repeatOpeningCheck = new CheckBox(this); repeatOpeningCheck.setText("Repeat opening for paired color-reversal games");
         root.addView(repeatOpeningCheck, fullWidth());
-        openingInput = field("Opening PGN (paste one or more games)", "");
+        openingInput = field("Opening PGN (paste one or more games, or select a PGN file below)", "");
         openingInput.setMinLines(3); openingInput.setGravity(android.view.Gravity.TOP);
         root.addView(openingInput, fullWidth());
+        Button choosePgnButton = new Button(this);
+        choosePgnButton.setText("Choose opening PGN file");
+        root.addView(choosePgnButton, fullWidth());
+        choosePgnButton.setOnClickListener(v -> chooseOpeningFile(false));
+        Button chooseBinButton = new Button(this);
+        chooseBinButton.setText("Choose Polyglot book.bin file");
+        root.addView(chooseBinButton, fullWidth());
+        chooseBinButton.setOnClickListener(v -> chooseOpeningFile(true));
         showTournamentArrowsCheck = new CheckBox(this);
         showTournamentArrowsCheck.setText("Show engine thinking arrows on board");
         showTournamentArrowsCheck.setChecked(getPreferences(MODE_PRIVATE).getBoolean("tournamentThinkingArrows", true));
@@ -377,13 +385,46 @@ public final class TournamentActivity extends Activity {
         selectedText.setText(b.length() == 0 ? "No engines selected" : b.toString());
     }
 
+    private static final int REQUEST_OPENING_PGN = 7121;
+    private static final int REQUEST_OPENING_BIN = 7122;
+    private void chooseOpeningFile(boolean polyglot) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType(polyglot ? "application/octet-stream" : "application/x-chess-pgn");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, polyglot
+                ? new String[]{"application/octet-stream", "application/x-binary"}
+                : new String[]{"application/x-chess-pgn", "text/plain", "application/octet-stream"});
+        try { startActivityForResult(intent, polyglot ? REQUEST_OPENING_BIN : REQUEST_OPENING_PGN); }
+        catch (Exception e) { Toast.makeText(this, "No file picker available: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        if (requestCode == REQUEST_OPENING_BIN) {
+            Toast.makeText(this, "Polyglot book selected. Its move-selection mode must be configured before it can be used by the tournament runner.", Toast.LENGTH_LONG).show();
+            getPreferences(MODE_PRIVATE).edit().putString("tournamentPolyglotUri", data.getData().toString()).apply();
+            return;
+        }
+        if (requestCode != REQUEST_OPENING_PGN) return;
+        try (java.io.InputStream in = getContentResolver().openInputStream(data.getData())) {
+            if (in == null) throw new IOException("Could not open selected PGN");
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[8192]; int n; while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
+            String pgn = new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+            if (!pgn.contains("[") && pgn.trim().isEmpty()) throw new IOException("Selected PGN is empty");
+            openingInput.setText(pgn);
+            Toast.makeText(this, "Opening PGN loaded", Toast.LENGTH_SHORT).show();
+        } catch (Exception e) { Toast.makeText(this, "Could not load PGN: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
+    }
+
     private void startTournament() {
         if (runner != null) { Toast.makeText(this, "A tournament is already running", Toast.LENGTH_SHORT).show(); return; }
         if (selectedEngines.size() < 2) { Toast.makeText(this, "Select at least two engines", Toast.LENGTH_LONG).show(); return; }
         try {
             int games = positiveInt(gamesInput, "games per pairing", 1);
             int timeModeIndex = timeModeSpinner.getSelectedItemPosition();
-            int seconds = timeModeIndex == 0 ? positiveInt(baseInput, "base time", 1) : 30;
+            int seconds = timeModeIndex == 0 ? (int)Math.round(positiveDouble(baseInput, "base time in minutes", 1.0 / 60.0) * 60.0) : 30;
             int increment = timeModeIndex == 0 ? (int)Math.round(nonNegativeDouble(incrementInput, "increment") * 1000.0) : 0;
             int limitValue = timeModeIndex == 1 ? (int)Math.min(Integer.MAX_VALUE / 1000L, Math.round(positiveDouble(limitInput, "seconds per move", 1) * 1000.0)) :
                     (timeModeIndex == 2 ? positiveInt(limitInput, "depth per move", 1) :
@@ -419,7 +460,7 @@ public final class TournamentActivity extends Activity {
             titleInput.setText(tournament.title());
             formatSpinner.setSelection(tournament.format().ordinal());
             gamesInput.setText(String.valueOf(tournament.gamesPerPair()));
-            baseInput.setText(String.valueOf(Math.max(1, tournament.baseTimeMs() / 1000)));
+            baseInput.setText(String.valueOf(tournament.baseTimeMs() / 60000.0));
             incrementInput.setText(String.valueOf(tournament.incrementMs() / 1000.0));
             timeModeSpinner.setSelection(tournament.timeMode().ordinal());
             limitInput.setText(tournament.timeMode() == TournamentManager.TimeMode.MOVE_TIME ? String.valueOf(tournament.limitValue() / 1000.0) : String.valueOf(tournament.limitValue()));
@@ -736,10 +777,18 @@ public final class TournamentActivity extends Activity {
 
     private int dp(int value) { return (int)(value * getResources().getDisplayMetrics().density + 0.5f); }
     private int positiveInt(EditText field, String name, int minimum) {
-        int v = Integer.parseInt(field.getText().toString().trim()); if (v < minimum) throw new IllegalArgumentException(name + " must be at least " + minimum); return v;
+        String raw = field.getText().toString().trim();
+        if (raw.isEmpty()) throw new IllegalArgumentException(name + " is required");
+        int v;
+        try { v = Integer.parseInt(raw); } catch (NumberFormatException e) { throw new IllegalArgumentException(name + " must be a whole number"); }
+        if (v < minimum) throw new IllegalArgumentException(name + " must be at least " + minimum); return v;
     }
     private int nonNegativeInt(EditText field, String name) {
-        int v = Integer.parseInt(field.getText().toString().trim()); if (v < 0) throw new IllegalArgumentException(name + " cannot be negative"); return v;
+        String raw = field.getText().toString().trim();
+        if (raw.isEmpty()) return 0; // Optional setting: blank means disabled/default.
+        int v;
+        try { v = Integer.parseInt(raw); } catch (NumberFormatException e) { throw new IllegalArgumentException(name + " must be a whole number"); }
+        if (v < 0) throw new IllegalArgumentException(name + " cannot be negative"); return v;
     }
     private double positiveDouble(EditText field, String name, double minimum) {
         double v = Double.parseDouble(field.getText().toString().trim());
@@ -747,7 +796,9 @@ public final class TournamentActivity extends Activity {
         return v;
     }
     private double nonNegativeDouble(EditText field, String name) {
-        double v = Double.parseDouble(field.getText().toString().trim());
+        String raw = field.getText().toString().trim();
+        if (raw.isEmpty()) return 0.0;
+        double v = Double.parseDouble(raw);
         if (Double.isNaN(v) || Double.isInfinite(v) || v < 0) throw new IllegalArgumentException(name + " cannot be negative");
         return v;
     }
