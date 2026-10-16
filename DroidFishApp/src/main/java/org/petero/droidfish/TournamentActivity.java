@@ -189,7 +189,8 @@ public final class TournamentActivity extends Activity {
         page.addView(tournamentTitleText, fullWidth());
 
         blackNameText = text("BLACK");
-        blackNameText.setTextSize(16);
+        blackNameText.setTextSize(24);
+        blackNameText.setTypeface(null, android.graphics.Typeface.BOLD);
         page.addView(blackNameText, fullWidth());
         LinearLayout blackClockRow = new LinearLayout(this);
         blackClockRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -199,14 +200,14 @@ public final class TournamentActivity extends Activity {
         blackClockRow.addView(blackClockText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(blackClockRow, fullWidth());
         blackAnalysisText = text("BLACK analysis waiting…");
-        blackAnalysisText.setTextSize(10);
-        blackAnalysisText.setMaxLines(2);
+        blackAnalysisText.setTextSize(20);
+        blackAnalysisText.setMaxLines(5);
         blackAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(blackAnalysisText, fullWidth());
 
         FrameLayout boardFrame = new FrameLayout(this);
         LinearLayout.LayoutParams frameParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0f);
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(320));
         frameParams.topMargin = dp(4);
         frameParams.bottomMargin = dp(4);
         page.addView(boardFrame, frameParams);
@@ -233,7 +234,8 @@ public final class TournamentActivity extends Activity {
         page.addView(navigation, fullWidth());
 
         whiteNameText = text("WHITE");
-        whiteNameText.setTextSize(16);
+        whiteNameText.setTextSize(24);
+        whiteNameText.setTypeface(null, android.graphics.Typeface.BOLD);
         page.addView(whiteNameText, fullWidth());
         LinearLayout whiteClockRow = new LinearLayout(this);
         whiteClockRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -243,8 +245,8 @@ public final class TournamentActivity extends Activity {
         whiteClockRow.addView(whiteClockText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(whiteClockRow, fullWidth());
         whiteAnalysisText = text("WHITE analysis waiting…");
-        whiteAnalysisText.setTextSize(10);
-        whiteAnalysisText.setMaxLines(2);
+        whiteAnalysisText.setTextSize(20);
+        whiteAnalysisText.setMaxLines(5);
         whiteAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(whiteAnalysisText, fullWidth());
         openingText = text("Opening: Starting position");
@@ -268,8 +270,12 @@ public final class TournamentActivity extends Activity {
         page.addView(controls, fullWidth());
         playPauseButton.setOnClickListener(v -> togglePauseResume());
         results.setOnClickListener(v -> showStandingsDialog());
-        page.setOnTouchListener((v, event) -> handleBoardSwipe(event));
-        playView = page;
+        ScrollView playScroll = new ScrollView(this);
+        playScroll.setFillViewport(false);
+        playScroll.setVerticalScrollBarEnabled(true);
+        playScroll.addView(page, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        playView = playScroll;
     }
 
     private boolean handleBoardSwipe(android.view.MotionEvent event) {
@@ -507,8 +513,8 @@ public final class TournamentActivity extends Activity {
                     if (openingText != null) openingText.setText("Opening: Starting position");
                     if (whiteMoveTimeText != null) whiteMoveTimeText.setText("—");
                     if (blackMoveTimeText != null) blackMoveTimeText.setText("—");
-                    whiteNameText.setText("WHITE  ·  " + white);
-                    blackNameText.setText("BLACK  ·  " + black);
+                    whiteNameText.setText(white);
+                    blackNameText.setText(black);
                 });
             }
             @Override public void onPositionChanged(Position position, boolean whiteToMove,
