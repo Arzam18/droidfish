@@ -1,6 +1,9 @@
 package org.petero.droidfish;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Intent;
 import android.app.AlertDialog;
 import android.os.Bundle;
 import android.os.Environment;
@@ -122,8 +125,10 @@ public final class TournamentActivity extends Activity {
                 float dx = event.getX() - touchDownX;
                 float dy = event.getY() - touchDownY;
                 if (Math.abs(dx) > dp(80) && Math.abs(dx) > Math.abs(dy) * 1.25f) {
-                    setContentView(playView);
-                    return true;
+                    if (dx > 0) {
+                        setContentView(playView);
+                        return true;
+                    }
                 }
                 return false;
             }
@@ -155,11 +160,20 @@ public final class TournamentActivity extends Activity {
         blackMoveTimeText = text("—"); blackMoveTimeText.setTextSize(25); blackMoveTimeText.setTypeface(null, android.graphics.Typeface.BOLD);
         blackClockText = text("00:30.0"); blackClockText.setTextSize(25); blackClockText.setTypeface(null, android.graphics.Typeface.BOLD); blackClockText.setGravity(android.view.Gravity.RIGHT);
         blackClockRow.addView(blackMoveTimeText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout navigation = new LinearLayout(this);
+        navigation.setOrientation(LinearLayout.HORIZONTAL);
+        previousMoveButton = new Button(this); previousMoveButton.setText("◀");
+        nextMoveButton = new Button(this); nextMoveButton.setText("▶");
+        previousMoveButton.setMinWidth(dp(40)); nextMoveButton.setMinWidth(dp(40));
+        previousMoveButton.setPadding(dp(4), 0, dp(4), 0); nextMoveButton.setPadding(dp(4), 0, dp(4), 0);
+        navigation.addView(previousMoveButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        navigation.addView(nextMoveButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        blackClockRow.addView(navigation, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         blackClockRow.addView(blackClockText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(blackClockRow, fullWidth());
         blackAnalysisText = text("BLACK analysis waiting…");
-        blackAnalysisText.setTextSize(11);
-        blackAnalysisText.setMaxLines(3);
+        blackAnalysisText.setTextSize(10);
+        blackAnalysisText.setMaxLines(2);
         blackAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(blackAnalysisText, fullWidth());
 
@@ -178,6 +192,8 @@ public final class TournamentActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.Gravity.CENTER);
         boardFrame.addView(tournamentBoard, boardParams);
+        boardFrame.setOnTouchListener((v, event) -> handleBoardSwipe(event));
+        tournamentBoard.setOnTouchListener((v, event) -> handleBoardSwipe(event));
 
         whiteNameText = text("WHITE");
         whiteNameText.setTextSize(14);
@@ -190,8 +206,8 @@ public final class TournamentActivity extends Activity {
         whiteClockRow.addView(whiteClockText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(whiteClockRow, fullWidth());
         whiteAnalysisText = text("WHITE analysis waiting…");
-        whiteAnalysisText.setTextSize(11);
-        whiteAnalysisText.setMaxLines(3);
+        whiteAnalysisText.setTextSize(10);
+        whiteAnalysisText.setMaxLines(2);
         whiteAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(whiteAnalysisText, fullWidth());
         openingText = text("Opening: Starting position");
@@ -200,60 +216,79 @@ public final class TournamentActivity extends Activity {
         moveStatusText = text("Waiting for tournament");
         page.addView(moveStatusText, fullWidth());
 
-        LinearLayout reviewControls = new LinearLayout(this);
-        reviewControls.setOrientation(LinearLayout.HORIZONTAL);
-        previousMoveButton = new Button(this); previousMoveButton.setText("◀ Move");
-        nextMoveButton = new Button(this); nextMoveButton.setText("Move ▶");
-        Button adjudicateButton = new Button(this); adjudicateButton.setText("Adjudicate");
-        reviewControls.addView(previousMoveButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        reviewControls.addView(nextMoveButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        reviewControls.addView(adjudicateButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        page.addView(reviewControls, fullWidth());
         previousMoveButton.setOnClickListener(v -> { if (runner != null) runner.reviewPreviousMove(); });
         nextMoveButton.setOnClickListener(v -> { if (runner != null) runner.reviewNextMove(); });
-        adjudicateButton.setOnClickListener(v -> showAdjudicationDialog());
 
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
         playPauseButton = new Button(this); playPauseButton.setText("Pause");
         Button results = new Button(this); results.setText("Results");
+        Button adjudicateButton = new Button(this); adjudicateButton.setText("Adjudicate");
         controls.addView(playPauseButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(results, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        controls.addView(adjudicateButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        adjudicateButton.setOnClickListener(v -> showAdjudicationDialog());
         page.addView(controls, fullWidth());
         playPauseButton.setOnClickListener(v -> togglePauseResume());
         results.setOnClickListener(v -> showStandingsDialog());
-        page.setOnTouchListener((v, event) -> {
-            switch (event.getActionMasked()) {
-                case android.view.MotionEvent.ACTION_DOWN:
-                    touchDownX = event.getX(); touchDownY = event.getY(); return false;
-                case android.view.MotionEvent.ACTION_UP:
-                    float dx = event.getX() - touchDownX;
-                    float dy = event.getY() - touchDownY;
-                    if (Math.abs(dx) > dp(80) && Math.abs(dx) > Math.abs(dy) * 1.25f) {
-                        if (dx < 0) { // swipe left to reveal tournament setup
-                            setContentView(setupView);
-                        } else { // swipe right to return to the live board
-                            setContentView(playView);
-                        }
-                        return true;
-                    }
-                    return false;
-            }
-            return false;
-        });
+        page.setOnTouchListener((v, event) -> handleBoardSwipe(event));
         playView = page;
+    }
+
+    private boolean handleBoardSwipe(android.view.MotionEvent event) {
+        switch (event.getActionMasked()) {
+            case android.view.MotionEvent.ACTION_DOWN:
+                touchDownX = event.getX(); touchDownY = event.getY();
+                return true;
+            case android.view.MotionEvent.ACTION_UP:
+                float dx = event.getX() - touchDownX;
+                float dy = event.getY() - touchDownY;
+                if (Math.abs(dx) > dp(80) && Math.abs(dx) > Math.abs(dy) * 1.25f) {
+                    if (dx < 0) {
+                        setContentView(setupView); // swipe left: tournament setup
+                    } else {
+                        // Bring the existing main DroidFish Activity forward, leaving this
+                        // Activity underneath it so the current game and engine state survive.
+                        if (runner != null && !runner.isPaused()) {
+                            runner.pause();
+                            autoPaused = true;
+                            if (playPauseButton != null) playPauseButton.setText("Play");
+                            if (moveStatusText != null) moveStatusText.setText("PAUSED · Return to tournament to continue");
+                        }
+                        Intent main = new Intent(TournamentActivity.this, DroidFish.class);
+                        main.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+                        startActivity(main);
+                    }
+                    return true;
+                }
+                return true;
+            default:
+                return true;
+        }
     }
 
     private void showStandingsDialog() {
         try {
             TournamentManager tournament = TournamentManager.restore(this);
-            new AlertDialog.Builder(this).setTitle("Tournament standings")
-                    .setMessage(formatStandings(tournament.standings(), tournament.engines()))
-                    .setPositiveButton(android.R.string.ok, null).show();
+            final String standings = formatStandings(tournament.standings(), tournament.engines());
+            new AlertDialog.Builder(this).setTitle("Standings " + completedGameCount(tournament) + "/" + tournament.pairings().size())
+                    .setMessage(standings)
+                    .setNegativeButton("COPY", (dialog, which) -> {
+                        ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+                        if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Tournament standings", standings));
+                        Toast.makeText(this, "Standings copied", Toast.LENGTH_SHORT).show();
+                    })
+                    .setPositiveButton("OK", null).show();
         } catch (Exception e) {
+            final String standings = standingsText == null ? "No results yet" : standingsText.getText().toString();
             new AlertDialog.Builder(this).setTitle("Tournament standings")
-                    .setMessage(standingsText == null ? "No results yet" : standingsText.getText())
-                    .setPositiveButton(android.R.string.ok, null).show();
+                    .setMessage(standings)
+                    .setNegativeButton("COPY", (dialog, which) -> {
+                        ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+                        if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Tournament standings", standings));
+                        Toast.makeText(this, "Standings copied", Toast.LENGTH_SHORT).show();
+                    })
+                    .setPositiveButton("OK", null).show();
         }
     }
 
@@ -494,6 +529,14 @@ public final class TournamentActivity extends Activity {
         }
     }
 
+    private int completedGameCount(TournamentManager tournament) {
+        int count = 0;
+        for (TournamentManager.Pairing pairing : tournament.pairings()) {
+            if (pairing.isComplete()) count++;
+        }
+        return count;
+    }
+
     private String formatStandings(List<TournamentManager.Standing> standings, List<TournamentManager.Engine> engines) {
         StringBuilder out = new StringBuilder("Standings\n");
         for (int i = 0; i < standings.size(); i++) {
@@ -618,9 +661,14 @@ public final class TournamentActivity extends Activity {
 
     @Override public void onBackPressed() {
         if (runner != null) {
-            runner.pause();
-            autoPaused = false;
-            Toast.makeText(this, "Tournament paused and saved. Use Resume Saved Tournament to continue.", Toast.LENGTH_LONG).show();
+            if (!runner.isPaused()) runner.pause();
+            autoPaused = true;
+            if (playPauseButton != null) playPauseButton.setText("Play");
+            Intent main = new Intent(this, DroidFish.class);
+            main.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+            startActivity(main);
+            Toast.makeText(this, "Tournament paused. Return to this tournament to continue.", Toast.LENGTH_SHORT).show();
+            return;
         }
         super.onBackPressed();
     }

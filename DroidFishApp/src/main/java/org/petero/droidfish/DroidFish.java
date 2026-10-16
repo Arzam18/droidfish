@@ -1565,7 +1565,10 @@ public class DroidFish extends Activity
                 reShowDialog(SELECT_ENGINE_DIALOG_NOMANAGE);
             break;
         case TOURNAMENT: {
+            // Reuse an existing tournament Activity when the user returns from the main
+            // chessboard; this preserves its in-memory game, current ply, clocks and engines.
             Intent i = new Intent(DroidFish.this, TournamentActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
             startActivity(i);
             break;
         }
