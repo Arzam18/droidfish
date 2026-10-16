@@ -32,7 +32,7 @@ public final class TournamentRunner {
         /** Persistent per-engine analysis text; each side retains its last line after moving. */
         void onEngineAnalysis(boolean white, String analysis);
         void onReviewPosition(Position position, int ply, int totalPlies, String whiteAnalysis, String blackAnalysis, long moveTimeMs);
-        void onMoveTime(long moveTimeMs, String openingName);
+        void onMoveTime(boolean whiteMoved, long moveTimeMs, String openingName);
         void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn);
         void onTournamentFinished();
         void onError(String message, Throwable error);
@@ -234,7 +234,7 @@ public final class TournamentRunner {
             return;
         }
         recordPosition(0);
-        listener.onMoveTime(0, currentOpeningName);
+        listener.onMoveTime(false, 0, currentOpeningName);
         whitePlayer.setEngineOptions(engineOptions);
         blackPlayer.setEngineOptions(engineOptions);
         whitePlayer.uciNewGame();
@@ -335,7 +335,7 @@ public final class TournamentRunner {
         }
         lastMoveTimeMs = clock.lastTurnElapsedMs();
         recordPosition(lastMoveTimeMs);
-        listener.onMoveTime(lastMoveTimeMs, currentOpeningName);
+        listener.onMoveTime(!game.currPos().whiteMove, lastMoveTimeMs, currentOpeningName);
         notifyPosition();
         if (game.getGameState() != Game.GameState.ALIVE) {
             finishCurrentGame(resultForState(game.getGameState()));
