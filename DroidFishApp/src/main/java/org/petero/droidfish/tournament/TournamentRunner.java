@@ -464,8 +464,11 @@ public final class TournamentRunner {
                         cursor.makeMove(m, new org.petero.droidfish.gamelogic.UndoInfo());
                     }
                 }
-                String scoreText = pv.isMate ? (pv.score >= 0 ? "M" : "-M") + Math.abs(pv.score) :
-                        String.format(java.util.Locale.US, "%+.2f", pv.score / 100.0);
+                // UCI scores are from the engine's point of view. Convert both
+                // centipawn and mate scores to a consistent White-positive view.
+                int whitePerspectiveScore = white ? pv.score : -pv.score;
+                String scoreText = pv.isMate ? (whitePerspectiveScore >= 0 ? "+M" : "-M") + Math.abs(whitePerspectiveScore) :
+                        String.format(java.util.Locale.US, "%+.2f", whitePerspectiveScore / 100.0);
                 lastPv = "eval " + scoreText + (line.length() == 0 ? "" : "  " + line);
                 lastDepth = pv.depth;
                 lastNodes = pv.nodes;
