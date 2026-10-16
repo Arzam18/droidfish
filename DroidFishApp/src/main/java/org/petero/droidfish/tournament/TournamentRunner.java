@@ -29,6 +29,8 @@ public final class TournamentRunner {
         /** Current tournament position, copied so the UI can safely render it. */
         void onPositionChanged(Position position, boolean whiteToMove, long whiteTimeMs, long blackTimeMs,
                                String whiteName, String blackName);
+        /** Persistent per-engine analysis text; each side retains its last line after moving. */
+        void onEngineAnalysis(boolean white, String analysis);
         void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn);
         void onTournamentFinished();
         void onError(String message, Throwable error);
@@ -96,11 +98,13 @@ public final class TournamentRunner {
         paused = true;
         turnGeneration++;
         if (clock != null) clock.pause();
-        whitePlayer.shutdownEngine();
-        blackPlayer.shutdownEngine();
+        // Keep both UCI processes loaded. Stop only their current searches; pause/resume
+        // should not pay the engine startup and NNUE-loading cost again.
+        whitePlayer.stopSearch();
+        blackPlayer.stopSearch();
     }
 
-    /** Resume the same in-memory game position; engine processes are restarted cleanly. */
+    /** Resume the same in-memory game position using the already-loaded UCI processes. */
     public synchronized void resume() {
         if (stopped || finished || !paused) return;
         paused = false;
@@ -108,10 +112,9 @@ public final class TournamentRunner {
             startNextGame();
             return;
         }
-        whitePlayer.setEngineOptions(engineOptions);
-        blackPlayer.setEngineOptions(engineOptions);
-        whitePlayer.uciNewGame();
-        blackPlayer.uciNewGame();
+        // The engines were deliberately not unloaded on pause. Re-queue their configured
+        // engine IDs (a no-op when the correct process is already loaded) and continue from
+        // the exact same Game position.
         activeWhiteId = ++whiteSearchId;
         activeBlackId = ++blackSearchId;
         whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.id);
@@ -148,6 +151,9 @@ public final class TournamentRunner {
         tc.setTimeControl((int)baseTimeMs, 0, (int)incrementMs);
         game = new Game(new EmptyPgnReceiver(), tc);
         game.tree.setPlayerNames(whiteEngine.displayName, blackEngine.displayName);
+        String eventType = tournament.format().name().toLowerCase(java.util.Locale.US).replace('_', ' ');
+        game.tree.setTournamentMetadata(tournament.title(), "DroidFish", pairing.round + "." + pairing.gameNumber,
+                eventType, (baseTimeMs / 1000) + "+" + String.format(java.util.Locale.US, "%g", incrementMs / 1000.0));
         clock = new CetClock(baseTimeMs, incrementMs);
         if (openingPlies > 0 && !openingPgn.isEmpty()) {
             int openingIndex = repeatOpening ? Math.max(0, (pairing.gameNumber - 1) / 2) : pairing.index;
@@ -281,6 +287,20 @@ public final class TournamentRunner {
                 whiteMs, blackMs, whiteEngine.displayName, blackEngine.displayName);
     }
 
+    private String terminationForState(Game.GameState state) {
+        switch (state) {
+            case TIMEOUT_WHITE: case TIMEOUT_BLACK: return "time forfeit";
+            case WHITE_MATE: case BLACK_MATE: return "checkmate";
+            case RESIGN_WHITE: case RESIGN_BLACK: return "resignation";
+            case WHITE_STALEMATE: case BLACK_STALEMATE: return "stalemate";
+            case DRAW_REP: return "threefold repetition";
+            case DRAW_50: return "50-move rule";
+            case DRAW_NO_MATE: return "insufficient mating material";
+            case DRAW_AGREE: return "draw agreement";
+            default: return "adjudication";
+        }
+    }
+
     private TournamentManager.Outcome resultForState(Game.GameState state) {
         switch (state) {
             case WHITE_MATE:
@@ -302,6 +322,7 @@ public final class TournamentRunner {
     private synchronized void finishCurrentGame(TournamentManager.Outcome outcome) {
         if (stopped || finished || pairing == null || outcome == TournamentManager.Outcome.UNFINISHED) return;
         turnGeneration++;
+        game.tree.setTournamentTermination(terminationForState(game.getGameState()));
         String pgn = game.tree.toPGN(pgnOptions);
         try {
             tournament.recordResult(pairing.index, outcome, pgn);
@@ -319,11 +340,57 @@ public final class TournamentRunner {
     private final class EngineListener implements SearchListener {
         private final boolean white;
         EngineListener(boolean white) { this.white = white; }
-        @Override public void notifyDepth(int id, int depth) { }
+        private volatile int lastDepth;
+        private volatile long lastNodes;
+        private volatile int lastNps;
+        private volatile int lastTimeMs;
+        private volatile String lastPv = "";
+        @Override public void notifyDepth(int id, int depth) {
+            lastDepth = depth;
+            publishAnalysis();
+        }
         @Override public void notifyCurrMove(int id, Position pos, Move move, int moveNr) { }
-        @Override public void notifyPV(int id, Position pos, ArrayList<PvInfo> pvInfo, Move ponderMove) { }
-        @Override public void notifyStats(int id, long nodes, int nps, long tbHits, int hash, int time, int seldepth) { }
-        @Override public void notifyBookInfo(int id, String bookInfo, ArrayList<Move> moveList, String eco, int distToEcoTree) { }
+        @Override public void notifyPV(int id, Position pos, ArrayList<PvInfo> pvInfo, Move ponderMove) {
+            if (pvInfo != null && !pvInfo.isEmpty()) {
+                PvInfo pv = pvInfo.get(0);
+                StringBuilder line = new StringBuilder();
+                if (pv.pv != null) {
+                    Position cursor = new Position(pos);
+                    for (Move m : pv.pv) {
+                        String san = org.petero.droidfish.gamelogic.TextIO.moveToString(cursor, m, false, false);
+                        if (line.length() > 0) line.append(' ');
+                        line.append(san);
+                        cursor.makeMove(m, new org.petero.droidfish.gamelogic.UndoInfo());
+                    }
+                }
+                String scoreText = pv.isMate ? (pv.score >= 0 ? "M" : "-M") + Math.abs(pv.score) :
+                        String.format(java.util.Locale.US, "%+.2f", pv.score / 100.0);
+                lastPv = "eval " + scoreText + (line.length() == 0 ? "" : "  " + line);
+                lastDepth = pv.depth;
+                lastNodes = pv.nodes;
+                lastNps = pv.nps;
+                lastTimeMs = pv.time;
+                publishAnalysis();
+            }
+        }
+        @Override public void notifyStats(int id, long nodes, int nps, long tbHits, int hash, int time, int seldepth) {
+            lastNodes = nodes; lastNps = nps; lastTimeMs = time;
+            publishAnalysis();
+        }
+        @Override public void notifyBookInfo(int id, String bookInfo, ArrayList<Move> moveList, String eco, int distToEcoTree) {
+            if (bookInfo != null && !bookInfo.isEmpty()) {
+                lastPv = "Book: " + bookInfo;
+                publishAnalysis();
+            }
+        }
+        private void publishAnalysis() {
+            if (stopped || finished) return;
+            String side = white ? "WHITE" : "BLACK";
+            String text = side + "  d" + lastDepth + "  " + String.format(java.util.Locale.US, "%.2f", lastTimeMs / 1000.0) + "s  " +
+                    (lastNps >= 1000 ? String.format(java.util.Locale.US, "%.1fkn/s", lastNps / 1000.0) : lastNps + "n/s") +
+                    "  " + lastNodes + " nodes" + (lastPv.isEmpty() ? "" : "\n" + lastPv);
+            listener.onEngineAnalysis(white, text);
+        }
         @Override public void notifySearchResult(int id, String cmd, Move ponder) {
             // Stop the clock at bestmove arrival, not when the deferred board update runs.
             long arrivalNs = System.nanoTime();
