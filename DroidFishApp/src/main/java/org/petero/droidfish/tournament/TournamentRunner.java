@@ -457,10 +457,11 @@ public final class TournamentRunner {
                 StringBuilder line = new StringBuilder();
                 if (pv.pv != null) {
                     Position cursor = new Position(pos);
+                    int suggestedMoveNumber = 1;
                     for (Move m : pv.pv) {
                         String san = org.petero.droidfish.gamelogic.TextIO.moveToString(cursor, m, false, false);
                         if (line.length() > 0) line.append(' ');
-                        line.append(san);
+                        line.append(suggestedMoveNumber++).append('.').append(san);
                         cursor.makeMove(m, new org.petero.droidfish.gamelogic.UndoInfo());
                     }
                 }
@@ -487,12 +488,27 @@ public final class TournamentRunner {
                 publishAnalysis();
             }
         }
+        private String compactCount(long value) {
+            if (value >= 1_000_000) return String.format(java.util.Locale.US, "%.1fM", value / 1_000_000.0);
+            if (value >= 1_000) return String.format(java.util.Locale.US, "%.0fK", value / 1_000.0);
+            return Long.toString(value);
+        }
         private void publishAnalysis() {
             if (stopped || finished) return;
-            String side = white ? "WHITE" : "BLACK";
-            String text = side + "  d" + lastDepth + "  " + String.format(java.util.Locale.US, "%.2f", lastTimeMs / 1000.0) + "s  " +
-                    (lastNps >= 1000 ? String.format(java.util.Locale.US, "%.1fkn/s", lastNps / 1000.0) : lastNps + "n/s") +
-                    "  " + lastNodes + " nodes" + (lastPv.isEmpty() ? "" : "\n" + lastPv);
+            String score = "—";
+            String pvLine = "";
+            if (lastPv.startsWith("eval ")) {
+                String body = lastPv.substring(5).trim();
+                int separator = body.indexOf("  ");
+                score = separator >= 0 ? body.substring(0, separator).trim() : body;
+                pvLine = separator >= 0 ? body.substring(separator).trim() : "";
+            } else if (!lastPv.isEmpty()) {
+                pvLine = lastPv;
+            }
+            String nodes = compactCount(lastNodes);
+            String nps = compactCount(lastNps);
+            String text = "Eval      Depth    Nodes    NPS\n" + score + "        " + lastDepth +
+                    "        " + nodes + "      " + nps + (pvLine.isEmpty() ? "" : "\n" + pvLine);
             if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
             if (!positionHistory.isEmpty() && reviewPly < 0) {
                 int last = positionHistory.size() - 1;
