@@ -51,8 +51,8 @@ public final class TournamentActivity extends Activity {
     private Button previousMoveButton, nextMoveButton;
     private ChessBoardPlay tournamentBoard;
     private View setupView, playView;
-    private Spinner formatSpinner;
-    private EditText titleInput, gamesInput, baseInput, incrementInput, openingPliesInput, openingInput;
+    private Spinner formatSpinner, timeModeSpinner;
+    private EditText titleInput, gamesInput, baseInput, incrementInput, limitInput, openingPliesInput, openingInput;
     private CheckBox repeatOpeningCheck;
     private Button startButton, resumeButton, stopButton, exportButton, playPauseButton;
     private boolean autoPaused;
@@ -93,8 +93,26 @@ public final class TournamentActivity extends Activity {
 
         titleInput = field("Tournament name", "My Tournament"); root.addView(titleInput, fullWidth());
         gamesInput = field("Games per pairing", "2"); root.addView(gamesInput, fullWidth());
+        root.addView(text("Time control mode"), fullWidth());
+        timeModeSpinner = new Spinner(this);
+        timeModeSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
+                new String[]{"Time Clock: Time + Increment", "Time per move", "Depth per move", "Nodes per move"}));
+        root.addView(timeModeSpinner, fullWidth());
         baseInput = field("Base time per side (seconds)", "30"); root.addView(baseInput, fullWidth());
-        incrementInput = field("Increment per move (milliseconds)", "500"); root.addView(incrementInput, fullWidth());
+        incrementInput = field("Increment per move (seconds; e.g. 1 for +1)", "0.5"); root.addView(incrementInput, fullWidth());
+        limitInput = field("Time per move (seconds), depth, or nodes", "2"); root.addView(limitInput, fullWidth());
+        timeModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                boolean clockMode = position == 0;
+                baseInput.setVisibility(clockMode ? View.VISIBLE : View.GONE);
+                incrementInput.setVisibility(clockMode ? View.VISIBLE : View.GONE);
+                limitInput.setVisibility(clockMode ? View.GONE : View.VISIBLE);
+                if (position == 1) limitInput.setHint("Time per move in seconds (e.g. 2 or 5)");
+                else if (position == 2) { limitInput.setHint("Depth per move (e.g. 20)"); if ("2".equals(limitInput.getText().toString())) limitInput.setText("20"); }
+                else if (position == 3) { limitInput.setHint("Nodes per move (e.g. 100000)"); if ("20".equals(limitInput.getText().toString())) limitInput.setText("100000"); }
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
         openingPliesInput = field("PGN opening plies (0 = disabled)", "0"); root.addView(openingPliesInput, fullWidth());
         repeatOpeningCheck = new CheckBox(this); repeatOpeningCheck.setText("Repeat opening for paired color-reversal games");
         root.addView(repeatOpeningCheck, fullWidth());
@@ -364,8 +382,12 @@ public final class TournamentActivity extends Activity {
         if (selectedEngines.size() < 2) { Toast.makeText(this, "Select at least two engines", Toast.LENGTH_LONG).show(); return; }
         try {
             int games = positiveInt(gamesInput, "games per pairing", 1);
-            int seconds = positiveInt(baseInput, "base time", 1);
-            int increment = nonNegativeInt(incrementInput, "increment");
+            int timeModeIndex = timeModeSpinner.getSelectedItemPosition();
+            int seconds = timeModeIndex == 0 ? positiveInt(baseInput, "base time", 1) : 30;
+            int increment = timeModeIndex == 0 ? (int)Math.round(nonNegativeDouble(incrementInput, "increment") * 1000.0) : 0;
+            int limitValue = timeModeIndex == 1 ? (int)Math.min(Integer.MAX_VALUE / 1000L, Math.round(positiveDouble(limitInput, "seconds per move", 1) * 1000.0)) :
+                    (timeModeIndex == 2 ? positiveInt(limitInput, "depth per move", 1) :
+                    (timeModeIndex == 3 ? positiveInt(limitInput, "nodes per move", 1) : 30));
             int openingPlies = nonNegativeInt(openingPliesInput, "opening plies");
             if (seconds > Integer.MAX_VALUE / 1000) throw new IllegalArgumentException("Base time is too large");
             TournamentManager.Format format = TournamentManager.Format.values()[formatSpinner.getSelectedItemPosition()];
@@ -377,7 +399,7 @@ public final class TournamentActivity extends Activity {
             if (tournamentName.isEmpty()) tournamentName = "My Tournament";
             TournamentManager tournament = new TournamentManager(this, tournamentName, format,
                     engines, games, seconds * 1000L, increment, openingInput.getText().toString(), openingPlies,
-                    repeatOpeningCheck.isChecked());
+                    repeatOpeningCheck.isChecked(), TournamentManager.TimeMode.values()[timeModeIndex], limitValue);
             tournament.save();
             launchTournament(tournament);
         } catch (Exception e) {
@@ -398,7 +420,9 @@ public final class TournamentActivity extends Activity {
             formatSpinner.setSelection(tournament.format().ordinal());
             gamesInput.setText(String.valueOf(tournament.gamesPerPair()));
             baseInput.setText(String.valueOf(Math.max(1, tournament.baseTimeMs() / 1000)));
-            incrementInput.setText(String.valueOf(tournament.incrementMs()));
+            incrementInput.setText(String.valueOf(tournament.incrementMs() / 1000.0));
+            timeModeSpinner.setSelection(tournament.timeMode().ordinal());
+            limitInput.setText(tournament.timeMode() == TournamentManager.TimeMode.MOVE_TIME ? String.valueOf(tournament.limitValue() / 1000.0) : String.valueOf(tournament.limitValue()));
             openingPliesInput.setText(String.valueOf(tournament.openingPlies()));
             openingInput.setText(tournament.openingPgn());
             repeatOpeningCheck.setChecked(tournament.repeatOpening());
@@ -716,5 +740,15 @@ public final class TournamentActivity extends Activity {
     }
     private int nonNegativeInt(EditText field, String name) {
         int v = Integer.parseInt(field.getText().toString().trim()); if (v < 0) throw new IllegalArgumentException(name + " cannot be negative"); return v;
+    }
+    private double positiveDouble(EditText field, String name, double minimum) {
+        double v = Double.parseDouble(field.getText().toString().trim());
+        if (Double.isNaN(v) || Double.isInfinite(v) || v < minimum) throw new IllegalArgumentException(name + " must be at least " + minimum);
+        return v;
+    }
+    private double nonNegativeDouble(EditText field, String name) {
+        double v = Double.parseDouble(field.getText().toString().trim());
+        if (Double.isNaN(v) || Double.isInfinite(v) || v < 0) throw new IllegalArgumentException(name + " cannot be negative");
+        return v;
     }
 }
