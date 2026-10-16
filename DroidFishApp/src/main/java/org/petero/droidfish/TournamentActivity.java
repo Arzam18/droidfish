@@ -12,6 +12,7 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.FrameLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -39,7 +40,9 @@ public final class TournamentActivity extends Activity {
     private final ArrayList<EngineChoice> availableEngines = new ArrayList<>();
     private final ArrayList<EngineChoice> selectedEngines = new ArrayList<>();
     private TextView selectedText, statusText, standingsText, clockText;
+    private TextView whiteClockText, blackClockText, whiteNameText, blackNameText, moveStatusText;
     private ChessBoardPlay tournamentBoard;
+    private View setupView, playView;
     private Spinner formatSpinner;
     private EditText gamesInput, baseInput, incrementInput, openingPliesInput, openingInput;
     private CheckBox repeatOpeningCheck;
@@ -73,21 +76,6 @@ public final class TournamentActivity extends Activity {
         selectedText = text("No engines selected"); root.addView(selectedText, fullWidth());
         choose.setOnClickListener(v -> chooseEngines());
 
-        // Render the runner's actual Game position on the tournament screen. Previously the
-        // runner maintained a private Game but the UI only showed its status and standings.
-        tournamentBoard = new ChessBoardPlay(this, null);
-        tournamentBoard.setClickable(false);
-        tournamentBoard.setFocusable(false);
-        tournamentBoard.highlightLastMove = true;
-        LinearLayout.LayoutParams boardParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(340));
-        boardParams.topMargin = dp(8);
-        boardParams.bottomMargin = dp(8);
-        root.addView(tournamentBoard, boardParams);
-        tournamentBoard.setPosition(new Position());
-        clockText = text("White: --:--   Black: --:--");
-        root.addView(clockText, fullWidth());
-
         root.addView(text("Tournament format"), fullWidth());
         formatSpinner = new Spinner(this);
         formatSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
@@ -114,7 +102,98 @@ public final class TournamentActivity extends Activity {
         resumeButton.setOnClickListener(v -> resumeTournament());
         stopButton.setOnClickListener(v -> stopTournament());
         exportButton.setOnClickListener(v -> exportTournamentPgn());
-        setContentView(scroll);
+        setupView = scroll;
+        buildPlayUi();
+        setContentView(setupView);
+    }
+
+    /** Dedicated live-game layout: large centered board, player clocks and compact controls. */
+    private void buildPlayUi() {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(12), dp(8), dp(12), dp(8));
+        page.setBackgroundColor(0xFF303030);
+
+        TextView title = text("TOURNAMENT GAME");
+        title.setTextSize(18);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        page.addView(title, fullWidth());
+
+        blackNameText = text("BLACK");
+        blackNameText.setTextSize(14);
+        page.addView(blackNameText, fullWidth());
+        blackClockText = text("00:30.0");
+        blackClockText.setTextSize(25);
+        blackClockText.setTypeface(null, android.graphics.Typeface.BOLD);
+        page.addView(blackClockText, fullWidth());
+
+        FrameLayout boardFrame = new FrameLayout(this);
+        LinearLayout.LayoutParams frameParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0f);
+        frameParams.topMargin = dp(4);
+        frameParams.bottomMargin = dp(4);
+        page.addView(boardFrame, frameParams);
+        tournamentBoard = new TournamentChessBoard(this);
+        tournamentBoard.setClickable(false);
+        tournamentBoard.setFocusable(false);
+        tournamentBoard.highlightLastMove = true;
+        tournamentBoard.setPosition(new Position());
+        FrameLayout.LayoutParams boardParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.Gravity.CENTER);
+        boardFrame.addView(tournamentBoard, boardParams);
+
+        whiteNameText = text("WHITE");
+        whiteNameText.setTextSize(14);
+        page.addView(whiteNameText, fullWidth());
+        whiteClockText = text("00:30.0");
+        whiteClockText.setTextSize(25);
+        whiteClockText.setTypeface(null, android.graphics.Typeface.BOLD);
+        page.addView(whiteClockText, fullWidth());
+        moveStatusText = text("Waiting for tournament");
+        page.addView(moveStatusText, fullWidth());
+
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.HORIZONTAL);
+        Button stop = new Button(this); stop.setText("Stop");
+        Button results = new Button(this); results.setText("Results");
+        Button export = new Button(this); export.setText("Export PGN");
+        Button setup = new Button(this); setup.setText("Setup");
+        controls.addView(stop, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        controls.addView(results, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        controls.addView(export, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        controls.addView(setup, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        page.addView(controls, fullWidth());
+        stop.setOnClickListener(v -> stopTournament());
+        results.setOnClickListener(v -> showStandingsDialog());
+        export.setOnClickListener(v -> exportTournamentPgn());
+        setup.setOnClickListener(v -> {
+            if (runner != null) {
+                Toast.makeText(this, "Stop the tournament before returning to setup", Toast.LENGTH_SHORT).show();
+            } else {
+                setContentView(setupView);
+            }
+        });
+        playView = page;
+    }
+
+    private void showStandingsDialog() {
+        try {
+            TournamentManager tournament = TournamentManager.restore(this);
+            new AlertDialog.Builder(this).setTitle("Tournament standings")
+                    .setMessage(formatStandings(tournament.standings(), tournament.engines()))
+                    .setPositiveButton(android.R.string.ok, null).show();
+        } catch (Exception e) {
+            new AlertDialog.Builder(this).setTitle("Tournament standings")
+                    .setMessage(standingsText == null ? "No results yet" : standingsText.getText())
+                    .setPositiveButton(android.R.string.ok, null).show();
+        }
+    }
+
+    private static final class TournamentChessBoard extends ChessBoardPlay {
+        TournamentChessBoard(android.content.Context context) { super(context, null); }
+        @Override protected int getMaxWidthPercentage() { return 100; }
+        @Override protected int getMaxHeightPercentage() { return 100; }
     }
 
     private void loadEngineChoices() {
@@ -227,27 +306,39 @@ public final class TournamentActivity extends Activity {
     private void launchTournament(final TournamentManager tournament) {
         runner = new TournamentRunner(tournament, new TournamentRunner.Listener() {
             @Override public void onGameStarted(TournamentManager.Pairing pairing, String white, String black) {
-                runOnUiThread(() -> statusText.setText("Game " + (pairing.index + 1) + ": " + white + " (White) vs " + black + " (Black)"));
+                runOnUiThread(() -> {
+                    setContentView(playView);
+                    statusText.setText("Game " + (pairing.index + 1) + ": " + white + " vs " + black);
+                    moveStatusText.setText("Game " + (pairing.index + 1) + " · " + white + " vs " + black);
+                    whiteNameText.setText("WHITE  ·  " + white);
+                    blackNameText.setText("BLACK  ·  " + black);
+                });
             }
             @Override public void onPositionChanged(Position position, boolean whiteToMove,
                                                     long whiteTimeMs, long blackTimeMs,
                                                     String whiteName, String blackName) {
                 runOnUiThread(() -> {
                     tournamentBoard.setPosition(position);
-                    clockText.setText((whiteToMove ? "White to move — " : "Black to move — ") +
-                            whiteName + ": " + formatClock(whiteTimeMs) + "   " +
-                            blackName + ": " + formatClock(blackTimeMs));
+                    whiteClockText.setText(formatClock(whiteTimeMs));
+                    blackClockText.setText(formatClock(blackTimeMs));
+                    whiteClockText.setAlpha(whiteToMove ? 1.0f : 0.72f);
+                    blackClockText.setAlpha(whiteToMove ? 0.72f : 1.0f);
+                    moveStatusText.setText((whiteToMove ? "White to move" : "Black to move") +
+                            "  ·  " + whiteName + " vs " + blackName);
                 });
             }
             @Override public void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn) {
                 runOnUiThread(() -> {
-                    statusText.setText("Game " + (pairing.index + 1) + " finished: " + outcome);
+                    String result = "Game " + (pairing.index + 1) + " finished: " + outcome;
+                    statusText.setText(result);
+                    moveStatusText.setText(result);
                     standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
                 });
             }
             @Override public void onTournamentFinished() {
                 runOnUiThread(() -> {
                     statusText.setText("Tournament complete");
+                    moveStatusText.setText("TOURNAMENT COMPLETE");
                     standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
                     runner = null; startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(false);
                 });
@@ -262,6 +353,7 @@ public final class TournamentActivity extends Activity {
         }, new EngineOptions(), new BookOptions(), tournament.baseTimeMs(), tournament.incrementMs(),
                 tournament.openingPgn(), tournament.openingPlies(), tournament.repeatOpening());
         startButton.setEnabled(false); resumeButton.setEnabled(false); stopButton.setEnabled(true);
+        setContentView(playView);
         runner.start();
     }
 
@@ -298,6 +390,7 @@ public final class TournamentActivity extends Activity {
     private void stopTournament() {
         if (runner != null) { runner.stop(); runner = null; }
         statusText.setText("Tournament stopped. Completed results are saved.");
+        if (moveStatusText != null) moveStatusText.setText("TOURNAMENT STOPPED");
         startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(false);
     }
 
