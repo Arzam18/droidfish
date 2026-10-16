@@ -189,22 +189,13 @@ public final class TournamentActivity extends Activity {
         page.addView(tournamentTitleText, fullWidth());
 
         blackNameText = text("BLACK");
-        blackNameText.setTextSize(14);
+        blackNameText.setTextSize(16);
         page.addView(blackNameText, fullWidth());
         LinearLayout blackClockRow = new LinearLayout(this);
         blackClockRow.setOrientation(LinearLayout.HORIZONTAL);
         blackMoveTimeText = text("—"); blackMoveTimeText.setTextSize(25); blackMoveTimeText.setTypeface(null, android.graphics.Typeface.BOLD);
         blackClockText = text("00:30.0"); blackClockText.setTextSize(25); blackClockText.setTypeface(null, android.graphics.Typeface.BOLD); blackClockText.setGravity(android.view.Gravity.RIGHT);
         blackClockRow.addView(blackMoveTimeText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        LinearLayout navigation = new LinearLayout(this);
-        navigation.setOrientation(LinearLayout.HORIZONTAL);
-        previousMoveButton = new Button(this); previousMoveButton.setText("◀");
-        nextMoveButton = new Button(this); nextMoveButton.setText("▶");
-        previousMoveButton.setMinWidth(dp(40)); nextMoveButton.setMinWidth(dp(40));
-        previousMoveButton.setPadding(dp(4), 0, dp(4), 0); nextMoveButton.setPadding(dp(4), 0, dp(4), 0);
-        navigation.addView(previousMoveButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        navigation.addView(nextMoveButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        blackClockRow.addView(navigation, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         blackClockRow.addView(blackClockText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(blackClockRow, fullWidth());
         blackAnalysisText = text("BLACK analysis waiting…");
@@ -231,8 +222,18 @@ public final class TournamentActivity extends Activity {
         boardFrame.setOnTouchListener((v, event) -> handleBoardSwipe(event));
         tournamentBoard.setOnTouchListener((v, event) -> handleBoardSwipe(event));
 
+        LinearLayout navigation = new LinearLayout(this);
+        navigation.setOrientation(LinearLayout.HORIZONTAL);
+        navigation.setGravity(android.view.Gravity.CENTER);
+        previousMoveButton = new Button(this); previousMoveButton.setText("◀");
+        nextMoveButton = new Button(this); nextMoveButton.setText("▶");
+        previousMoveButton.setMinWidth(dp(48)); nextMoveButton.setMinWidth(dp(48));
+        navigation.addView(previousMoveButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        navigation.addView(nextMoveButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        page.addView(navigation, fullWidth());
+
         whiteNameText = text("WHITE");
-        whiteNameText.setTextSize(14);
+        whiteNameText.setTextSize(16);
         page.addView(whiteNameText, fullWidth());
         LinearLayout whiteClockRow = new LinearLayout(this);
         whiteClockRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -499,7 +500,7 @@ public final class TournamentActivity extends Activity {
             @Override public void onGameStarted(TournamentManager.Pairing pairing, String white, String black) {
                 runOnUiThread(() -> {
                     setContentView(playView);
-                    if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
+                    if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title() + "  " + completedGameCount(tournament) + "/" + tournament.pairings().size());
                     if (playPauseButton != null) playPauseButton.setText(runner != null && runner.isPaused() ? "Play" : "Pause");
                     statusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + ": " + white + " vs " + black);
                     moveStatusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + " · " + white + " vs " + black);
@@ -528,7 +529,8 @@ public final class TournamentActivity extends Activity {
                 runOnUiThread(() -> {
                     TextView target = white ? whiteAnalysisText : blackAnalysisText;
                     if (target != null) target.setText(analysis);
-                    if (tournamentBoard != null && showTournamentArrowsCheck != null && showTournamentArrowsCheck.isChecked()) {
+                    if (tournamentBoard != null && showTournamentArrowsCheck != null && showTournamentArrowsCheck.isChecked()
+                            && android.preference.PreferenceManager.getDefaultSharedPreferences(this).getString("thinkingArrows", "4").equals("0") == false) {
                         try {
                             int evalAt = analysis.indexOf("eval ");
                             if (evalAt >= 0) {
@@ -550,6 +552,7 @@ public final class TournamentActivity extends Activity {
                 runOnUiThread(() -> {
                     latestPosition = new Position(position);
                     tournamentBoard.setPosition(position);
+                    tournamentBoard.setMoveHints(null);
                     whiteAnalysisText.setText(whiteAnalysis);
                     blackAnalysisText.setText(blackAnalysis);
                     moveStatusText.setText("PAUSED · Reviewing ply " + ply + "/" + totalPlies + " · Next/Previous to navigate");
@@ -576,6 +579,7 @@ public final class TournamentActivity extends Activity {
                     statusText.setText(result);
                     moveStatusText.setText(result);
                     standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
+                    if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title() + "  " + completedGameCount(tournament) + "/" + tournament.pairings().size());
                     if (savedError != null) statusText.setText(result + " · PGN auto-save failed: " + savedError.getMessage());
                 });
             }
@@ -598,7 +602,7 @@ public final class TournamentActivity extends Activity {
                 tournament.openingPgn(), tournament.openingPlies(), tournament.repeatOpening(), tournament.openingStartIndex());
         startButton.setEnabled(false); resumeButton.setEnabled(false); stopButton.setEnabled(true);
         if (playPauseButton != null) playPauseButton.setText("Pause");
-        if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
+        if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title() + "  " + completedGameCount(tournament) + "/" + tournament.pairings().size());
         setContentView(playView);
         runner.start();
     }
