@@ -530,7 +530,7 @@ public final class TournamentActivity extends Activity {
                     TextView target = white ? whiteAnalysisText : blackAnalysisText;
                     if (target != null) target.setText(analysis);
                     if (tournamentBoard != null && showTournamentArrowsCheck != null && showTournamentArrowsCheck.isChecked()
-                            && android.preference.PreferenceManager.getDefaultSharedPreferences(this).getString("thinkingArrows", "4").equals("0") == false) {
+                            && android.preference.PreferenceManager.getDefaultSharedPreferences(TournamentActivity.this).getString("thinkingArrows", "4").equals("0") == false) {
                         try {
                             int evalAt = analysis.indexOf("eval ");
                             if (evalAt >= 0) {
