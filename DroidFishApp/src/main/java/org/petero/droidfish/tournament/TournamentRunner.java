@@ -51,7 +51,7 @@ public final class TournamentRunner {
     private int whiteSearchId, blackSearchId;
     private volatile int activeWhiteId, activeBlackId;
     private long turnGeneration;
-    private volatile boolean stopped, finished;
+    private volatile boolean stopped, finished, paused;
 
     public TournamentRunner(TournamentManager tournament, Listener listener,
                             EngineOptions engineOptions, BookOptions bookOptions,
@@ -90,15 +90,50 @@ public final class TournamentRunner {
         startNextGame();
     }
 
+    /** Pause without discarding the current game, position, or completed schedule. */
+    public synchronized void pause() {
+        if (stopped || finished || paused) return;
+        paused = true;
+        turnGeneration++;
+        if (clock != null) clock.pause();
+        whitePlayer.shutdownEngine();
+        blackPlayer.shutdownEngine();
+    }
+
+    /** Resume the same in-memory game position; engine processes are restarted cleanly. */
+    public synchronized void resume() {
+        if (stopped || finished || !paused) return;
+        paused = false;
+        if (game == null || pairing == null) {
+            startNextGame();
+            return;
+        }
+        whitePlayer.setEngineOptions(engineOptions);
+        blackPlayer.setEngineOptions(engineOptions);
+        whitePlayer.uciNewGame();
+        blackPlayer.uciNewGame();
+        activeWhiteId = ++whiteSearchId;
+        activeBlackId = ++blackSearchId;
+        whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.id);
+        blackPlayer.queueStartEngine(activeBlackId, blackEngine.id);
+        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
+        notifyPosition();
+        requestMove(game.currPos().whiteMove);
+    }
+
+    public synchronized boolean isPaused() { return paused; }
+
     public synchronized void stop() {
         stopped = true;
+        paused = false;
         turnGeneration++;
+        if (clock != null) clock.pause();
         whitePlayer.shutdownEngine();
         blackPlayer.shutdownEngine();
     }
 
     private void startNextGame() {
-        if (stopped || finished) return;
+        if (stopped || finished || paused) return;
         pairing = tournament.current();
         if (pairing == null) {
             finished = true;
@@ -145,7 +180,7 @@ public final class TournamentRunner {
     }
 
     private synchronized void requestMove(boolean whiteToMove) {
-        if (stopped || finished || game == null || game.getGameState() != Game.GameState.ALIVE) return;
+        if (stopped || finished || paused || game == null || game.getGameState() != Game.GameState.ALIVE) return;
         if (clock.isExpired()) {
             game.markTimeout(whiteToMove);
             finishCurrentGame(resultForState(game.getGameState()));
@@ -183,7 +218,7 @@ public final class TournamentRunner {
         Thread watchdog = new Thread(() -> {
             while (true) {
                 synchronized (TournamentRunner.this) {
-                    if (stopped || finished || turnToken != turnGeneration || game == null ||
+                    if (stopped || finished || paused || turnToken != turnGeneration || game == null ||
                             game.getGameState() != Game.GameState.ALIVE || game.currPos().whiteMove != whiteToMove)
                         return;
                     if (clock.isExpired()) {
@@ -206,7 +241,7 @@ public final class TournamentRunner {
 
     private synchronized void onSearchResult(boolean whiteEngineSide, int id, String cmd,
                                              boolean acceptedAtArrival) {
-        if (stopped || finished || game == null) return;
+        if (stopped || finished || paused || game == null) return;
         if (whiteEngineSide ? id != activeWhiteId : id != activeBlackId) return;
         boolean whiteToMove = game.currPos().whiteMove;
         if (whiteToMove != whiteEngineSide) return;
@@ -294,7 +329,7 @@ public final class TournamentRunner {
             long arrivalNs = System.nanoTime();
             int activeId = white ? activeWhiteId : activeBlackId;
             CetClock activeClock = clock;
-            boolean acceptedAtArrival = !stopped && !finished && id == activeId && activeClock != null &&
+            boolean acceptedAtArrival = !stopped && !finished && !paused && id == activeId && activeClock != null &&
                     activeClock.acceptMove(white, arrivalNs);
             // DroidComputerPlayer invokes listeners before it returns its state to IDLE.
             // Defer board/result handling so old-search cleanup cannot overwrite a new search.

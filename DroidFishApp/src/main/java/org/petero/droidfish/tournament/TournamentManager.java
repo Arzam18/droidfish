@@ -152,6 +152,7 @@ public final class TournamentManager {
     }
 
     public synchronized List<Engine> engines() { return Collections.unmodifiableList(new ArrayList<>(engines)); }
+    public synchronized String title() { return title; }
     public synchronized Format format() { return format; }
     public synchronized int gamesPerPair() { return gamesPerPair; }
     public synchronized long baseTimeMs() { return baseTimeMs; }

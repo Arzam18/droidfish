@@ -29,6 +29,13 @@ public final class CetClock {
         running = true;
     }
 
+    /** Freeze the active side clock without adding an increment. */
+    public synchronized void pause() {
+        if (running) settle(System.nanoTime());
+    }
+
+    public synchronized boolean isRunning() { return running; }
+
     public long incrementMs() { return incrementMs; }
 
     /** Accepts a move and adds the side's increment only if it arrived in time. */
