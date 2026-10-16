@@ -39,14 +39,15 @@ public final class TournamentActivity extends Activity {
     private static final String ENGINE_DIR = "DroidFish/uci";
     private final ArrayList<EngineChoice> availableEngines = new ArrayList<>();
     private final ArrayList<EngineChoice> selectedEngines = new ArrayList<>();
-    private TextView selectedText, statusText, standingsText, clockText;
+    private TextView selectedText, statusText, standingsText, clockText, tournamentTitleText;
     private TextView whiteClockText, blackClockText, whiteNameText, blackNameText, moveStatusText;
     private ChessBoardPlay tournamentBoard;
     private View setupView, playView;
     private Spinner formatSpinner;
-    private EditText gamesInput, baseInput, incrementInput, openingPliesInput, openingInput;
+    private EditText titleInput, gamesInput, baseInput, incrementInput, openingPliesInput, openingInput;
     private CheckBox repeatOpeningCheck;
-    private Button startButton, resumeButton, stopButton, exportButton;
+    private Button startButton, resumeButton, stopButton, exportButton, playPauseButton;
+    private boolean autoPaused;
     private TournamentRunner runner;
 
     private static final class EngineChoice {
@@ -82,6 +83,7 @@ public final class TournamentActivity extends Activity {
                 new String[]{"Round Robin", "Match", "Gauntlet (first engine vs rest)"}));
         root.addView(formatSpinner, fullWidth());
 
+        titleInput = field("Tournament name", "My Tournament"); root.addView(titleInput, fullWidth());
         gamesInput = field("Games per pairing", "2"); root.addView(gamesInput, fullWidth());
         baseInput = field("Base time per side (seconds)", "30"); root.addView(baseInput, fullWidth());
         incrementInput = field("Increment per move (milliseconds)", "500"); root.addView(incrementInput, fullWidth());
@@ -114,10 +116,11 @@ public final class TournamentActivity extends Activity {
         page.setPadding(dp(12), dp(8), dp(12), dp(8));
         page.setBackgroundColor(0xFF303030);
 
-        TextView title = text("TOURNAMENT GAME");
-        title.setTextSize(18);
-        title.setTypeface(null, android.graphics.Typeface.BOLD);
-        page.addView(title, fullWidth());
+        tournamentTitleText = text("MY TOURNAMENT");
+        tournamentTitleText.setTextSize(18);
+        tournamentTitleText.setTypeface(null, android.graphics.Typeface.BOLD);
+        tournamentTitleText.setGravity(android.view.Gravity.CENTER);
+        page.addView(tournamentTitleText, fullWidth());
 
         blackNameText = text("BLACK");
         blackNameText.setTextSize(14);
@@ -155,16 +158,16 @@ public final class TournamentActivity extends Activity {
 
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
-        Button stop = new Button(this); stop.setText("Stop");
+        playPauseButton = new Button(this); playPauseButton.setText("Pause");
         Button results = new Button(this); results.setText("Results");
         Button export = new Button(this); export.setText("Export PGN");
         Button setup = new Button(this); setup.setText("Setup");
-        controls.addView(stop, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        controls.addView(playPauseButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(results, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(export, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(setup, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(controls, fullWidth());
-        stop.setOnClickListener(v -> stopTournament());
+        playPauseButton.setOnClickListener(v -> togglePauseResume());
         results.setOnClickListener(v -> showStandingsDialog());
         export.setOnClickListener(v -> exportTournamentPgn());
         setup.setOnClickListener(v -> {
@@ -271,7 +274,9 @@ public final class TournamentActivity extends Activity {
                 throw new IllegalArgumentException("Match format requires exactly two engines");
             ArrayList<TournamentManager.Engine> engines = new ArrayList<>();
             for (EngineChoice e : selectedEngines) engines.add(new TournamentManager.Engine(e.id, e.name));
-            TournamentManager tournament = new TournamentManager(this, "DroidFish CET Tournament", format,
+            String tournamentName = titleInput.getText().toString().trim();
+            if (tournamentName.isEmpty()) tournamentName = "My Tournament";
+            TournamentManager tournament = new TournamentManager(this, tournamentName, format,
                     engines, games, seconds * 1000L, increment, openingInput.getText().toString(), openingPlies,
                     repeatOpeningCheck.isChecked());
             tournament.save();
@@ -290,6 +295,7 @@ public final class TournamentActivity extends Activity {
             selectedEngines.clear();
             for (TournamentManager.Engine engine : tournament.engines()) selectedEngines.add(new EngineChoice(engine.id, engine.displayName));
             updateSelectedText();
+            titleInput.setText(tournament.title());
             formatSpinner.setSelection(tournament.format().ordinal());
             gamesInput.setText(String.valueOf(tournament.gamesPerPair()));
             baseInput.setText(String.valueOf(Math.max(1, tournament.baseTimeMs() / 1000)));
@@ -308,8 +314,10 @@ public final class TournamentActivity extends Activity {
             @Override public void onGameStarted(TournamentManager.Pairing pairing, String white, String black) {
                 runOnUiThread(() -> {
                     setContentView(playView);
-                    statusText.setText("Game " + (pairing.index + 1) + ": " + white + " vs " + black);
-                    moveStatusText.setText("Game " + (pairing.index + 1) + " · " + white + " vs " + black);
+                    if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
+                    if (playPauseButton != null) playPauseButton.setText(runner != null && runner.isPaused() ? "Play" : "Pause");
+                    statusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + ": " + white + " vs " + black);
+                    moveStatusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + " · " + white + " vs " + black);
                     whiteNameText.setText("WHITE  ·  " + white);
                     blackNameText.setText("BLACK  ·  " + black);
                 });
@@ -328,11 +336,18 @@ public final class TournamentActivity extends Activity {
                 });
             }
             @Override public void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn) {
+                // Persist the cumulative PGN immediately on the callback thread, not only in a
+                // queued UI update: the Activity may be backgrounded or destroyed right now.
+                Exception autoSaveError = null;
+                try { saveTournamentPgnAutomatically(tournament); }
+                catch (Exception e) { autoSaveError = e; }
+                final Exception savedError = autoSaveError;
                 runOnUiThread(() -> {
                     String result = "Game " + (pairing.index + 1) + " finished: " + outcome;
                     statusText.setText(result);
                     moveStatusText.setText(result);
                     standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
+                    if (savedError != null) statusText.setText(result + " · PGN auto-save failed: " + savedError.getMessage());
                 });
             }
             @Override public void onTournamentFinished() {
@@ -353,6 +368,8 @@ public final class TournamentActivity extends Activity {
         }, new EngineOptions(), new BookOptions(), tournament.baseTimeMs(), tournament.incrementMs(),
                 tournament.openingPgn(), tournament.openingPlies(), tournament.repeatOpening());
         startButton.setEnabled(false); resumeButton.setEnabled(false); stopButton.setEnabled(true);
+        if (playPauseButton != null) playPauseButton.setText("Pause");
+        if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
         setContentView(playView);
         runner.start();
     }
@@ -362,14 +379,8 @@ public final class TournamentActivity extends Activity {
             TournamentManager tournament = TournamentManager.restore(this);
             String pgn = tournament.exportPgn();
             if (pgn.isEmpty()) { Toast.makeText(this, "No completed PGN games to export", Toast.LENGTH_LONG).show(); return; }
-            File dir = getExternalFilesDir(null);
-            if (dir == null) throw new IOException("App external files directory is unavailable");
-            if (!dir.exists() && !dir.mkdirs()) throw new IOException("Could not create export directory");
-            File file = new File(dir, "cet_tournament.pgn");
-            try (FileOutputStream out = new FileOutputStream(file)) {
-                out.write(pgn.getBytes(Charset.forName("UTF-8")));
-            }
-            Toast.makeText(this, "PGN exported to " + file.getAbsolutePath(), Toast.LENGTH_LONG).show();
+            File file = saveTournamentPgnAutomatically(tournament);
+            Toast.makeText(this, "PGN saved to " + file.getAbsolutePath(), Toast.LENGTH_LONG).show();
         } catch (Exception e) {
             Toast.makeText(this, "PGN export failed: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
@@ -387,6 +398,58 @@ public final class TournamentActivity extends Activity {
         return out.toString();
     }
 
+    private void togglePauseResume() {
+        if (runner == null) {
+            Toast.makeText(this, "No active tournament. Use Resume Saved Tournament.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (runner.isPaused()) {
+            runner.resume();
+            autoPaused = false;
+            playPauseButton.setText("Pause");
+            moveStatusText.setText("Resuming tournament…");
+        } else {
+            runner.pause();
+            autoPaused = false;
+            playPauseButton.setText("Play");
+            moveStatusText.setText("PAUSED · Tap Play to continue");
+        }
+    }
+
+    /** Rewrite the cumulative PGN after every completed game, avoiding duplicate append on resume. */
+    private File saveTournamentPgnAutomatically(TournamentManager tournament) throws IOException {
+        String safeName = tournament.title().trim().replaceAll("[^A-Za-z0-9._ -]", "_")
+                .replaceAll("\\s+", " ").replaceAll("[ .]+$", "");
+        if (safeName.isEmpty()) safeName = "Tournament";
+        byte[] bytes = tournament.exportPgn().getBytes(Charset.forName("UTF-8"));
+        File publicFile = new File(new File(Environment.getExternalStorageDirectory(), "DroidFish/pgn"), safeName + ".pgn");
+        try {
+            File dir = publicFile.getParentFile();
+            if (dir != null && !dir.exists() && !dir.mkdirs() && !dir.isDirectory())
+                throw new IOException("Cannot create " + dir.getAbsolutePath());
+            writeSynced(publicFile, bytes);
+            return publicFile;
+        } catch (IOException | SecurityException publicPathError) {
+            // Android may deny legacy shared-storage writes. Keep auto-save working in the
+            // app-specific external folder rather than losing the completed tournament PGN.
+            File appDir = getExternalFilesDir("pgn");
+            if (appDir == null) throw new IOException("Cannot access DroidFish/pgn or app PGN folder", publicPathError);
+            if (!appDir.exists() && !appDir.mkdirs() && !appDir.isDirectory())
+                throw new IOException("Cannot create app PGN folder", publicPathError);
+            File fallback = new File(appDir, safeName + ".pgn");
+            writeSynced(fallback, bytes);
+            return fallback;
+        }
+    }
+
+    private void writeSynced(File file, byte[] bytes) throws IOException {
+        try (FileOutputStream out = new FileOutputStream(file, false)) {
+            out.write(bytes);
+            out.flush();
+            out.getFD().sync();
+        }
+    }
+
     private void stopTournament() {
         if (runner != null) { runner.stop(); runner = null; }
         statusText.setText("Tournament stopped. Completed results are saved.");
@@ -394,8 +457,39 @@ public final class TournamentActivity extends Activity {
         startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(false);
     }
 
-    @Override public void onBackPressed() { stopTournament(); super.onBackPressed(); }
-    @Override protected void onDestroy() { if (runner != null) runner.stop(); super.onDestroy(); }
+    @Override public void onBackPressed() {
+        if (runner != null) {
+            runner.pause();
+            autoPaused = false;
+            Toast.makeText(this, "Tournament paused and saved. Use Resume Saved Tournament to continue.", Toast.LENGTH_LONG).show();
+        }
+        super.onBackPressed();
+    }
+
+    @Override protected void onPause() {
+        if (runner != null && !runner.isPaused()) {
+            runner.pause();
+            autoPaused = true;
+        }
+        super.onPause();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (runner != null && autoPaused && runner.isPaused()) {
+            runner.resume();
+            autoPaused = false;
+            if (playPauseButton != null) playPauseButton.setText("Pause");
+        }
+    }
+
+    @Override protected void onDestroy() {
+        if (runner != null) {
+            runner.pause();
+            runner = null;
+        }
+        super.onDestroy();
+    }
 
     private EditText field(String hint, String value) {
         EditText e = new EditText(this); e.setSingleLine(false); e.setHint(hint); e.setText(value); return e;
