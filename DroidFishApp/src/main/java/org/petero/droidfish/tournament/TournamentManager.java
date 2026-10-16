@@ -18,6 +18,7 @@ import java.util.List;
 public final class TournamentManager {
     public enum Format { ROUND_ROBIN, MATCH, GAUNTLET }
     public enum Outcome { WHITE_WIN, DRAW, BLACK_WIN, UNFINISHED }
+    public enum TimeMode { CLOCK, MOVE_TIME, DEPTH, NODES }
 
     public static final class Engine {
         public final String id;
@@ -53,6 +54,8 @@ public final class TournamentManager {
     private Format format;
     private int gamesPerPair;
     private long baseTimeMs = 30000, incrementMs = 500;
+    private TimeMode timeMode = TimeMode.CLOCK;
+    private int limitValue = 30;
     private String openingPgn = "";
     private int openingPlies;
     private boolean repeatOpening;
@@ -72,12 +75,19 @@ public final class TournamentManager {
     public TournamentManager(Context context, String title, Format format, List<Engine> engines,
                              int gamesPerPair, long baseTimeMs, long incrementMs,
                              String openingPgn, int openingPlies, boolean repeatOpening) {
+        this(context, title, format, engines, gamesPerPair, baseTimeMs, incrementMs, openingPgn, openingPlies, repeatOpening, TimeMode.CLOCK, 30);
+    }
+
+    public TournamentManager(Context context, String title, Format format, List<Engine> engines,
+                             int gamesPerPair, long baseTimeMs, long incrementMs,
+                             String openingPgn, int openingPlies, boolean repeatOpening, TimeMode timeMode, int limitValue) {
         if (context == null || engines == null || engines.size() < 2) throw new IllegalArgumentException("At least two engines are required");
         if (gamesPerPair < 1) throw new IllegalArgumentException("Games per pairing must be positive");
         if (baseTimeMs < 1 || incrementMs < 0 || openingPlies < 0) throw new IllegalArgumentException("Invalid tournament settings");
         this.context = context.getApplicationContext(); this.fileName = "cet_tournament.json";
         this.title = title == null ? "CET Tournament" : title; this.format = format; this.gamesPerPair = gamesPerPair;
         this.baseTimeMs = baseTimeMs; this.incrementMs = incrementMs;
+        this.timeMode = timeMode == null ? TimeMode.CLOCK : timeMode; this.limitValue = Math.max(1, limitValue);
         this.openingPgn = openingPgn == null ? "" : openingPgn; this.openingPlies = openingPlies;
         this.repeatOpening = repeatOpening;
         this.engines.addAll(engines);
@@ -93,6 +103,7 @@ public final class TournamentManager {
         openingPgn = root.optString("openingPgn", "");
         openingPlies = root.optInt("openingPlies", 0);
         repeatOpening = root.optBoolean("repeatOpening", false);
+        timeMode = TimeMode.valueOf(root.optString("timeMode", "CLOCK")); limitValue = root.optInt("limitValue", 30);
         JSONArray ea = root.getJSONArray("engines");
         for (int i = 0; i < ea.length(); i++) { JSONObject e = ea.getJSONObject(i); engines.add(new Engine(e.getString("id"), e.optString("name"))); }
         JSONArray pa = root.getJSONArray("pairings");
@@ -157,6 +168,8 @@ public final class TournamentManager {
     public synchronized int gamesPerPair() { return gamesPerPair; }
     public synchronized long baseTimeMs() { return baseTimeMs; }
     public synchronized long incrementMs() { return incrementMs; }
+    public synchronized TimeMode timeMode() { return timeMode; }
+    public synchronized int limitValue() { return limitValue; }
     public synchronized String openingPgn() { return openingPgn; }
     public synchronized int openingPlies() { return openingPlies; }
     public synchronized boolean repeatOpening() { return repeatOpening; }
@@ -203,6 +216,7 @@ public final class TournamentManager {
     public synchronized void save() throws IOException, JSONException {
         JSONObject root = new JSONObject(); root.put("title", title); root.put("format", format.name()); root.put("gamesPerPair", gamesPerPair);
         root.put("baseTimeMs", baseTimeMs); root.put("incrementMs", incrementMs);
+        root.put("timeMode", timeMode.name()); root.put("limitValue", limitValue);
         root.put("openingPgn", openingPgn); root.put("openingPlies", openingPlies); root.put("repeatOpening", repeatOpening);
         JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); ea.put(o); } root.put("engines", ea);
         JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); pa.put(o); } root.put("pairings", pa);

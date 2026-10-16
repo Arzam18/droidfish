@@ -65,6 +65,7 @@ public final class TournamentRunner {
     private String latestWhiteAnalysis = "WHITE analysis waiting…";
     private String latestBlackAnalysis = "BLACK analysis waiting…";
     private long lastMoveTimeMs;
+    private long currentTurnStartedNs;
     private boolean humanAdjudication;
 
     public TournamentRunner(TournamentManager tournament, Listener listener,
@@ -255,7 +256,7 @@ public final class TournamentRunner {
 
     private synchronized void requestMove(boolean whiteToMove) {
         if (stopped || finished || paused || game == null || game.getGameState() != Game.GameState.ALIVE) return;
-        if (clock.isExpired()) {
+        if (tournament.timeMode() == TournamentManager.TimeMode.CLOCK && clock.isExpired()) {
             game.markTimeout(whiteToMove);
             finishCurrentGame(resultForState(game.getGameState()));
             return;
@@ -267,6 +268,7 @@ public final class TournamentRunner {
         int bTime = (int)Math.max(1, Math.min(Integer.MAX_VALUE, clock.remainingMs(false)));
         int inc = (int)Math.min(Integer.MAX_VALUE, clock.incrementMs());
         clock.startTurn(whiteToMove);
+        currentTurnStartedNs = System.nanoTime();
         final long turnToken = ++turnGeneration;
         int id;
         DroidComputerPlayer player;
@@ -283,8 +285,14 @@ public final class TournamentRunner {
                 id, System.currentTimeMillis(), history.first, history.second,
                 new Position(game.currPos()), game.haveDrawOffer(), wTime, bTime, inc, inc,
                 whiteToMove ? whiteEngine.id : blackEngine.id);
+        switch (tournament.timeMode()) {
+            case MOVE_TIME: request.tournamentGoCommand = "go movetime " + Math.max(1, tournament.limitValue()); break;
+            case DEPTH: request.tournamentGoCommand = "go depth " + Math.max(1, tournament.limitValue()); break;
+            case NODES: request.tournamentGoCommand = "go nodes " + Math.max(1, tournament.limitValue()); break;
+            case CLOCK: default: break;
+        }
         player.queueSearchRequest(request);
-        startClockWatchdog(whiteToMove, turnToken);
+        if (tournament.timeMode() == TournamentManager.TimeMode.CLOCK) startClockWatchdog(whiteToMove, turnToken);
     }
 
     /** Adjudicate flag fall even if an engine hangs and never emits bestmove. */
@@ -295,7 +303,7 @@ public final class TournamentRunner {
                     if (stopped || finished || paused || turnToken != turnGeneration || game == null ||
                             game.getGameState() != Game.GameState.ALIVE || game.currPos().whiteMove != whiteToMove)
                         return;
-                    if (clock.isExpired()) {
+                    if (tournament.timeMode() == TournamentManager.TimeMode.CLOCK && clock.isExpired()) {
                         game.markTimeout(whiteToMove);
                         // A non-responsive engine may never answer stop; kill it so the next
                         // pairing can start a clean process instead of inheriting a stuck search.
@@ -333,7 +341,7 @@ public final class TournamentRunner {
             finishCurrentGame(resultForState(game.getGameState()));
             return;
         }
-        lastMoveTimeMs = clock.lastTurnElapsedMs();
+        lastMoveTimeMs = tournament.timeMode() == TournamentManager.TimeMode.CLOCK ? clock.lastTurnElapsedMs() : Math.max(0, (System.nanoTime() - currentTurnStartedNs) / 1_000_000L);
         recordPosition(lastMoveTimeMs);
         listener.onMoveTime(!game.currPos().whiteMove, lastMoveTimeMs, currentOpeningName);
         notifyPosition();
@@ -352,8 +360,8 @@ public final class TournamentRunner {
     private void notifyPosition() {
         if (game == null || pairing == null || whiteEngine == null || blackEngine == null) return;
         CetClock activeClock = clock;
-        long whiteMs = activeClock == null ? 0 : activeClock.remainingMs(true);
-        long blackMs = activeClock == null ? 0 : activeClock.remainingMs(false);
+        long whiteMs = activeClock == null || tournament.timeMode() != TournamentManager.TimeMode.CLOCK ? 0 : activeClock.remainingMs(true);
+        long blackMs = activeClock == null || tournament.timeMode() != TournamentManager.TimeMode.CLOCK ? 0 : activeClock.remainingMs(false);
         listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove,
                 whiteMs, blackMs, whiteEngine.displayName, blackEngine.displayName);
     }
@@ -474,7 +482,7 @@ public final class TournamentRunner {
             int activeId = white ? activeWhiteId : activeBlackId;
             CetClock activeClock = clock;
             boolean acceptedAtArrival = !stopped && !finished && !paused && id == activeId && activeClock != null &&
-                    activeClock.acceptMove(white, arrivalNs);
+                    (tournament.timeMode() != TournamentManager.TimeMode.CLOCK || activeClock.acceptMove(white, arrivalNs));
             // DroidComputerPlayer invokes listeners before it returns its state to IDLE.
             // Defer board/result handling so old-search cleanup cannot overwrite a new search.
             DroidComputerPlayer player = white ? whitePlayer : blackPlayer;
