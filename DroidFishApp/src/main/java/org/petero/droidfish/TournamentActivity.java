@@ -120,7 +120,7 @@ public final class TournamentActivity extends Activity {
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
         });
-        openingPliesInput = field("PGN opening plies (0 = disabled)", "0"); root.addView(openingPliesInput, fullWidth());
+        openingPliesInput = field("PGN opening plies (0 = full opening; positive = custom half-move limit)", "0"); root.addView(openingPliesInput, fullWidth());
         repeatOpeningCheck = new CheckBox(this); repeatOpeningCheck.setText("Repeat opening for paired color-reversal games");
         root.addView(repeatOpeningCheck, fullWidth());
         Button chooseOpeningPgn = new Button(this);
@@ -408,8 +408,9 @@ public final class TournamentActivity extends Activity {
                     (timeModeIndex == 3 ? positiveInt(limitInput, "nodes per move", 1) : 30));
             int openingPlies = nonNegativeInt(openingPliesInput, "opening plies");
             int openingStart = positiveInt(openingStartInput, "starting PGN opening number", 1);
+            // A selected PGN is applied in full by default (0); positive values cap half-moves.
             if (openingPlies > 0 && selectedOpeningPgn.trim().isEmpty())
-                throw new IllegalArgumentException("Select a PGN opening file, or set opening plies to 0");
+                throw new IllegalArgumentException("Select a PGN opening file before setting a custom opening-ply limit");
             if (seconds > Integer.MAX_VALUE / 1000) throw new IllegalArgumentException("Base time is too large");
             TournamentManager.Format format = TournamentManager.Format.values()[formatSpinner.getSelectedItemPosition()];
             if (format == TournamentManager.Format.MATCH && selectedEngines.size() != 2)
