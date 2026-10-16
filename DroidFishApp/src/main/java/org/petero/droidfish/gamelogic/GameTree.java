@@ -45,6 +45,7 @@ public class GameTree {
 
     public Position startPos;
     private String timeControl, whiteTimeControl, blackTimeControl;
+    private String tournamentResultOverride = "";
 
     // Non-standard tags
     static private final class TagPair {
@@ -87,6 +88,20 @@ public class GameTree {
         updateListener();
     }
 
+    /** Set the opening name for tournament PGN metadata. */
+    public final void setTournamentOpening(String openingName) {
+        if (openingName != null && !openingName.trim().isEmpty()) setTagPair("Opening", openingName.trim());
+    }
+
+    /** Force a human tournament adjudication result without altering the played moves. */
+    public final void setTournamentAdjudication(String result, String termination) {
+        if (result == null) return;
+        if (!(result.equals("1-0") || result.equals("0-1") || result.equals("1/2-1/2"))) return;
+        tournamentResultOverride = result;
+        setTagPair("Termination", termination == null ? "adjudication" : termination);
+        updateListener();
+    }
+
     /** Add/update a final-game metadata tag before exporting tournament PGN. */
     public final void setTournamentTermination(String termination) {
         if (termination != null && !termination.trim().isEmpty()) setTagPair("Termination", termination.trim());
@@ -101,6 +116,7 @@ public class GameTree {
 
     /** Set start position. Drops the whole game tree. */
     final void setStartPos(Position pos) {
+        tournamentResultOverride = "";
         event = "?";
         site = "?";
         {
@@ -879,6 +895,9 @@ public class GameTree {
     }
 
     final GameState getGameState() {
+        if ("1-0".equals(tournamentResultOverride)) return GameState.RESIGN_BLACK;
+        if ("0-1".equals(tournamentResultOverride)) return GameState.RESIGN_WHITE;
+        if ("1/2-1/2".equals(tournamentResultOverride)) return GameState.DRAW_AGREE;
         Position pos = currentPos;
         String action = currentNode.playerAction;
         if (action.equals("resign")) {

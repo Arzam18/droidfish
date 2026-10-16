@@ -417,6 +417,12 @@ public class Game {
         return tree.getGameState();
     }
 
+    /** Apply a human tournament adjudication while preserving the current move history. */
+    public final synchronized void adjudicateTournament(String result) {
+        tree.setTournamentAdjudication(result, "adjudication");
+        updateTimeControl(true);
+    }
+
     /** Adjudicate a flag fall for the side that was to move. */
     public final synchronized void markTimeout(boolean whiteLost) {
         if (getGameState() != GameState.ALIVE) return;
