@@ -105,8 +105,16 @@ public final class TournamentRunner {
         blackPlayer = new DroidComputerPlayer(new EngineListener(false));
         whitePlayer.setEngineOptions(this.engineOptions);
         blackPlayer.setEngineOptions(this.engineOptions);
-        whitePlayer.setBookOptions(this.bookOptions);
-        blackPlayer.setBookOptions(this.bookOptions);
+        // A PGN opening book is authoritative for tournament starts. Do not let
+        // DroidFish's own Polyglot/CTG/ECO/internal book replace the selected line.
+        BookOptions tournamentBookOptions = new BookOptions(this.bookOptions);
+        if (!this.openingPgn.trim().isEmpty()) {
+            tournamentBookOptions.filename = "";
+            tournamentBookOptions.maxLength = 0;
+            tournamentBookOptions.preferMainLines = false;
+        }
+        whitePlayer.setBookOptions(tournamentBookOptions);
+        blackPlayer.setBookOptions(tournamentBookOptions);
     }
 
     public synchronized void start() {
@@ -227,17 +235,21 @@ public final class TournamentRunner {
                 eventType, (baseTimeMs / 1000) + "+" + String.format(java.util.Locale.US, "%g", incrementMs / 1000.0));
         clock = new CetClock(baseTimeMs, incrementMs);
         game.tree.setTournamentOpening(currentOpeningName);
-        if (openingPlies > 0 && !openingPgn.isEmpty()) {
+        if (!openingPgn.trim().isEmpty()) {
             int openingIndex = (openingStartIndex - 1) + (repeatOpening ? Math.max(0, (pairing.gameNumber - 1) / 2) : pairing.index);
             String selectedOpening = PgnOpeningBook.gameAt(openingPgn, openingIndex);
             currentOpeningName = PgnOpeningBook.tagValue(selectedOpening, "Opening");
             if (currentOpeningName.isEmpty()) currentOpeningName = PgnOpeningBook.tagValue(selectedOpening, "ECO");
             if (currentOpeningName.isEmpty()) currentOpeningName = "PGN opening " + (openingIndex + 1);
             game.tree.setTournamentOpening(currentOpeningName);
-            PgnOpeningBook.applyMainLine(selectedOpening, openingPlies, san -> {
+            int appliedPlies = PgnOpeningBook.applyMainLine(selectedOpening, openingPlies, san -> {
                 Pair<Boolean, Move> result = game.processString(san);
                 return result != null && Boolean.TRUE.equals(result.first) && result.second != null;
             });
+            if (appliedPlies == 0) {
+                listener.onError("Selected PGN opening " + (openingIndex + 1) +
+                        " contains no legal moves from the starting position. Check that the PGN has a valid main line.", null);
+            }
         }
         if (game.getGameState() != Game.GameState.ALIVE) {
             finishCurrentGame(resultForState(game.getGameState()));

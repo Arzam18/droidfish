@@ -66,12 +66,16 @@ public final class PgnOpeningBook {
     /** Callback used to apply a parsed SAN token to the active chess position. */
     public interface SanMoveApplier { boolean applySan(String san); }
 
-    /** Apply up to maxPlies main-line SAN moves; stops at the first illegal token. */
+    /**
+     * Apply the PGN main line. maxPlies == 0 means the complete opening line;
+     * a positive value limits the line to that many half-moves.
+     */
     public static int applyMainLine(String pgn, int maxPlies, SanMoveApplier applier) {
-        if (applier == null || maxPlies <= 0) return 0;
+        if (applier == null || maxPlies < 0) return 0;
         int applied = 0;
         for (String san : mainLineSan(pgn)) {
-            if (applied >= maxPlies || !applier.applySan(san)) break;
+            if (maxPlies > 0 && applied >= maxPlies) break;
+            if (!applier.applySan(san)) break;
             applied++;
         }
         return applied;
