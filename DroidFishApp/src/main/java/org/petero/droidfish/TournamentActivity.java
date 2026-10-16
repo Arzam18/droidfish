@@ -633,8 +633,9 @@ public final class TournamentActivity extends Activity {
             TournamentManager.Standing s = standings.get(i);
             String name = s.engineId;
             for (TournamentManager.Engine e : engines) if (e.id.equals(s.engineId)) { name = e.displayName; break; }
-            out.append(i + 1).append(". ").append(name).append("  ").append(s.points)
-                    .append(" pts  (+").append(s.wins).append(" =").append(s.draws).append(" -").append(s.losses).append(")\n");
+            out.append(i + 1).append(".").append(name).append("\n    ").append(s.points)
+                    .append("/").append(s.played).append("  +").append(s.wins)
+                    .append(" =").append(s.draws).append(" -").append(s.losses).append("\n");
         }
         return out.toString();
     }
