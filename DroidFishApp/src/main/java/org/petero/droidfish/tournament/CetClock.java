@@ -7,6 +7,7 @@ public final class CetClock {
     private int activeSide = -1;
     private long turnStartedNs;
     private boolean running;
+    private long lastTurnElapsedMs;
 
     public CetClock(long baseMs, long incrementMs) {
         this(baseMs, baseMs, incrementMs);
@@ -38,6 +39,9 @@ public final class CetClock {
 
     public long incrementMs() { return incrementMs; }
 
+    /** Duration spent thinking on the most recently completed turn, in milliseconds. */
+    public synchronized long lastTurnElapsedMs() { return lastTurnElapsedMs; }
+
     /** Accepts a move and adds the side's increment only if it arrived in time. */
     public synchronized boolean acceptMove(boolean whiteMover) {
         return acceptMove(whiteMover, System.nanoTime());
@@ -47,6 +51,7 @@ public final class CetClock {
     public synchronized boolean acceptMove(boolean whiteMover, long arrivalNs) {
         if (!running || activeSide != (whiteMover ? 0 : 1)) return false;
         long elapsed = Math.max(0, (arrivalNs - turnStartedNs) / 1_000_000L);
+        lastTurnElapsedMs = elapsed;
         remaining[activeSide] = Math.max(0, remaining[activeSide] - elapsed);
         running = false;
         if (remaining[activeSide] <= 0) return false;

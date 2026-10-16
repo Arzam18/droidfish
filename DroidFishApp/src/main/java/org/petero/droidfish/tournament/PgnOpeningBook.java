@@ -43,6 +43,14 @@ public final class PgnOpeningBook {
         return moves;
     }
 
+    /** Read a PGN tag value, returning an empty string when the tag is absent. */
+    public static String tagValue(String pgn, String tagName) {
+        if (pgn == null || tagName == null) return "";
+        Pattern pattern = Pattern.compile("(?m)^\\[" + Pattern.quote(tagName) + "\\s+\"([^\"]*)\"\\]");
+        Matcher matcher = pattern.matcher(pgn);
+        return matcher.find() ? matcher.group(1).trim() : "";
+    }
+
     /** Select one PGN game in order, cycling to the first opening when the list ends. */
     public static String gameAt(String pgn, int index) {
         if (pgn == null || pgn.trim().isEmpty()) return "";

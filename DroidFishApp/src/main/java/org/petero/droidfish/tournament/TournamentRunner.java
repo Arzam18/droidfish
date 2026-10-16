@@ -31,6 +31,8 @@ public final class TournamentRunner {
                                String whiteName, String blackName);
         /** Persistent per-engine analysis text; each side retains its last line after moving. */
         void onEngineAnalysis(boolean white, String analysis);
+        void onReviewPosition(Position position, int ply, int totalPlies, String whiteAnalysis, String blackAnalysis, long moveTimeMs);
+        void onMoveTime(long moveTimeMs, String openingName);
         void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn);
         void onTournamentFinished();
         void onError(String message, Throwable error);
@@ -54,6 +56,16 @@ public final class TournamentRunner {
     private volatile int activeWhiteId, activeBlackId;
     private long turnGeneration;
     private volatile boolean stopped, finished, paused;
+    private final ArrayList<Position> positionHistory = new ArrayList<>();
+    private final ArrayList<String> whiteAnalysisHistory = new ArrayList<>();
+    private final ArrayList<String> blackAnalysisHistory = new ArrayList<>();
+    private final ArrayList<Long> moveTimeHistory = new ArrayList<>();
+    private int reviewPly = -1;
+    private String currentOpeningName = "Starting position";
+    private String latestWhiteAnalysis = "WHITE analysis waiting…";
+    private String latestBlackAnalysis = "BLACK analysis waiting…";
+    private long lastMoveTimeMs;
+    private boolean humanAdjudication;
 
     public TournamentRunner(TournamentManager tournament, Listener listener,
                             EngineOptions engineOptions, BookOptions bookOptions,
@@ -135,6 +147,51 @@ public final class TournamentRunner {
         blackPlayer.shutdownEngine();
     }
 
+    /** Navigate completed plies while paused; -1 means return to live position. */
+    public synchronized void reviewPreviousMove() {
+        if (!paused || game == null || positionHistory.isEmpty()) return;
+        if (reviewPly < 0) reviewPly = Math.max(0, positionHistory.size() - 2);
+        else reviewPly = Math.max(0, reviewPly - 1);
+        publishReviewPosition();
+    }
+
+    public synchronized void reviewNextMove() {
+        if (!paused || game == null || positionHistory.isEmpty()) return;
+        if (reviewPly < 0) return;
+        if (reviewPly >= positionHistory.size() - 1) reviewPly = -1;
+        else reviewPly++;
+        publishReviewPosition();
+    }
+
+    public synchronized void adjudicate(String result) {
+        if (stopped || finished || paused == false || game == null || pairing == null) return;
+        if (!("1-0".equals(result) || "0-1".equals(result) || "1/2-1/2".equals(result))) return;
+        turnGeneration++;
+        clock.pause();
+        whitePlayer.stopSearch();
+        blackPlayer.stopSearch();
+        humanAdjudication = true;
+        game.adjudicateTournament(result);
+        TournamentManager.Outcome outcome = "1-0".equals(result) ? TournamentManager.Outcome.WHITE_WIN :
+                "0-1".equals(result) ? TournamentManager.Outcome.BLACK_WIN : TournamentManager.Outcome.DRAW;
+        finishCurrentGame(outcome);
+    }
+
+    private void publishReviewPosition() {
+        int index = reviewPly < 0 ? positionHistory.size() - 1 : reviewPly;
+        if (index < 0 || index >= positionHistory.size()) return;
+        listener.onReviewPosition(new Position(positionHistory.get(index)), index, positionHistory.size() - 1,
+                whiteAnalysisHistory.get(index), blackAnalysisHistory.get(index), moveTimeHistory.get(index));
+    }
+
+    private void recordPosition(long moveTimeMs) {
+        positionHistory.add(new Position(game.currPos()));
+        whiteAnalysisHistory.add(latestWhiteAnalysis);
+        blackAnalysisHistory.add(latestBlackAnalysis);
+        moveTimeHistory.add(Math.max(0, moveTimeMs));
+        reviewPly = -1;
+    }
+
     private void startNextGame() {
         if (stopped || finished || paused) return;
         pairing = tournament.current();
@@ -151,13 +208,22 @@ public final class TournamentRunner {
         tc.setTimeControl((int)baseTimeMs, 0, (int)incrementMs);
         game = new Game(new EmptyPgnReceiver(), tc);
         game.tree.setPlayerNames(whiteEngine.displayName, blackEngine.displayName);
+        positionHistory.clear(); whiteAnalysisHistory.clear(); blackAnalysisHistory.clear(); moveTimeHistory.clear();
+        reviewPly = -1; lastMoveTimeMs = 0; humanAdjudication = false;
+        latestWhiteAnalysis = "WHITE analysis waiting…"; latestBlackAnalysis = "BLACK analysis waiting…";
+        currentOpeningName = "Starting position";
         String eventType = tournament.format().name().toLowerCase(java.util.Locale.US).replace('_', ' ');
         game.tree.setTournamentMetadata(tournament.title(), "DroidFish", pairing.round + "." + pairing.gameNumber,
                 eventType, (baseTimeMs / 1000) + "+" + String.format(java.util.Locale.US, "%g", incrementMs / 1000.0));
         clock = new CetClock(baseTimeMs, incrementMs);
+        game.tree.setTournamentOpening(currentOpeningName);
         if (openingPlies > 0 && !openingPgn.isEmpty()) {
             int openingIndex = repeatOpening ? Math.max(0, (pairing.gameNumber - 1) / 2) : pairing.index;
             String selectedOpening = PgnOpeningBook.gameAt(openingPgn, openingIndex);
+            currentOpeningName = PgnOpeningBook.tagValue(selectedOpening, "Opening");
+            if (currentOpeningName.isEmpty()) currentOpeningName = PgnOpeningBook.tagValue(selectedOpening, "ECO");
+            if (currentOpeningName.isEmpty()) currentOpeningName = "PGN opening " + (openingIndex + 1);
+            game.tree.setTournamentOpening(currentOpeningName);
             PgnOpeningBook.applyMainLine(selectedOpening, openingPlies, san -> {
                 Pair<Boolean, Move> result = game.processString(san);
                 return result != null && Boolean.TRUE.equals(result.first) && result.second != null;
@@ -167,6 +233,8 @@ public final class TournamentRunner {
             finishCurrentGame(resultForState(game.getGameState()));
             return;
         }
+        recordPosition(0);
+        listener.onMoveTime(0, currentOpeningName);
         whitePlayer.setEngineOptions(engineOptions);
         blackPlayer.setEngineOptions(engineOptions);
         whitePlayer.uciNewGame();
@@ -265,6 +333,9 @@ public final class TournamentRunner {
             finishCurrentGame(resultForState(game.getGameState()));
             return;
         }
+        lastMoveTimeMs = clock.lastTurnElapsedMs();
+        recordPosition(lastMoveTimeMs);
+        listener.onMoveTime(lastMoveTimeMs, currentOpeningName);
         notifyPosition();
         if (game.getGameState() != Game.GameState.ALIVE) {
             finishCurrentGame(resultForState(game.getGameState()));
@@ -322,7 +393,8 @@ public final class TournamentRunner {
     private synchronized void finishCurrentGame(TournamentManager.Outcome outcome) {
         if (stopped || finished || pairing == null || outcome == TournamentManager.Outcome.UNFINISHED) return;
         turnGeneration++;
-        game.tree.setTournamentTermination(terminationForState(game.getGameState()));
+        game.tree.setTournamentTermination(humanAdjudication ? "adjudication" : terminationForState(game.getGameState()));
+        humanAdjudication = false;
         String pgn = game.tree.toPGN(pgnOptions);
         try {
             tournament.recordResult(pairing.index, outcome, pgn);
@@ -389,6 +461,11 @@ public final class TournamentRunner {
             String text = side + "  d" + lastDepth + "  " + String.format(java.util.Locale.US, "%.2f", lastTimeMs / 1000.0) + "s  " +
                     (lastNps >= 1000 ? String.format(java.util.Locale.US, "%.1fkn/s", lastNps / 1000.0) : lastNps + "n/s") +
                     "  " + lastNodes + " nodes" + (lastPv.isEmpty() ? "" : "\n" + lastPv);
+            if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
+            if (!positionHistory.isEmpty() && reviewPly < 0) {
+                int last = positionHistory.size() - 1;
+                if (white) whiteAnalysisHistory.set(last, text); else blackAnalysisHistory.set(last, text);
+            }
             listener.onEngineAnalysis(white, text);
         }
         @Override public void notifySearchResult(int id, String cmd, Move ponder) {
