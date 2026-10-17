@@ -917,12 +917,12 @@ public final class TournamentActivity extends Activity {
     }
 
     private void startTournament() {
+        // Never tear down a live runner and immediately launch another pair of engines.
+        // That raced engine shutdown in the past and could return the app to the main board.
+        // Finish/stop the current tournament first, then start a new saved event.
         if (runner != null) {
-            // The tournament's schedule and completed PGNs are already persisted. Stop the
-            // current runner before creating a separate saved tournament; its unfinished
-            // pairing remains unfinished and will be replayed when resumed.
-            try { runner.stop(); } catch (RuntimeException ignored) { }
-            runner = null;
+            Toast.makeText(this, "A tournament is already active. Stop or finish it before starting a new tournament.", Toast.LENGTH_LONG).show();
+            return;
         }
         if (selectedEngines.size() < 2) { Toast.makeText(this, "Select at least two engines", Toast.LENGTH_LONG).show(); return; }
         try {
@@ -954,8 +954,16 @@ public final class TournamentActivity extends Activity {
             tournament.save();
             launchTournament(tournament);
         } catch (Exception e) {
-            if (runner != null) runner.stop();
-            runner = null; startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(runner != null);
+            TournamentRunner failedRunner = runner;
+            runner = null;
+            if (failedRunner != null) {
+                try { failedRunner.stop(); } catch (RuntimeException ignored) { }
+            }
+            if (startButton != null) startButton.setEnabled(true);
+            if (resumeButton != null) resumeButton.setEnabled(true);
+            if (stopButton != null) stopButton.setEnabled(false);
+            // A failed start must return to setup instead of leaving a half-initialized board.
+            if (setupView != null) setContentView(setupView);
             Toast.makeText(this, "Could not start tournament: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
