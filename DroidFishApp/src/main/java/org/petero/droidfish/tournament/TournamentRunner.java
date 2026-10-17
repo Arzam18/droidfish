@@ -507,34 +507,9 @@ public final class TournamentRunner {
             }
             String nodes = compactCount(lastNodes);
             String nps = compactCount(lastNps);
-            StringBuilder variation = new StringBuilder();
-            if (!pvLine.isEmpty()) {
-                // Wrap long principal variations into readable lines so they do not compete
-                // with the board for layout space. The panel itself has a bounded line count.
-                String[] moves = pvLine.trim().split("\\s+");
-                int lineMoves = 0;
-                for (String move : moves) {
-                    if (variation.length() > 0 && lineMoves >= 5) {
-                        variation.append('\n');
-                        lineMoves = 0;
-                    } else if (variation.length() > 0 && variation.charAt(variation.length() - 1) != '\n') {
-                        variation.append(' ');
-                    }
-                    variation.append(move);
-                    lineMoves++;
-                }
-            }
-            // Keep the analysis panel at a constant four-line height so incoming PV
-            // updates never push the chessboard up and down. The first line is compact
-            // statistics; the remaining three lines are reserved for the variation.
-            String[] wrapped = variation.toString().split("\\n");
-            StringBuilder fixedVariation = new StringBuilder();
-            for (int i = 0; i < 3; i++) {
-                if (fixedVariation.length() > 0) fixedVariation.append('\n');
-                if (i < wrapped.length) fixedVariation.append(wrapped[i]);
-            }
+            String variation = pvLine == null ? "" : pvLine.trim();
             String text = "Eval: " + score + "    Depth: " + lastDepth + "    Nodes: " + nodes + "    NPS: " + nps +
-                    "\n" + fixedVariation;
+                    (variation.length() == 0 ? "" : "\n" + variation);
             if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
             if (!positionHistory.isEmpty() && reviewPly < 0) {
                 int last = positionHistory.size() - 1;
