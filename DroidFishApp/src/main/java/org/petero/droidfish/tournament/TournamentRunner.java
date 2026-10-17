@@ -25,10 +25,10 @@ import java.util.Map;
  */
 public final class TournamentRunner {
     public interface Listener {
-        void onGameStarted(TournamentManager.Pairing pairing, String whiteName, String blackName, String pgnMoves);
+        void onGameStarted(TournamentManager.Pairing pairing, String whiteName, String blackName);
         /** Current tournament position, copied so the UI can safely render it. */
         void onPositionChanged(Position position, boolean whiteToMove, long whiteTimeMs, long blackTimeMs,
-                               String whiteName, String blackName);
+                               String whiteName, String blackName, String pgnMoves);
         /** Persistent per-engine analysis text; each side retains its last line after moving. */
         void onEngineAnalysis(boolean white, String analysis);
         void onReviewPosition(Position position, int ply, int totalPlies, String whiteAnalysis, String blackAnalysis, long moveTimeMs);
