@@ -56,6 +56,18 @@ public final class TournamentActivity extends Activity {
     private boolean currentWhiteToMove = true;
     private String currentWhiteName = "WHITE", currentBlackName = "BLACK";
     private TextView whiteAnalysisText, blackAnalysisText, whiteMoveTimeText, blackMoveTimeText, openingText;
+    private View mirrorView;
+    private ChessBoardPlay mirrorBoard;
+    private TextView mirrorAnalysisText, mirrorWhiteClock, mirrorBlackClock, mirrorWhiteName, mirrorBlackName,
+            mirrorWhiteMoveTime, mirrorBlackMoveTime, mirrorMovesText, mirrorStatusText;
+    private Button mirrorAnalysisButton;
+    private final ArrayList<Position> mirrorPositions = new ArrayList<>();
+    private int mirrorPly = -1;
+    private boolean mirrorAnalysisOn = false;
+    private boolean mirrorAnalysisWhite = true;
+    private boolean mirrorNavigationAllowed = false;
+    private String lastWhiteAnalysis = "Eval: —", lastBlackAnalysis = "Eval: —";
+    private long lastWhiteTimeMs, lastBlackTimeMs;
     private CheckBox showTournamentArrowsCheck;
     private Position latestPosition = new Position();
     private float touchDownX, touchDownY;
@@ -297,7 +309,7 @@ public final class TournamentActivity extends Activity {
 
         menu.setOnClickListener(v -> new AlertDialog.Builder(TournamentActivity.this)
                 .setTitle("Tournament menu")
-                .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Moves"}, (dialog, which) -> {
+                .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Moves", "Mirror Board"}, (dialog, which) -> {
                     if (which == 0) showAdjudicationDialog();
                     else if (which == 1) setContentView(setupView);
                     else if (which == 2) { toggleTournamentFlip(); }
@@ -313,6 +325,89 @@ public final class TournamentActivity extends Activity {
         playScroll.addView(page, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         playView = playScroll;
+        buildMirrorUi();
+    }
+
+    /** Independent, read-only mirror of the live tournament board. Navigation never changes the live board. */
+    private void buildMirrorUi() {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(0, dp(8), 0, dp(8));
+        page.setBackgroundColor(0xFF303030);
+        TextView title = text("MIRROR BOARD"); title.setTextSize(18); title.setTypeface(null, android.graphics.Typeface.BOLD);
+        title.setGravity(android.view.Gravity.CENTER); page.addView(title, fullWidth());
+        mirrorAnalysisText = text("Select an engine with Analysis");
+        mirrorAnalysisText.setTextSize(18); mirrorAnalysisText.setLines(7); mirrorAnalysisText.setMaxLines(7);
+        mirrorAnalysisText.setHeight(dp(147)); mirrorAnalysisText.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
+        mirrorAnalysisText.setIncludeFontPadding(false); mirrorAnalysisText.setTextColor(0xFFD5D5D5);
+        page.addView(mirrorAnalysisText, fullWidth());
+        mirrorBlackClock = text("00:00.0"); mirrorBlackClock.setTextSize(20);
+        mirrorBlackName = text("BLACK"); mirrorBlackName.setTextSize(18); mirrorBlackName.setGravity(android.view.Gravity.CENTER);
+        mirrorBlackMoveTime = text("—"); mirrorBlackMoveTime.setGravity(android.view.Gravity.RIGHT);
+        LinearLayout black = new LinearLayout(this); black.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        black.addView(mirrorBlackClock, new LinearLayout.LayoutParams(0, -2, 1));
+        black.addView(mirrorBlackName, new LinearLayout.LayoutParams(0, -2, 1.4f));
+        black.addView(mirrorBlackMoveTime, new LinearLayout.LayoutParams(0, -2, 1)); page.addView(black, fullWidth());
+        FrameLayout frame = new FrameLayout(this) {
+            @Override protected void onMeasure(int w, int h) { int width=MeasureSpec.getSize(w); super.onMeasure(MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY)); }
+        };
+        LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(-1, -2); fp.topMargin=dp(4); fp.bottomMargin=dp(4); page.addView(frame, fp);
+        mirrorBoard = new TournamentChessBoard(this); mirrorBoard.setClickable(false); mirrorBoard.setFocusable(false); mirrorBoard.highlightLastMove=true;
+        mirrorBoard.setPosition(new Position()); frame.addView(mirrorBoard, new FrameLayout.LayoutParams(-1,-1,android.view.Gravity.CENTER));
+        mirrorWhiteClock = text("00:00.0"); mirrorWhiteClock.setTextSize(20);
+        mirrorWhiteName = text("WHITE"); mirrorWhiteName.setTextSize(18); mirrorWhiteName.setGravity(android.view.Gravity.CENTER);
+        mirrorWhiteMoveTime = text("—"); mirrorWhiteMoveTime.setGravity(android.view.Gravity.RIGHT);
+        LinearLayout white = new LinearLayout(this); white.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        white.addView(mirrorWhiteClock, new LinearLayout.LayoutParams(0,-2,1)); white.addView(mirrorWhiteName,new LinearLayout.LayoutParams(0,-2,1.4f));
+        white.addView(mirrorWhiteMoveTime,new LinearLayout.LayoutParams(0,-2,1)); page.addView(white,fullWidth());
+        LinearLayout nav = new LinearLayout(this); nav.setGravity(android.view.Gravity.CENTER);
+        Button first = new Button(this); first.setText("<<"); Button prev = new Button(this); prev.setText("<");
+        mirrorAnalysisButton = new Button(this); mirrorAnalysisButton.setText("⏯");
+        Button next = new Button(this); next.setText(">"); Button last = new Button(this); last.setText(">>");
+        for (Button b : new Button[]{first,prev,mirrorAnalysisButton,next,last}) nav.addView(b,new LinearLayout.LayoutParams(0,-2,1));
+        page.addView(nav,fullWidth());
+        mirrorMovesText=text("No moves played yet."); mirrorMovesText.setTextSize(16); page.addView(mirrorMovesText,fullWidth());
+        mirrorStatusText=text("Mirror follows the live tournament."); page.addView(mirrorStatusText,fullWidth());
+        Button back=new Button(this); back.setText("Close mirror"); page.addView(back,fullWidth()); back.setOnClickListener(v->setContentView(playView));
+        first.setOnClickListener(v->navigateMirror(0)); prev.setOnClickListener(v->navigateMirror(Math.max(0, mirrorDisplayedPly()-1)));
+        next.setOnClickListener(v->navigateMirror(Math.min(mirrorPositions.size()-1, mirrorDisplayedPly()+1)));
+        last.setOnClickListener(v->navigateMirror(Math.max(0,mirrorPositions.size()-1)));
+        mirrorAnalysisButton.setOnClickListener(v->toggleMirrorAnalysis());
+        ScrollView sc=new ScrollView(this); sc.addView(page,new ScrollView.LayoutParams(-1,-2)); mirrorView=sc;
+    }
+
+    private int mirrorDisplayedPly() { return mirrorPly < 0 ? Math.max(0, mirrorPositions.size()-1) : mirrorPly; }
+    private void openMirrorBoard() { syncMirrorFromLive(); setContentView(mirrorView); }
+    private void syncMirrorFromLive() {
+        if (mirrorBoard == null) return;
+        if (mirrorPositions.isEmpty() || !samePosition(mirrorPositions.get(mirrorPositions.size()-1), latestPosition)) mirrorPositions.add(new Position(latestPosition));
+        int idx = mirrorPly < 0 ? mirrorPositions.size()-1 : Math.min(mirrorPly,mirrorPositions.size()-1);
+        if (idx >= 0) mirrorBoard.setPosition(new Position(mirrorPositions.get(idx)));
+        if (tournamentBoard != null) mirrorBoard.flipped = tournamentBoard.flipped;
+        if (mirrorMovesText != null) mirrorMovesText.setText(currentPgnMoves.isEmpty() ? "No moves played yet." : currentPgnMoves);
+        if (mirrorWhiteName != null) { mirrorWhiteName.setText(currentWhiteName); mirrorBlackName.setText(currentBlackName); }
+        if (mirrorWhiteClock != null) { mirrorWhiteClock.setText(whiteClockText == null ? "—" : whiteClockText.getText()); mirrorBlackClock.setText(blackClockText == null ? "—" : blackClockText.getText()); }
+        if (mirrorWhiteMoveTime != null) { mirrorWhiteMoveTime.setText(whiteMoveTimeText == null ? "—" : whiteMoveTimeText.getText()); mirrorBlackMoveTime.setText(blackMoveTimeText == null ? "—" : blackMoveTimeText.getText()); }
+        if (mirrorAnalysisOn && mirrorAnalysisText != null) mirrorAnalysisText.setText(mirrorAnalysisWhite ? lastWhiteAnalysis : lastBlackAnalysis);
+    }
+    private boolean samePosition(Position a, Position b) { return a != null && b != null && a.toString().equals(b.toString()); }
+    private void navigateMirror(int ply) {
+        if (runner != null && !runner.isPaused()) {
+            new AlertDialog.Builder(this).setTitle("Tournament is active:")
+                .setMessage("Pause the tournament before navigating the mirror board?")
+                .setPositiveButton("Pause", (d,w)->{ runner.pause(); mirrorNavigationAllowed=true; if(playPauseButton!=null)playPauseButton.setText("P"); navigateMirror(ply); })
+                .setNegativeButton("Close", (d,w)->{}).show(); return;
+        }
+        if (mirrorPositions.isEmpty()) return;
+        mirrorPly=Math.max(0,Math.min(ply,mirrorPositions.size()-1)); mirrorBoard.setPosition(new Position(mirrorPositions.get(mirrorPly)));
+        if (mirrorStatusText!=null) mirrorStatusText.setText("Mirror review · ply " + mirrorPly + "/" + (mirrorPositions.size()-1));
+    }
+    private void toggleMirrorAnalysis() {
+        if (mirrorAnalysisOn) { mirrorAnalysisOn=false; mirrorAnalysisButton.setText("⏯"); mirrorAnalysisText.setText("Analysis off"); return; }
+        new AlertDialog.Builder(this).setTitle("Select analysis engine").setItems(new String[]{currentWhiteName,currentBlackName},(d,which)->{
+            mirrorAnalysisWhite=which==0; mirrorAnalysisOn=true; mirrorAnalysisButton.setText("Analysis on");
+            mirrorAnalysisText.setText(mirrorAnalysisWhite?lastWhiteAnalysis:lastBlackAnalysis);
+        }).setNegativeButton("Cancel",null).show();
     }
 
     private boolean handleBoardSwipe(android.view.MotionEvent event) {
@@ -534,6 +629,7 @@ public final class TournamentActivity extends Activity {
         if(blackClockText!=null && b>=0) blackClockText.setText(formatClock(b));
         long elapsed=r.activeMoveTimeMs();
         if(elapsed>=0) { boolean white=r.whiteToMove(); TextView t=white?whiteMoveTimeText:blackMoveTimeText; if(t!=null)t.setText(formatClockDuration(elapsed)); }
+        if (mirrorView != null && mirrorView.getParent() != null) syncMirrorFromLive();
     }
 
     private void startTournament() {
@@ -727,6 +823,8 @@ public final class TournamentActivity extends Activity {
                     statusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + ": " + white + " vs " + black);
                     if (openingStartInput != null && tournament.repeatOpening()) openingStartInput.setText(String.valueOf(tournament.openingStartIndex() + Math.max(0, (pairing.gameNumber - 1) / 2)));
                     currentPgnMoves = "";
+                    mirrorPositions.clear(); mirrorPly = -1; mirrorNavigationAllowed = false;
+                    mirrorPositions.add(new Position(latestPosition));
                     whiteHintMove = null; blackHintMove = null;
                     if (tournamentBoard != null) tournamentBoard.setMoveHints(null);
                     moveStatusText.setText("PGN: —");
@@ -749,6 +847,8 @@ public final class TournamentActivity extends Activity {
                     currentWhiteToMove = whiteToMove;
                     updateTurnNameLabels();
                     currentPgnMoves = pgnMoves == null ? "" : pgnMoves;
+                    if (mirrorPositions.isEmpty() || !samePosition(mirrorPositions.get(mirrorPositions.size()-1), position)) mirrorPositions.add(new Position(position));
+                    if (mirrorPly < 0) syncMirrorFromLive();
                     tournamentBoard.setPosition(position);
                     whiteClockText.setText(formatClock(whiteTimeMs));
                     blackClockText.setText(formatClock(blackTimeMs));
@@ -760,6 +860,8 @@ public final class TournamentActivity extends Activity {
             @Override public void onEngineAnalysis(boolean white, String analysis) {
                 runOnUiThread(() -> {
                     TextView target = white ? whiteAnalysisText : blackAnalysisText;
+                    if (white) lastWhiteAnalysis = analysis; else lastBlackAnalysis = analysis;
+                    if (mirrorAnalysisOn && mirrorAnalysisText != null) mirrorAnalysisText.setText(mirrorAnalysisWhite ? lastWhiteAnalysis : lastBlackAnalysis);
                     if (target != null) {
                         android.text.SpannableString styled = new android.text.SpannableString(analysis);
                         int variationStart = analysis.indexOf('\n');
