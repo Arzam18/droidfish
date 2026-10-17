@@ -63,6 +63,7 @@ public final class TournamentActivity extends Activity {
     private TextView openingFileText;
     private String selectedOpeningPgn = "";
     private String currentPgnMoves = "";
+    private org.petero.droidfish.gamelogic.Move whiteHintMove, blackHintMove;
     private String selectedOpeningFileName = "No PGN file selected";
     private static final int REQUEST_OPENING_PGN = 7314;
     private CheckBox repeatOpeningCheck;
@@ -274,17 +275,23 @@ public final class TournamentActivity extends Activity {
         controls.setOrientation(LinearLayout.HORIZONTAL);
         playPauseButton = new Button(this); playPauseButton.setText("P");
         Button results = new Button(this); results.setText("R");
-        Button setup = new Button(this); setup.setText("S");
+        Button menu = new Button(this); menu.setText("M");
         Button schedule = new Button(this); schedule.setText("Sch");
-        Button adjudicateButton = new Button(this); adjudicateButton.setText("A");
+
         controls.addView(playPauseButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(results, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        controls.addView(setup, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        controls.addView(menu, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(schedule, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        controls.addView(adjudicateButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        setup.setOnClickListener(v -> setContentView(setupView));
+
+        menu.setOnClickListener(v -> new AlertDialog.Builder(TournamentActivity.this)
+                .setTitle("Tournament menu")
+                .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Moves"}, (dialog, which) -> {
+                    if (which == 0) showAdjudicationDialog();
+                    else if (which == 1) setContentView(setupView);
+                    else if (which == 2) { if (tournamentBoard != null) tournamentBoard.setFlipped(!tournamentBoard.flipped); }
+                    else showMovesDialog();
+                }).show());
         schedule.setOnClickListener(v -> showScheduleDialog());
-        adjudicateButton.setOnClickListener(v -> showAdjudicationDialog());
         page.addView(controls, fullWidth());
         playPauseButton.setOnClickListener(v -> togglePauseResume());
         results.setOnClickListener(v -> showStandingsDialog());
@@ -351,6 +358,14 @@ public final class TournamentActivity extends Activity {
                     })
                     .setPositiveButton("OK", null).show();
         }
+    }
+
+    private void showMovesDialog() {
+        String moves = currentPgnMoves == null || currentPgnMoves.isEmpty() ? "No moves played yet." : currentPgnMoves;
+        TextView body = text(moves); body.setTextIsSelectable(true); body.setTextSize(16); body.setPadding(dp(12), dp(8), dp(12), dp(8));
+        ScrollView sc = new ScrollView(this); sc.addView(body);
+        new AlertDialog.Builder(this).setTitle("Current game moves").setView(sc)
+                .setPositiveButton("TOURNAMENT", (d, w) -> setContentView(playView)).setNegativeButton("CLOSE", null).show();
     }
 
     private void showScheduleDialog() {
@@ -658,6 +673,7 @@ public final class TournamentActivity extends Activity {
                     statusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + ": " + white + " vs " + black);
                     if (openingStartInput != null && tournament.repeatOpening()) openingStartInput.setText(String.valueOf(tournament.openingStartIndex() + Math.max(0, (pairing.gameNumber - 1) / 2)));
                     currentPgnMoves = "";
+                    whiteHintMove = null; blackHintMove = null;
                     moveStatusText.setText("PGN: —");
                     if (openingText != null) openingText.setText("Opening: Starting position");
                     if (whiteMoveTimeText != null) whiteMoveTimeText.setText("—");
@@ -668,9 +684,10 @@ public final class TournamentActivity extends Activity {
             }
             @Override public void onPositionChanged(Position position, boolean whiteToMove,
                                                     long whiteTimeMs, long blackTimeMs,
-                                                    String whiteName, String blackName) {
+                                                    String whiteName, String blackName, String pgnMoves) {
                 runOnUiThread(() -> {
                     latestPosition = new Position(position);
+                    currentPgnMoves = pgnMoves == null ? "" : pgnMoves;
                     tournamentBoard.setPosition(position);
                     whiteClockText.setText(formatClock(whiteTimeMs));
                     blackClockText.setText(formatClock(blackTimeMs));
@@ -694,19 +711,24 @@ public final class TournamentActivity extends Activity {
                     if (tournamentBoard != null && showTournamentArrowsCheck != null && showTournamentArrowsCheck.isChecked()
                             && android.preference.PreferenceManager.getDefaultSharedPreferences(TournamentActivity.this).getString("thinkingArrows", "4").equals("0") == false) {
                         try {
-                            int evalAt = analysis.indexOf("eval ");
-                            if (evalAt >= 0) {
-                                String pv = analysis.substring(evalAt + 5).trim();
-                                int space = pv.indexOf(' ');
-                                if (space >= 0) {
-                                    pv = pv.substring(space + 1).trim();
-                                    int end = pv.indexOf(' '); if (end >= 0) pv = pv.substring(0, end);
-                                    org.petero.droidfish.gamelogic.Move move = org.petero.droidfish.gamelogic.TextIO.stringToMove(new Position(latestPosition), pv);
-                                    if (move != null) tournamentBoard.setMoveHints(java.util.Collections.singletonList(move));
+                            int variationStart = analysis.indexOf('\n');
+                            if (variationStart >= 0 && variationStart + 1 < analysis.length()) {
+                                String pvLine = analysis.substring(variationStart + 1).trim();
+                                int firstSpace = pvLine.indexOf(' ');
+                                if (firstSpace >= 0 && firstSpace + 1 < pvLine.length()) pvLine = pvLine.substring(firstSpace + 1).trim();
+                                int end = pvLine.indexOf(' '); if (end >= 0) pvLine = pvLine.substring(0, end);
+                                org.petero.droidfish.gamelogic.Move move = org.petero.droidfish.gamelogic.TextIO.stringToMove(new Position(latestPosition), pvLine);
+                                    if (move != null) {
+                                        if (white) whiteHintMove = move; else blackHintMove = move;
+                                        java.util.ArrayList<org.petero.droidfish.gamelogic.Move> hints = new java.util.ArrayList<>();
+                                        if (whiteHintMove != null) hints.add(whiteHintMove);
+                                        if (blackHintMove != null) hints.add(blackHintMove);
+                                        tournamentBoard.setMoveHints(hints);
+                                    }
                                 }
                             }
                         } catch (RuntimeException ignored) { }
-                    } else if (tournamentBoard != null) tournamentBoard.setMoveHints(null);
+                    } else if (tournamentBoard != null) { whiteHintMove = null; blackHintMove = null; tournamentBoard.setMoveHints(null); }
                 });
             }
             @Override public void onReviewPosition(Position position, int ply, int totalPlies,
