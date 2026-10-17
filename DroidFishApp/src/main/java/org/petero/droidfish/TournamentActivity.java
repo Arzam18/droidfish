@@ -188,23 +188,23 @@ public final class TournamentActivity extends Activity {
         tournamentTitleText.setGravity(android.view.Gravity.CENTER);
         page.addView(tournamentTitleText, fullWidth());
 
-        blackNameText = text("BLACK");
-        blackNameText.setTextSize(24);
-        blackNameText.setTypeface(null, android.graphics.Typeface.BOLD);
-        page.addView(blackNameText, fullWidth());
-        LinearLayout blackClockRow = new LinearLayout(this);
-        blackClockRow.setOrientation(LinearLayout.HORIZONTAL);
-        blackMoveTimeText = text("—"); blackMoveTimeText.setTextSize(25); blackMoveTimeText.setTypeface(null, android.graphics.Typeface.BOLD);
-        blackClockText = text("00:30.0"); blackClockText.setTextSize(25); blackClockText.setTypeface(null, android.graphics.Typeface.BOLD); blackClockText.setGravity(android.view.Gravity.RIGHT);
-        blackClockRow.addView(blackMoveTimeText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        blackClockRow.addView(blackClockText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        page.addView(blackClockRow, fullWidth());
-        blackAnalysisText = text("BLACK analysis waiting…");
-        blackAnalysisText.setTextSize(16);
-        blackAnalysisText.setTypeface(android.graphics.Typeface.MONOSPACE);
+        // Upper engine analysis panel, kept above its clock/name row.
+        blackAnalysisText = text("Eval: —    Depth: —    Nodes: —    NPS: —");
+        blackAnalysisText.setTextSize(18);
         blackAnalysisText.setMaxLines(5);
         blackAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(blackAnalysisText, fullWidth());
+
+        LinearLayout blackClockRow = new LinearLayout(this);
+        blackClockRow.setOrientation(LinearLayout.HORIZONTAL);
+        blackClockRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        blackClockText = text("00:30.0"); blackClockText.setTextSize(21); blackClockText.setTypeface(null, android.graphics.Typeface.BOLD);
+        blackNameText = text("BLACK"); blackNameText.setTextSize(19); blackNameText.setTypeface(null, android.graphics.Typeface.BOLD); blackNameText.setGravity(android.view.Gravity.CENTER);
+        blackMoveTimeText = text("—"); blackMoveTimeText.setTextSize(17); blackMoveTimeText.setGravity(android.view.Gravity.RIGHT);
+        blackClockRow.addView(blackClockText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        blackClockRow.addView(blackNameText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
+        blackClockRow.addView(blackMoveTimeText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        page.addView(blackClockRow, fullWidth());
 
         FrameLayout boardFrame = new FrameLayout(this);
         LinearLayout.LayoutParams frameParams = new LinearLayout.LayoutParams(
@@ -224,30 +224,20 @@ public final class TournamentActivity extends Activity {
         boardFrame.setOnTouchListener((v, event) -> handleBoardSwipe(event));
         tournamentBoard.setOnTouchListener((v, event) -> handleBoardSwipe(event));
 
-        LinearLayout navigation = new LinearLayout(this);
-        navigation.setOrientation(LinearLayout.HORIZONTAL);
-        navigation.setGravity(android.view.Gravity.CENTER);
-        previousMoveButton = new Button(this); previousMoveButton.setText("◀");
-        nextMoveButton = new Button(this); nextMoveButton.setText("▶");
-        previousMoveButton.setMinWidth(dp(48)); nextMoveButton.setMinWidth(dp(48));
-        navigation.addView(previousMoveButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        navigation.addView(nextMoveButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        page.addView(navigation, fullWidth());
-
-        whiteNameText = text("WHITE");
-        whiteNameText.setTextSize(24);
-        whiteNameText.setTypeface(null, android.graphics.Typeface.BOLD);
-        page.addView(whiteNameText, fullWidth());
+        // Move-navigation buttons are temporarily hidden as requested.
         LinearLayout whiteClockRow = new LinearLayout(this);
         whiteClockRow.setOrientation(LinearLayout.HORIZONTAL);
-        whiteMoveTimeText = text("—"); whiteMoveTimeText.setTextSize(25); whiteMoveTimeText.setTypeface(null, android.graphics.Typeface.BOLD);
-        whiteClockText = text("00:30.0"); whiteClockText.setTextSize(25); whiteClockText.setTypeface(null, android.graphics.Typeface.BOLD); whiteClockText.setGravity(android.view.Gravity.RIGHT);
-        whiteClockRow.addView(whiteMoveTimeText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        whiteClockRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        whiteClockText = text("00:30.0"); whiteClockText.setTextSize(21); whiteClockText.setTypeface(null, android.graphics.Typeface.BOLD);
+        whiteNameText = text("WHITE"); whiteNameText.setTextSize(19); whiteNameText.setTypeface(null, android.graphics.Typeface.BOLD); whiteNameText.setGravity(android.view.Gravity.CENTER);
+        whiteMoveTimeText = text("—"); whiteMoveTimeText.setTextSize(17); whiteMoveTimeText.setGravity(android.view.Gravity.RIGHT);
         whiteClockRow.addView(whiteClockText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        whiteClockRow.addView(whiteNameText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
+        whiteClockRow.addView(whiteMoveTimeText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(whiteClockRow, fullWidth());
-        whiteAnalysisText = text("WHITE analysis waiting…");
-        whiteAnalysisText.setTextSize(16);
-        whiteAnalysisText.setTypeface(android.graphics.Typeface.MONOSPACE);
+
+        whiteAnalysisText = text("Eval: —    Depth: —    Nodes: —    NPS: —");
+        whiteAnalysisText.setTextSize(18);
         whiteAnalysisText.setMaxLines(5);
         whiteAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(whiteAnalysisText, fullWidth());
@@ -257,8 +247,6 @@ public final class TournamentActivity extends Activity {
         moveStatusText = text("Waiting for tournament");
         page.addView(moveStatusText, fullWidth());
 
-        previousMoveButton.setOnClickListener(v -> { if (runner != null) runner.reviewPreviousMove(); });
-        nextMoveButton.setOnClickListener(v -> { if (runner != null) runner.reviewNextMove(); });
 
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
@@ -278,19 +266,6 @@ public final class TournamentActivity extends Activity {
         playScroll.addView(page, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         playView = playScroll;
-    }
-
-    private CharSequence formatAnalysisDisplay(String analysis) {
-        if (analysis == null) return "";
-        android.text.SpannableString styled = new android.text.SpannableString(analysis);
-        int firstNewline = analysis.indexOf('\n');
-        int secondNewline = firstNewline < 0 ? -1 : analysis.indexOf('\n', firstNewline + 1);
-        if (secondNewline >= 0 && secondNewline + 1 < analysis.length()) {
-            // Keep the metrics readable while shrinking the suggested variation to ~40% size.
-            styled.setSpan(new android.text.style.RelativeSizeSpan(0.4f), secondNewline + 1,
-                    analysis.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        }
-        return styled;
     }
 
     private boolean handleBoardSwipe(android.view.MotionEvent event) {
@@ -521,7 +496,7 @@ public final class TournamentActivity extends Activity {
             @Override public void onGameStarted(TournamentManager.Pairing pairing, String white, String black) {
                 runOnUiThread(() -> {
                     setContentView(playView);
-                    if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title() + "  " + completedGameCount(tournament) + "/" + tournament.pairings().size());
+                    if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
                     if (playPauseButton != null) playPauseButton.setText(runner != null && runner.isPaused() ? "Play" : "Pause");
                     statusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + ": " + white + " vs " + black);
                     moveStatusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + " · " + white + " vs " + black);
@@ -549,7 +524,7 @@ public final class TournamentActivity extends Activity {
             @Override public void onEngineAnalysis(boolean white, String analysis) {
                 runOnUiThread(() -> {
                     TextView target = white ? whiteAnalysisText : blackAnalysisText;
-                    if (target != null) target.setText(formatAnalysisDisplay(analysis));
+                    if (target != null) target.setText(analysis);
                     if (tournamentBoard != null && showTournamentArrowsCheck != null && showTournamentArrowsCheck.isChecked()
                             && android.preference.PreferenceManager.getDefaultSharedPreferences(TournamentActivity.this).getString("thinkingArrows", "4").equals("0") == false) {
                         try {
@@ -574,8 +549,8 @@ public final class TournamentActivity extends Activity {
                     latestPosition = new Position(position);
                     tournamentBoard.setPosition(position);
                     tournamentBoard.setMoveHints(null);
-                    whiteAnalysisText.setText(formatAnalysisDisplay(whiteAnalysis));
-                    blackAnalysisText.setText(formatAnalysisDisplay(blackAnalysis));
+                    whiteAnalysisText.setText(whiteAnalysis);
+                    blackAnalysisText.setText(blackAnalysis);
                     moveStatusText.setText("PAUSED · Reviewing ply " + ply + "/" + totalPlies + " · Next/Previous to navigate");
                     String used = ply == 0 ? "—" : formatClockDuration(moveTimeMs);
                     if (ply > 0 && (ply % 2 == 1)) whiteMoveTimeText.setText(used); else if (ply > 0) blackMoveTimeText.setText(used);
@@ -600,7 +575,7 @@ public final class TournamentActivity extends Activity {
                     statusText.setText(result);
                     moveStatusText.setText(result);
                     standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
-                    if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title() + "  " + completedGameCount(tournament) + "/" + tournament.pairings().size());
+                    if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
                     if (savedError != null) statusText.setText(result + " · PGN auto-save failed: " + savedError.getMessage());
                 });
             }
@@ -623,7 +598,7 @@ public final class TournamentActivity extends Activity {
                 tournament.openingPgn(), tournament.openingPlies(), tournament.repeatOpening(), tournament.openingStartIndex());
         startButton.setEnabled(false); resumeButton.setEnabled(false); stopButton.setEnabled(true);
         if (playPauseButton != null) playPauseButton.setText("Pause");
-        if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title() + "  " + completedGameCount(tournament) + "/" + tournament.pairings().size());
+        if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
         setContentView(playView);
         runner.start();
     }
