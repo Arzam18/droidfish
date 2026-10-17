@@ -28,7 +28,7 @@ public final class TournamentRunner {
         void onGameStarted(TournamentManager.Pairing pairing, String whiteName, String blackName, String pgnMoves);
         /** Current tournament position, copied so the UI can safely render it. */
         void onPositionChanged(Position position, boolean whiteToMove, long whiteTimeMs, long blackTimeMs,
-                               String whiteName, String blackName);
+                               String whiteName, String blackName, String pgnMoves);
         /** Persistent per-engine analysis text; each side retains its last line after moving. */
         void onEngineAnalysis(boolean white, String analysis);
         void onReviewPosition(Position position, int ply, int totalPlies, String whiteAnalysis, String blackAnalysis, long moveTimeMs);
@@ -149,7 +149,7 @@ public final class TournamentRunner {
         activeBlackId = ++blackSearchId;
         whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.id);
         blackPlayer.queueStartEngine(activeBlackId, blackEngine.id);
-        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
+        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves());
         notifyPosition();
         requestMove(game.currPos().whiteMove);
     }
@@ -273,7 +273,7 @@ public final class TournamentRunner {
         activeBlackId = ++blackSearchId;
         whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.id);
         blackPlayer.queueStartEngine(activeBlackId, blackEngine.id);
-        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
+        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves());
         notifyPosition();
         requestMove(game.currPos().whiteMove);
     }
