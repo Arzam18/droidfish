@@ -63,7 +63,8 @@ public final class TournamentActivity extends Activity {
     private ChessBoardPlay tournamentBoard;
     private View setupView, playView;
     private Spinner formatSpinner, timeModeSpinner;
-    private EditText titleInput, gamesInput, baseInput, incrementInput, limitInput, openingPliesInput, openingStartInput;
+    private EditText titleInput, gamesInput, baseInput, incrementInput, limitInput, openingPliesInput, openingStartInput, autoWinEvalInput;
+    private CheckBox fastWinRuleCheck;
     private TextView openingFileText;
     private String selectedOpeningPgn = "";
     private String currentPgnMoves = "";
@@ -156,6 +157,12 @@ public final class TournamentActivity extends Activity {
         showTournamentArrowsCheck.setChecked(getPreferences(MODE_PRIVATE).getBoolean("tournamentThinkingArrows", true));
         showTournamentArrowsCheck.setOnCheckedChangeListener((button, checked) -> getPreferences(MODE_PRIVATE).edit().putBoolean("tournamentThinkingArrows", checked).apply());
         root.addView(showTournamentArrowsCheck, fullWidth());
+        autoWinEvalInput = field("Auto win evaluation threshold (pawns; 10 = ±10.00)", "10");
+        root.addView(autoWinEvalInput, fullWidth());
+        fastWinRuleCheck = new CheckBox(this);
+        fastWinRuleCheck.setText("Enable Fast Win Rule (both engines must agree on the winning side)");
+        fastWinRuleCheck.setChecked(true);
+        root.addView(fastWinRuleCheck, fullWidth());
 
         startButton = new Button(this); startButton.setText("Start tournament"); root.addView(startButton, fullWidth());
         resumeButton = new Button(this); resumeButton.setText("Resume saved tournament"); root.addView(resumeButton, fullWidth());
@@ -499,6 +506,8 @@ public final class TournamentActivity extends Activity {
         e.putString("setupOpeningStart", openingStartInput.getText().toString());
         e.putBoolean("setupRepeat", repeatOpeningCheck.isChecked());
         e.putBoolean("setupArrows", showTournamentArrowsCheck.isChecked());
+        e.putString("setupAutoWinEval", autoWinEvalInput.getText().toString());
+        e.putBoolean("setupFastWin", fastWinRuleCheck.isChecked());
         e.putString("setupOpeningPgn", selectedOpeningPgn);
         e.putString("setupOpeningName", selectedOpeningFileName);
         StringBuilder ids = new StringBuilder(); for (EngineChoice c : selectedEngines) { if (ids.length()>0) ids.append("\n"); ids.append(c.id); }
@@ -512,7 +521,9 @@ public final class TournamentActivity extends Activity {
         baseInput.setText(p.getString("setupBase", baseInput.getText().toString())); incrementInput.setText(p.getString("setupIncrement", incrementInput.getText().toString()));
         limitInput.setText(p.getString("setupLimit", limitInput.getText().toString())); openingPliesInput.setText(p.getString("setupPlies", openingPliesInput.getText().toString()));
         openingStartInput.setText(p.getString("setupOpeningStart", openingStartInput.getText().toString())); repeatOpeningCheck.setChecked(p.getBoolean("setupRepeat", false));
-        showTournamentArrowsCheck.setChecked(p.getBoolean("setupArrows", true)); selectedOpeningPgn=p.getString("setupOpeningPgn", ""); selectedOpeningFileName=p.getString("setupOpeningName", selectedOpeningPgn.isEmpty()?"No PGN file selected":"Saved PGN book loaded"); openingFileText.setText(selectedOpeningFileName);
+        showTournamentArrowsCheck.setChecked(p.getBoolean("setupArrows", true));
+        autoWinEvalInput.setText(p.getString("setupAutoWinEval", "10"));
+        fastWinRuleCheck.setChecked(p.getBoolean("setupFastWin", true)); selectedOpeningPgn=p.getString("setupOpeningPgn", ""); selectedOpeningFileName=p.getString("setupOpeningName", selectedOpeningPgn.isEmpty()?"No PGN file selected":"Saved PGN book loaded"); openingFileText.setText(selectedOpeningFileName);
         selectedEngines.clear(); String ids=p.getString("setupEngineIds", ""); if (!ids.isEmpty()) for(String id:ids.split("\n")) for(EngineChoice c:availableEngines) if(c.id.equals(id)){selectedEngines.add(c); break;} updateSelectedText();
     }
     private void refreshLiveClocks() {
@@ -665,8 +676,8 @@ public final class TournamentActivity extends Activity {
     }
 
     private void updateTurnNameLabels() {
-        if (whiteNameText != null) whiteNameText.setText(currentWhiteName + (currentWhiteToMove ? "  ⚪" : ""));
-        if (blackNameText != null) blackNameText.setText(currentBlackName + (!currentWhiteToMove ? "  ⚫" : ""));
+        if (whiteNameText != null) whiteNameText.setText(currentWhiteName);
+        if (blackNameText != null) blackNameText.setText(currentBlackName);
     }
 
     /** Flip player panels together with the board, preserving each side's data. */
@@ -701,6 +712,12 @@ public final class TournamentActivity extends Activity {
     }
 
     private void launchTournament(final TournamentManager tournament) {
+        double autoWinThreshold = 10.0;
+        try { autoWinThreshold = Double.parseDouble(autoWinEvalInput.getText().toString().trim()); }
+        catch (RuntimeException ignored) { autoWinThreshold = 10.0; }
+        if (!(autoWinThreshold > 0.0) || Double.isNaN(autoWinThreshold) || Double.isInfinite(autoWinThreshold)) autoWinThreshold = 10.0;
+        final double configuredAutoWinThreshold = autoWinThreshold;
+        final boolean fastWinEnabled = fastWinRuleCheck != null && fastWinRuleCheck.isChecked();
         runner = new TournamentRunner(tournament, new TournamentRunner.Listener() {
             @Override public void onGameStarted(TournamentManager.Pairing pairing, String white, String black) {
                 runOnUiThread(() -> {
@@ -711,6 +728,7 @@ public final class TournamentActivity extends Activity {
                     if (openingStartInput != null && tournament.repeatOpening()) openingStartInput.setText(String.valueOf(tournament.openingStartIndex() + Math.max(0, (pairing.gameNumber - 1) / 2)));
                     currentPgnMoves = "";
                     whiteHintMove = null; blackHintMove = null;
+                    if (tournamentBoard != null) tournamentBoard.setMoveHints(null);
                     moveStatusText.setText("PGN: —");
                     if (openingText != null) openingText.setText("Opening: Starting position");
                     if (whiteMoveTimeText != null) whiteMoveTimeText.setText("—");
@@ -725,6 +743,9 @@ public final class TournamentActivity extends Activity {
                                                     String whiteName, String blackName, String pgnMoves) {
                 runOnUiThread(() -> {
                     latestPosition = new Position(position);
+                    whiteHintMove = null;
+                    blackHintMove = null;
+                    if (tournamentBoard != null) tournamentBoard.setMoveHints(null);
                     currentWhiteToMove = whiteToMove;
                     updateTurnNameLabels();
                     currentPgnMoves = pgnMoves == null ? "" : pgnMoves;
@@ -742,6 +763,7 @@ public final class TournamentActivity extends Activity {
                     if (target != null) {
                         android.text.SpannableString styled = new android.text.SpannableString(analysis);
                         int variationStart = analysis.indexOf('\n');
+                        if (variationStart >= 0) variationStart = analysis.indexOf('\n', variationStart + 1);
                         if (variationStart >= 0 && variationStart + 1 < analysis.length()) {
                             styled.setSpan(new android.text.style.RelativeSizeSpan(0.75f), variationStart + 1,
                                     analysis.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
@@ -752,10 +774,11 @@ public final class TournamentActivity extends Activity {
                             && android.preference.PreferenceManager.getDefaultSharedPreferences(TournamentActivity.this).getString("thinkingArrows", "4").equals("0") == false) {
                         try {
                             int variationStart = analysis.indexOf('\n');
+                            if (variationStart >= 0) variationStart = analysis.indexOf('\n', variationStart + 1);
                             if (variationStart >= 0 && variationStart + 1 < analysis.length()) {
                                 String pvLine = analysis.substring(variationStart + 1).trim();
-                                int firstSpace = pvLine.indexOf(' ');
-                                if (firstSpace >= 0 && firstSpace + 1 < pvLine.length()) pvLine = pvLine.substring(firstSpace + 1).trim();
+                                // PVs are SAN and may start with "60...Rg2" or "61.Rh5".
+                                pvLine = pvLine.replaceFirst("^\\d+\\.{1,3}", "");
                                 int end = pvLine.indexOf(' '); if (end >= 0) pvLine = pvLine.substring(0, end);
                                 org.petero.droidfish.gamelogic.Move move = org.petero.droidfish.gamelogic.TextIO.stringToMove(new Position(latestPosition), pvLine);
                                     if (move != null) {
@@ -822,7 +845,8 @@ public final class TournamentActivity extends Activity {
                 });
             }
         }, new EngineOptions(), new BookOptions(), tournament.baseTimeMs(), tournament.incrementMs(),
-                tournament.openingPgn(), tournament.openingPlies(), tournament.repeatOpening(), tournament.openingStartIndex());
+                tournament.openingPgn(), tournament.openingPlies(), tournament.repeatOpening(), tournament.openingStartIndex(),
+                configuredAutoWinThreshold, fastWinEnabled);
         startButton.setEnabled(false); resumeButton.setEnabled(false); stopButton.setEnabled(true);
         if (playPauseButton != null) playPauseButton.setText("P");
         if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
