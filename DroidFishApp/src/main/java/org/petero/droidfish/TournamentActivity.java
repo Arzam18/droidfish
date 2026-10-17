@@ -51,6 +51,10 @@ public final class TournamentActivity extends Activity {
     private final ArrayList<EngineChoice> selectedEngines = new ArrayList<>();
     private TextView selectedText, statusText, standingsText, clockText, tournamentTitleText;
     private TextView whiteClockText, blackClockText, whiteNameText, blackNameText, moveStatusText;
+    private LinearLayout playPage, blackClockRow, whiteClockRow;
+    private boolean tournamentUiFlipped = false;
+    private boolean currentWhiteToMove = true;
+    private String currentWhiteName = "WHITE", currentBlackName = "BLACK";
     private TextView whiteAnalysisText, blackAnalysisText, whiteMoveTimeText, blackMoveTimeText, openingText;
     private CheckBox showTournamentArrowsCheck;
     private Position latestPosition = new Position();
@@ -186,6 +190,7 @@ public final class TournamentActivity extends Activity {
     /** Dedicated live-game layout: large centered board, player clocks and compact controls. */
     private void buildPlayUi() {
         LinearLayout page = new LinearLayout(this);
+        playPage = page;
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(0, dp(8), 0, dp(8));
         page.setBackgroundColor(0xFF303030);
@@ -199,15 +204,15 @@ public final class TournamentActivity extends Activity {
         // Upper engine analysis panel, kept above its clock/name row.
         blackAnalysisText = text("Eval: —    Depth: —    Nodes: —    NPS: —");
         blackAnalysisText.setTextSize(18);
-        blackAnalysisText.setLines(6);
-        blackAnalysisText.setMaxLines(6);
-        blackAnalysisText.setHeight(dp(126));
+        blackAnalysisText.setLines(7);
+        blackAnalysisText.setMaxLines(7);
+        blackAnalysisText.setHeight(dp(147));
         blackAnalysisText.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
         blackAnalysisText.setIncludeFontPadding(false);
         blackAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(blackAnalysisText, fullWidth());
 
-        LinearLayout blackClockRow = new LinearLayout(this);
+        blackClockRow = new LinearLayout(this);
         blackClockRow.setOrientation(LinearLayout.HORIZONTAL);
         blackClockRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
         blackClockText = text("00:30.0"); blackClockText.setTextSize(21); blackClockText.setTypeface(null, android.graphics.Typeface.BOLD);
@@ -244,7 +249,7 @@ public final class TournamentActivity extends Activity {
         tournamentBoard.setOnTouchListener((v, event) -> handleBoardSwipe(event));
 
         // Move-navigation buttons are temporarily hidden as requested.
-        LinearLayout whiteClockRow = new LinearLayout(this);
+        whiteClockRow = new LinearLayout(this);
         whiteClockRow.setOrientation(LinearLayout.HORIZONTAL);
         whiteClockRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
         whiteClockText = text("00:30.0"); whiteClockText.setTextSize(21); whiteClockText.setTypeface(null, android.graphics.Typeface.BOLD);
@@ -257,9 +262,9 @@ public final class TournamentActivity extends Activity {
 
         whiteAnalysisText = text("Eval: —    Depth: —    Nodes: —    NPS: —");
         whiteAnalysisText.setTextSize(18);
-        whiteAnalysisText.setLines(6);
-        whiteAnalysisText.setMaxLines(6);
-        whiteAnalysisText.setHeight(dp(126));
+        whiteAnalysisText.setLines(7);
+        whiteAnalysisText.setMaxLines(7);
+        whiteAnalysisText.setHeight(dp(147));
         whiteAnalysisText.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
         whiteAnalysisText.setIncludeFontPadding(false);
         whiteAnalysisText.setTextColor(0xFFD5D5D5);
@@ -288,7 +293,7 @@ public final class TournamentActivity extends Activity {
                 .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Moves"}, (dialog, which) -> {
                     if (which == 0) showAdjudicationDialog();
                     else if (which == 1) setContentView(setupView);
-                    else if (which == 2) { if (tournamentBoard != null) tournamentBoard.setFlipped(!tournamentBoard.flipped); }
+                    else if (which == 2) { toggleTournamentFlip(); }
                     else showMovesDialog();
                 }).show());
         schedule.setOnClickListener(v -> showScheduleDialog());
@@ -659,6 +664,38 @@ public final class TournamentActivity extends Activity {
         saveSetup();
     }
 
+    private void updateTurnNameLabels() {
+        if (whiteNameText != null) whiteNameText.setText(currentWhiteName + (currentWhiteToMove ? "  ⚪" : ""));
+        if (blackNameText != null) blackNameText.setText(currentBlackName + (!currentWhiteToMove ? "  ⚫" : ""));
+    }
+
+    /** Flip player panels together with the board, preserving each side's data. */
+    private void toggleTournamentFlip() {
+        if (tournamentBoard != null) tournamentBoard.setFlipped(!tournamentBoard.flipped);
+        tournamentUiFlipped = !tournamentUiFlipped;
+        if (playPage == null || blackClockRow == null || whiteClockRow == null ||
+                blackAnalysisText == null || whiteAnalysisText == null) return;
+        View boardFrame = (View) tournamentBoard.getParent();
+        playPage.removeView(blackAnalysisText);
+        playPage.removeView(blackClockRow);
+        playPage.removeView(whiteClockRow);
+        playPage.removeView(whiteAnalysisText);
+        playPage.removeView(boardFrame);
+        if (tournamentUiFlipped) {
+            playPage.addView(whiteAnalysisText, 1);
+            playPage.addView(whiteClockRow, 2);
+            playPage.addView(boardFrame, 3);
+            playPage.addView(blackClockRow, 4);
+            playPage.addView(blackAnalysisText, 5);
+        } else {
+            playPage.addView(blackAnalysisText, 1);
+            playPage.addView(blackClockRow, 2);
+            playPage.addView(boardFrame, 3);
+            playPage.addView(whiteClockRow, 4);
+            playPage.addView(whiteAnalysisText, 5);
+        }
+    }
+
     private void resumeTournament() {
         chooseSavedTournament();
     }
@@ -678,8 +715,9 @@ public final class TournamentActivity extends Activity {
                     if (openingText != null) openingText.setText("Opening: Starting position");
                     if (whiteMoveTimeText != null) whiteMoveTimeText.setText("—");
                     if (blackMoveTimeText != null) blackMoveTimeText.setText("—");
-                    whiteNameText.setText(white);
-                    blackNameText.setText(black);
+                    currentWhiteName = white;
+                    currentBlackName = black;
+                    updateTurnNameLabels();
                 });
             }
             @Override public void onPositionChanged(Position position, boolean whiteToMove,
@@ -687,6 +725,8 @@ public final class TournamentActivity extends Activity {
                                                     String whiteName, String blackName, String pgnMoves) {
                 runOnUiThread(() -> {
                     latestPosition = new Position(position);
+                    currentWhiteToMove = whiteToMove;
+                    updateTurnNameLabels();
                     currentPgnMoves = pgnMoves == null ? "" : pgnMoves;
                     tournamentBoard.setPosition(position);
                     whiteClockText.setText(formatClock(whiteTimeMs));
@@ -718,12 +758,13 @@ public final class TournamentActivity extends Activity {
                                 if (firstSpace >= 0 && firstSpace + 1 < pvLine.length()) pvLine = pvLine.substring(firstSpace + 1).trim();
                                 int end = pvLine.indexOf(' '); if (end >= 0) pvLine = pvLine.substring(0, end);
                                 org.petero.droidfish.gamelogic.Move move = org.petero.droidfish.gamelogic.TextIO.stringToMove(new Position(latestPosition), pvLine);
-                                if (move != null) {
-                                    if (white) whiteHintMove = move; else blackHintMove = move;
-                                    java.util.ArrayList<org.petero.droidfish.gamelogic.Move> hints = new java.util.ArrayList<>();
-                                    if (whiteHintMove != null) hints.add(whiteHintMove);
-                                    if (blackHintMove != null) hints.add(blackHintMove);
-                                    tournamentBoard.setMoveHints(hints);
+                                    if (move != null) {
+                                        if (white) whiteHintMove = move; else blackHintMove = move;
+                                        java.util.ArrayList<org.petero.droidfish.gamelogic.Move> hints = new java.util.ArrayList<>();
+                                        if (whiteHintMove != null) hints.add(whiteHintMove);
+                                        if (blackHintMove != null) hints.add(blackHintMove);
+                                        tournamentBoard.setMoveHints(hints);
+                                    }
                                 }
                             }
                         } catch (RuntimeException ignored) { }
