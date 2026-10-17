@@ -25,7 +25,7 @@ import java.util.Map;
  */
 public final class TournamentRunner {
     public interface Listener {
-        void onGameStarted(TournamentManager.Pairing pairing, String whiteName, String blackName, String pgnMoves);
+        void onGameStarted(TournamentManager.Pairing pairing, String whiteName, String blackName);
         /** Current tournament position, copied so the UI can safely render it. */
         void onPositionChanged(Position position, boolean whiteToMove, long whiteTimeMs, long blackTimeMs,
                                String whiteName, String blackName, String pgnMoves);
@@ -149,7 +149,7 @@ public final class TournamentRunner {
         activeBlackId = ++blackSearchId;
         whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.id);
         blackPlayer.queueStartEngine(activeBlackId, blackEngine.id);
-        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves());
+        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
         notifyPosition();
         requestMove(game.currPos().whiteMove);
     }
@@ -273,7 +273,7 @@ public final class TournamentRunner {
         activeBlackId = ++blackSearchId;
         whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.id);
         blackPlayer.queueStartEngine(activeBlackId, blackEngine.id);
-        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves());
+        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
         notifyPosition();
         requestMove(game.currPos().whiteMove);
     }
