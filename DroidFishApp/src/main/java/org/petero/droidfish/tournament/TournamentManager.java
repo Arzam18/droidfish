@@ -91,7 +91,7 @@ public final class TournamentManager {
         if (context == null || engines == null || engines.size() < 2) throw new IllegalArgumentException("At least two engines are required");
         if (gamesPerPair < 1) throw new IllegalArgumentException("Games per pairing must be positive");
         if (baseTimeMs < 1 || incrementMs < 0 || openingPlies < 0) throw new IllegalArgumentException("Invalid tournament settings");
-        this.context = context.getApplicationContext(); this.fileName = "cet_tournament.json";
+        this.context = context.getApplicationContext(); this.fileName = "cet_tournament_" + System.currentTimeMillis() + ".json";
         this.title = title == null ? "CET Tournament" : title; this.format = format; this.gamesPerPair = gamesPerPair;
         this.baseTimeMs = baseTimeMs; this.incrementMs = incrementMs;
         this.timeMode = timeMode == null ? TimeMode.CLOCK : timeMode; this.limitValue = Math.max(1, limitValue);
@@ -102,8 +102,8 @@ public final class TournamentManager {
         buildSchedule();
     }
 
-    private TournamentManager(Context context, JSONObject root) throws JSONException {
-        this.context = context.getApplicationContext(); this.fileName = "cet_tournament.json";
+    private TournamentManager(Context context, JSONObject root, String fileName) throws JSONException {
+        this.context = context.getApplicationContext(); this.fileName = fileName == null || fileName.isEmpty() ? "cet_tournament.json" : fileName;
         title = root.optString("title", "CET Tournament"); format = Format.valueOf(root.getString("format"));
         gamesPerPair = root.optInt("gamesPerPair", 2);
         baseTimeMs = root.optLong("baseTimeMs", 30000);
@@ -124,13 +124,42 @@ public final class TournamentManager {
     }
 
     public static TournamentManager restore(Context context) throws IOException, JSONException {
-        try (FileInputStream in = context.openFileInput("cet_tournament.json");
+        List<String> saved = savedTournamentFiles(context);
+        if (saved.isEmpty()) throw new IOException("No saved tournament exists");
+        return restore(context, saved.get(0));
+    }
+
+    public static TournamentManager restore(Context context, String fileName) throws IOException, JSONException {
+        try (FileInputStream in = context.openFileInput(fileName);
              BufferedReader reader = new BufferedReader(new InputStreamReader(in, Charset.forName("UTF-8")))) {
             StringBuilder data = new StringBuilder(); String line;
             while ((line = reader.readLine()) != null) data.append(line);
-            return new TournamentManager(context, new JSONObject(data.toString()));
+            return new TournamentManager(context, new JSONObject(data.toString()), fileName);
         }
     }
+
+    public static List<String> savedTournamentFiles(Context context) {
+        List<String> files = new ArrayList<>();
+        String[] names = context.getFilesDir().list();
+        if (names != null) for (String name : names)
+            if (name.equals("cet_tournament.json") || (name.startsWith("cet_tournament_") && name.endsWith(".json"))) files.add(name);
+        Collections.sort(files, (a, b) -> Long.compare(savedTimestamp(b), savedTimestamp(a)));
+        return files;
+    }
+
+    private static long savedTimestamp(String name) {
+        try { return Long.parseLong(name.substring("cet_tournament_".length(), name.length() - 5)); }
+        catch (RuntimeException e) { return 0L; }
+    }
+
+    public static void deleteSavedTournament(Context context, String fileName) throws IOException {
+        if (fileName == null || !(fileName.equals("cet_tournament.json") ||
+                (fileName.startsWith("cet_tournament_") && fileName.endsWith(".json"))))
+            throw new IOException("Invalid saved tournament name");
+        if (!context.deleteFile(fileName)) throw new IOException("Could not delete saved tournament");
+    }
+
+    public synchronized String savedFileName() { return fileName; }
 
     private void buildSchedule() {
         pairings.clear(); int index = 0;
