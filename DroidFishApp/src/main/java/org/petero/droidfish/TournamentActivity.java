@@ -9,6 +9,10 @@ import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
 import android.app.AlertDialog;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.TextWatcher;
+import android.text.Editable;
 import android.os.Environment;
 import android.view.View;
 import android.view.ViewGroup;
@@ -65,6 +69,8 @@ public final class TournamentActivity extends Activity {
     private Button startButton, resumeButton, stopButton, playPauseButton;
     private boolean autoPaused;
     private TournamentRunner runner;
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private final Runnable clockRefresh = new Runnable() { public void run() { refreshLiveClocks(); uiHandler.postDelayed(this, 100); } };
 
     private static final class EngineChoice {
         final String id, name;
@@ -77,6 +83,8 @@ public final class TournamentActivity extends Activity {
         setTitle(R.string.option_tournament);
         loadEngineChoices();
         buildUi();
+        restoreSetup();
+        uiHandler.post(clockRefresh);
     }
 
     private void buildUi() {
@@ -452,6 +460,47 @@ public final class TournamentActivity extends Activity {
         selectedText.setText(b.length() == 0 ? "No engines selected" : b.toString());
     }
 
+
+    private void saveSetup() {
+        if (titleInput == null) return;
+        android.content.SharedPreferences.Editor e = getPreferences(MODE_PRIVATE).edit();
+        e.putString("setupTitle", titleInput.getText().toString());
+        e.putString("setupGames", gamesInput.getText().toString());
+        e.putInt("setupFormat", formatSpinner.getSelectedItemPosition());
+        e.putInt("setupTimeMode", timeModeSpinner.getSelectedItemPosition());
+        e.putString("setupBase", baseInput.getText().toString());
+        e.putString("setupIncrement", incrementInput.getText().toString());
+        e.putString("setupLimit", limitInput.getText().toString());
+        e.putString("setupPlies", openingPliesInput.getText().toString());
+        e.putString("setupOpeningStart", openingStartInput.getText().toString());
+        e.putBoolean("setupRepeat", repeatOpeningCheck.isChecked());
+        e.putBoolean("setupArrows", showTournamentArrowsCheck.isChecked());
+        e.putString("setupOpeningPgn", selectedOpeningPgn);
+        e.putString("setupOpeningName", selectedOpeningFileName);
+        StringBuilder ids = new StringBuilder(); for (EngineChoice c : selectedEngines) { if (ids.length()>0) ids.append("\n"); ids.append(c.id); }
+        e.putString("setupEngineIds", ids.toString()); e.apply();
+    }
+    private void restoreSetup() {
+        android.content.SharedPreferences p = getPreferences(MODE_PRIVATE);
+        titleInput.setText(p.getString("setupTitle", titleInput.getText().toString()));
+        gamesInput.setText(p.getString("setupGames", gamesInput.getText().toString()));
+        formatSpinner.setSelection(p.getInt("setupFormat", 0)); timeModeSpinner.setSelection(p.getInt("setupTimeMode", 0));
+        baseInput.setText(p.getString("setupBase", baseInput.getText().toString())); incrementInput.setText(p.getString("setupIncrement", incrementInput.getText().toString()));
+        limitInput.setText(p.getString("setupLimit", limitInput.getText().toString())); openingPliesInput.setText(p.getString("setupPlies", openingPliesInput.getText().toString()));
+        openingStartInput.setText(p.getString("setupOpeningStart", openingStartInput.getText().toString())); repeatOpeningCheck.setChecked(p.getBoolean("setupRepeat", false));
+        showTournamentArrowsCheck.setChecked(p.getBoolean("setupArrows", true)); selectedOpeningPgn=p.getString("setupOpeningPgn", ""); selectedOpeningFileName=p.getString("setupOpeningName", selectedOpeningPgn.isEmpty()?"No PGN file selected":"Saved PGN book loaded"); openingFileText.setText(selectedOpeningFileName);
+        selectedEngines.clear(); String ids=p.getString("setupEngineIds", ""); if (!ids.isEmpty()) for(String id:ids.split("\n")) for(EngineChoice c:availableEngines) if(c.id.equals(id)){selectedEngines.add(c); break;} updateSelectedText();
+    }
+    private void refreshLiveClocks() {
+        TournamentRunner r=runner; if(r==null || playView==null) return;
+        if (r.isPaused()) return;
+        long w=r.remainingMs(true), b=r.remainingMs(false);
+        if(whiteClockText!=null && w>=0) whiteClockText.setText(formatClock(w));
+        if(blackClockText!=null && b>=0) blackClockText.setText(formatClock(b));
+        long elapsed=r.activeMoveTimeMs();
+        if(elapsed>=0) { boolean white=r.whiteToMove(); TextView t=white?whiteMoveTimeText:blackMoveTimeText; if(t!=null)t.setText(formatClockDuration(elapsed)); }
+    }
+
     private void startTournament() {
         if (runner != null) { Toast.makeText(this, "A tournament is already running", Toast.LENGTH_SHORT).show(); return; }
         if (selectedEngines.size() < 2) { Toast.makeText(this, "Select at least two engines", Toast.LENGTH_LONG).show(); return; }
@@ -477,6 +526,7 @@ public final class TournamentActivity extends Activity {
             for (EngineChoice e : selectedEngines) engines.add(new TournamentManager.Engine(e.id, e.name));
             String tournamentName = titleInput.getText().toString().trim();
             if (tournamentName.isEmpty()) tournamentName = "My Tournament";
+            saveSetup();
             TournamentManager tournament = new TournamentManager(this, tournamentName, format,
                     engines, games, baseMillis, increment, selectedOpeningPgn, openingPlies,
                     repeatOpeningCheck.isChecked(), TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart);
@@ -560,6 +610,7 @@ public final class TournamentActivity extends Activity {
                     if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
                     if (playPauseButton != null) playPauseButton.setText(runner != null && runner.isPaused() ? "Play" : "Pause");
                     statusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + ": " + white + " vs " + black);
+                    if (openingStartInput != null && tournament.repeatOpening()) openingStartInput.setText(String.valueOf(tournament.openingStartIndex() + Math.max(0, (pairing.gameNumber - 1) / 2)));
                     currentPgnMoves = "";
                     moveStatusText.setText("PGN: —");
                     if (openingText != null) openingText.setText("Opening: Starting position");
@@ -830,6 +881,7 @@ public final class TournamentActivity extends Activity {
     }
 
     @Override protected void onPause() {
+        saveSetup();
         if (runner != null && !runner.isPaused()) {
             runner.pause();
             autoPaused = true;
@@ -847,6 +899,7 @@ public final class TournamentActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        uiHandler.removeCallbacks(clockRefresh);
         if (runner != null) {
             runner.pause();
             runner = null;
