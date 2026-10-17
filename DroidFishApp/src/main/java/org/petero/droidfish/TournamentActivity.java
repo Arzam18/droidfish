@@ -158,7 +158,7 @@ public final class TournamentActivity extends Activity {
         statusText = text("Ready"); root.addView(statusText, fullWidth());
         standingsText = text(""); root.addView(standingsText, fullWidth());
         startButton.setOnClickListener(v -> startTournament());
-        resumeButton.setOnClickListener(v -> resumeTournament());
+        resumeButton.setOnClickListener(v -> chooseSavedTournament());
         stopButton.setOnClickListener(v -> setContentView(playView));
         scroll.setOnTouchListener((v, event) -> {
             if (event.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
@@ -200,6 +200,8 @@ public final class TournamentActivity extends Activity {
         blackAnalysisText.setTextSize(18);
         blackAnalysisText.setLines(6);
         blackAnalysisText.setMaxLines(6);
+        blackAnalysisText.setHeight(dp(126));
+        blackAnalysisText.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
         blackAnalysisText.setIncludeFontPadding(false);
         blackAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(blackAnalysisText, fullWidth());
@@ -256,6 +258,8 @@ public final class TournamentActivity extends Activity {
         whiteAnalysisText.setTextSize(18);
         whiteAnalysisText.setLines(6);
         whiteAnalysisText.setMaxLines(6);
+        whiteAnalysisText.setHeight(dp(126));
+        whiteAnalysisText.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
         whiteAnalysisText.setIncludeFontPadding(false);
         whiteAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(whiteAnalysisText, fullWidth());
@@ -502,7 +506,13 @@ public final class TournamentActivity extends Activity {
     }
 
     private void startTournament() {
-        if (runner != null) { Toast.makeText(this, "A tournament is already running", Toast.LENGTH_SHORT).show(); return; }
+        if (runner != null) {
+            // The tournament's schedule and completed PGNs are already persisted. Stop the
+            // current runner before creating a separate saved tournament; its unfinished
+            // pairing remains unfinished and will be replayed when resumed.
+            try { runner.stop(); } catch (RuntimeException ignored) { }
+            runner = null;
+        }
         if (selectedEngines.size() < 2) { Toast.makeText(this, "Select at least two engines", Toast.LENGTH_LONG).show(); return; }
         try {
             int games = positiveInt(gamesInput, "games per pairing", 1);
@@ -576,30 +586,66 @@ public final class TournamentActivity extends Activity {
         return "Selected PGN file";
     }
 
-    private void resumeTournament() {
+    private void chooseSavedTournament() {
         if (runner != null) { Toast.makeText(this, "A tournament is already running", Toast.LENGTH_SHORT).show(); return; }
-        try {
-            TournamentManager tournament = TournamentManager.restore(this);
-            selectedEngines.clear();
-            for (TournamentManager.Engine engine : tournament.engines()) selectedEngines.add(new EngineChoice(engine.id, engine.displayName));
-            updateSelectedText();
-            titleInput.setText(tournament.title());
-            formatSpinner.setSelection(tournament.format().ordinal());
-            gamesInput.setText(String.valueOf(tournament.gamesPerPair()));
-            baseInput.setText(String.valueOf(Math.max(1, tournament.baseTimeMs() / 1000)));
-            incrementInput.setText(String.valueOf(tournament.incrementMs() / 1000.0));
-            timeModeSpinner.setSelection(tournament.timeMode().ordinal());
-            limitInput.setText(tournament.timeMode() == TournamentManager.TimeMode.MOVE_TIME ? String.valueOf(tournament.limitValue() / 1000.0) : String.valueOf(tournament.limitValue()));
-            openingPliesInput.setText(String.valueOf(tournament.openingPlies()));
-            selectedOpeningPgn = tournament.openingPgn();
-            selectedOpeningFileName = selectedOpeningPgn.isEmpty() ? "No PGN file selected" : "Saved PGN book loaded";
-            if (openingFileText != null) openingFileText.setText(selectedOpeningFileName);
-            openingStartInput.setText(String.valueOf(tournament.openingStartIndex()));
-            repeatOpeningCheck.setChecked(tournament.repeatOpening());
-            launchTournament(tournament);
-        } catch (Exception e) {
-            Toast.makeText(this, "No saved tournament could be resumed: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        List<String> files = TournamentManager.savedTournamentFiles(this);
+        if (files.isEmpty()) { Toast.makeText(this, "No saved tournaments", Toast.LENGTH_SHORT).show(); return; }
+        ArrayList<String> labels = new ArrayList<>();
+        for (String file : files) {
+            try {
+                TournamentManager t = TournamentManager.restore(this, file);
+                int completed = 0;
+                for (TournamentManager.Pairing pairing : t.pairings()) if (pairing.isComplete()) completed++;
+                labels.add(t.title() + " · " + completed + "/" + t.pairings().size() + " games · " + (t.isComplete() ? "Completed" : "Unfinished"));
+            } catch (Exception e) { labels.add(file + " · Cannot read"); }
         }
+        new AlertDialog.Builder(this).setTitle("Saved tournaments")
+            .setItems(labels.toArray(new String[0]), (dialog, which) -> showSavedTournamentActions(files.get(which)))
+            .setNegativeButton("Cancel", null).show();
+    }
+
+    private void showSavedTournamentActions(String fileName) {
+        final TournamentManager saved;
+        try { saved = TournamentManager.restore(this, fileName); }
+        catch (Exception e) { Toast.makeText(this, "Could not open saved tournament: " + e.getMessage(), Toast.LENGTH_LONG).show(); return; }
+        String[] actions = saved.isComplete() ? new String[]{"Load setup / review", "Delete tournament"} : new String[]{"Continue tournament", "Delete tournament"};
+        new AlertDialog.Builder(this).setTitle(saved.title()).setItems(actions, (dialog, which) -> {
+            if (which == 0) {
+                loadTournamentSetup(saved);
+                if (!saved.isComplete()) launchTournament(saved);
+                else Toast.makeText(this, "Completed tournament loaded into setup; its saved results remain available.", Toast.LENGTH_LONG).show();
+            } else {
+                new AlertDialog.Builder(this).setTitle("Delete saved tournament?").setMessage(saved.title() + " will be permanently deleted.")
+                    .setNegativeButton("Cancel", null).setPositiveButton("Delete", (d, w) -> {
+                        try { TournamentManager.deleteSavedTournament(this, fileName); Toast.makeText(this, "Tournament deleted", Toast.LENGTH_SHORT).show(); }
+                        catch (Exception e) { Toast.makeText(this, "Delete failed: " + e.getMessage(), Toast.LENGTH_LONG).show(); }
+                    }).show();
+            }
+        }).setNegativeButton("Cancel", null).show();
+    }
+
+    private void loadTournamentSetup(TournamentManager tournament) {
+        selectedEngines.clear();
+        for (TournamentManager.Engine engine : tournament.engines()) selectedEngines.add(new EngineChoice(engine.id, engine.displayName));
+        updateSelectedText();
+        titleInput.setText(tournament.title());
+        formatSpinner.setSelection(tournament.format().ordinal());
+        gamesInput.setText(String.valueOf(tournament.gamesPerPair()));
+        baseInput.setText(String.valueOf(Math.max(0.01, tournament.baseTimeMs() / 60000.0)));
+        incrementInput.setText(String.valueOf(tournament.incrementMs() / 1000.0));
+        timeModeSpinner.setSelection(tournament.timeMode().ordinal());
+        limitInput.setText(tournament.timeMode() == TournamentManager.TimeMode.MOVE_TIME ? String.valueOf(tournament.limitValue() / 1000.0) : String.valueOf(tournament.limitValue()));
+        openingPliesInput.setText(String.valueOf(tournament.openingPlies()));
+        selectedOpeningPgn = tournament.openingPgn();
+        selectedOpeningFileName = selectedOpeningPgn.isEmpty() ? "No PGN file selected" : "Saved PGN book loaded";
+        if (openingFileText != null) openingFileText.setText(selectedOpeningFileName);
+        openingStartInput.setText(String.valueOf(tournament.openingStartIndex()));
+        repeatOpeningCheck.setChecked(tournament.repeatOpening());
+        saveSetup();
+    }
+
+    private void resumeTournament() {
+        chooseSavedTournament();
     }
 
     private void launchTournament(final TournamentManager tournament) {
@@ -826,7 +872,8 @@ public final class TournamentActivity extends Activity {
             File dir = publicFile.getParentFile();
             if (dir != null && !dir.exists() && !dir.mkdirs() && !dir.isDirectory())
                 throw new IOException("Cannot create " + dir.getAbsolutePath());
-            writeSynced(publicFile, bytes);
+            String mergedPgn = mergePgnGames(publicFile.exists() ? readSmallText(publicFile) : "", tournament.exportPgn());
+            writeSynced(publicFile, mergedPgn.getBytes(Charset.forName("UTF-8")));
             return publicFile;
         } catch (IOException | SecurityException publicPathError) {
             // Android may deny legacy shared-storage writes. Keep auto-save working in the
@@ -836,8 +883,31 @@ public final class TournamentActivity extends Activity {
             if (!appDir.exists() && !appDir.mkdirs() && !appDir.isDirectory())
                 throw new IOException("Cannot create app PGN folder", publicPathError);
             File fallback = new File(appDir, safeName + ".pgn");
-            writeSynced(fallback, bytes);
+            String mergedPgn = mergePgnGames(fallback.exists() ? readSmallText(fallback) : "", tournament.exportPgn());
+            writeSynced(fallback, mergedPgn.getBytes(Charset.forName("UTF-8")));
             return fallback;
+        }
+    }
+
+    private String mergePgnGames(String existing, String incoming) {
+        java.util.LinkedHashMap<String, String> games = new java.util.LinkedHashMap<>();
+        collectPgnGames(games, existing);
+        collectPgnGames(games, incoming);
+        StringBuilder result = new StringBuilder();
+        for (String game : games.values()) { if (result.length() > 0) result.append("\n\n"); result.append(game); }
+        return result.toString();
+    }
+
+    private void collectPgnGames(java.util.LinkedHashMap<String, String> games, String source) {
+        if (source == null || source.trim().isEmpty()) return;
+        String pgn = source.replace("\r\n", "\n").trim();
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?m)(?=^\\[Event\\s)").matcher(pgn);
+        java.util.ArrayList<Integer> starts = new java.util.ArrayList<>();
+        while (matcher.find()) starts.add(matcher.start());
+        if (starts.isEmpty()) { games.putIfAbsent(pgn.replaceAll("\\s+", " "), pgn); return; }
+        for (int i = 0; i < starts.size(); i++) {
+            String game = pgn.substring(starts.get(i), i + 1 < starts.size() ? starts.get(i + 1) : pgn.length()).trim();
+            if (!game.isEmpty()) games.putIfAbsent(game.replaceAll("\\s+", " "), game);
         }
     }
 
