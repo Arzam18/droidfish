@@ -32,6 +32,9 @@ import com.kalab.chess.enginesupport.ChessEngineResolver;
 import org.petero.droidfish.book.BookOptions;
 import org.petero.droidfish.engine.EngineUtil;
 import org.petero.droidfish.gamelogic.Position;
+import org.petero.droidfish.gamelogic.GameTree;
+import org.petero.droidfish.gamelogic.ChessParseError;
+import org.petero.droidfish.gamelogic.TextIO;
 import org.petero.droidfish.ChessBoardPlay;
 import org.petero.droidfish.tournament.TournamentManager;
 import org.petero.droidfish.tournament.TournamentRunner;
@@ -84,6 +87,21 @@ public final class TournamentActivity extends Activity {
     private org.petero.droidfish.gamelogic.Move whiteHintMove, blackHintMove;
     private String selectedOpeningFileName = "No PGN file selected";
     private static final int REQUEST_OPENING_PGN = 7314;
+    private static final int REQUEST_GAME_VIEWER_PGN = 7315;
+    private View gameViewerView;
+    private ChessBoardPlay gameViewerBoard;
+    private TextView gvWhiteClock, gvBlackClock, gvWhiteName, gvBlackName, gvWhiteTime, gvBlackTime;
+    private TextView gvWhiteAnalysis, gvBlackAnalysis, gvMoves, gvStatus;
+    private Button gvAnalysisButton;
+    private GameTree gameViewerTree;
+    private final ArrayList<Position> gameViewerPositions = new ArrayList<>();
+    private final ArrayList<String> gameViewerMoves = new ArrayList<>();
+    private final ArrayList<String> gameViewerComments = new ArrayList<>();
+    private int gameViewerPly = 0;
+    private boolean gameViewerAnalysisOn = true;
+    private boolean gameViewerSelectedWhite = true;
+    private String gameViewerPgn = "";
+
     private CheckBox repeatOpeningCheck;
     private Button startButton, resumeButton, stopButton, playPauseButton;
     private boolean autoPaused;
@@ -113,6 +131,11 @@ public final class TournamentActivity extends Activity {
         int pad = dp(16);
         root.setPadding(pad, pad, pad, pad);
         scroll.addView(root);
+
+        Button openGameViewer = new Button(this);
+        openGameViewer.setText("Open Game Viewer (PGN / analysis)");
+        root.addView(openGameViewer, fullWidth());
+        openGameViewer.setOnClickListener(v -> openGameViewerPicker());
 
         Button choose = new Button(this);
         choose.setText("Select tournament engines");
@@ -328,6 +351,7 @@ public final class TournamentActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         playView = playScroll;
         buildMirrorUi();
+        buildGameViewerUi();
     }
 
     /** Independent, read-only mirror of the live tournament board. Navigation never changes the live board. */
@@ -374,7 +398,10 @@ public final class TournamentActivity extends Activity {
         first.setOnClickListener(v->navigateMirror(0)); prev.setOnClickListener(v->navigateMirror(Math.max(0, mirrorDisplayedPly()-1)));
         next.setOnClickListener(v->navigateMirror(Math.min(mirrorPositions.size()-1, mirrorDisplayedPly()+1)));
         last.setOnClickListener(v->navigateMirror(Math.max(0,mirrorPositions.size()-1)));
+        // Short tap toggles the selected engine's recorded/live tournament analysis.
+        // Long press chooses which engine's analysis the panel displays.
         mirrorAnalysisButton.setOnClickListener(v->toggleMirrorAnalysis());
+        mirrorAnalysisButton.setOnLongClickListener(v->{ selectMirrorAnalysisEngine(); return true; });
         ScrollView sc=new ScrollView(this); sc.addView(page,new ScrollView.LayoutParams(-1,-2)); mirrorView=sc;
     }
 
@@ -420,11 +447,167 @@ public final class TournamentActivity extends Activity {
         if (mirrorStatusText!=null) mirrorStatusText.setText("Mirror review · ply " + mirrorPly + "/" + (mirrorPositions.size()-1));
     }
     private void toggleMirrorAnalysis() {
-        if (mirrorAnalysisOn) { mirrorAnalysisOn=false; mirrorAnalysisButton.setText("⏯"); mirrorAnalysisText.setText("Analysis off"); return; }
-        new AlertDialog.Builder(this).setTitle("Select analysis engine").setItems(new String[]{currentWhiteName,currentBlackName},(d,which)->{
-            mirrorAnalysisWhite=which==0; mirrorAnalysisOn=true; mirrorAnalysisButton.setText("Analysis on");
-            mirrorAnalysisText.setText(mirrorAnalysisWhite?lastWhiteAnalysis:lastBlackAnalysis);
-        }).setNegativeButton("Cancel",null).show();
+        mirrorAnalysisOn = !mirrorAnalysisOn;
+        mirrorAnalysisButton.setText(mirrorAnalysisOn ? "⏯ ON" : "⏯ OFF");
+        if (!mirrorAnalysisOn) {
+            mirrorAnalysisText.setText("Analysis off");
+        } else {
+            mirrorAnalysisText.setText(mirrorAnalysisWhite ? lastWhiteAnalysis : lastBlackAnalysis);
+        }
+    }
+
+    private void selectMirrorAnalysisEngine() {
+        new AlertDialog.Builder(this).setTitle("Select analysis engine")
+            .setItems(new String[]{currentWhiteName, currentBlackName}, (d, which) -> {
+                mirrorAnalysisWhite = which == 0;
+                if (mirrorAnalysisOn && mirrorAnalysisText != null)
+                    mirrorAnalysisText.setText(mirrorAnalysisWhite ? lastWhiteAnalysis : lastBlackAnalysis);
+                Toast.makeText(this, "Selected " + (mirrorAnalysisWhite ? currentWhiteName : currentBlackName) + " analysis. Tap ⏯ to toggle.", Toast.LENGTH_SHORT).show();
+            }).setNegativeButton("Cancel", null).show();
+    }
+
+    private void buildGameViewerUi() {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(0, dp(8), 0, dp(8));
+        page.setBackgroundColor(0xFF303030);
+        TextView title = text("GAME VIEWER"); title.setTextSize(18); title.setTypeface(null, android.graphics.Typeface.BOLD);
+        title.setGravity(android.view.Gravity.CENTER); page.addView(title, fullWidth());
+        Button open = new Button(this); open.setText("Open PGN file"); page.addView(open, fullWidth());
+        open.setOnClickListener(v -> openGameViewerPicker());
+        gvWhiteClock=text("---"); gvWhiteClock.setTextSize(20);
+        gvWhiteName=text("WHITE"); gvWhiteName.setTextSize(18); gvWhiteName.setGravity(android.view.Gravity.CENTER);
+        gvWhiteTime=text("---"); gvWhiteTime.setGravity(android.view.Gravity.RIGHT);
+        LinearLayout top = new LinearLayout(this); top.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        top.addView(gvWhiteClock,new LinearLayout.LayoutParams(0,-2,1)); top.addView(gvWhiteName,new LinearLayout.LayoutParams(0,-2,1.4f)); top.addView(gvWhiteTime,new LinearLayout.LayoutParams(0,-2,1)); page.addView(top,fullWidth());
+        FrameLayout frame = new FrameLayout(this) {
+            @Override protected void onMeasure(int w,int h) { int width=MeasureSpec.getSize(w); super.onMeasure(MeasureSpec.makeMeasureSpec(width,MeasureSpec.EXACTLY),MeasureSpec.makeMeasureSpec(width,MeasureSpec.EXACTLY)); }
+        };
+        LinearLayout.LayoutParams fp=new LinearLayout.LayoutParams(-1,-2); fp.topMargin=dp(4); fp.bottomMargin=dp(4); page.addView(frame,fp);
+        gameViewerBoard=new TournamentChessBoard(this); gameViewerBoard.setClickable(false); gameViewerBoard.setFocusable(false); gameViewerBoard.highlightLastMove=true; gameViewerBoard.setPosition(new Position());
+        frame.addView(gameViewerBoard,new FrameLayout.LayoutParams(-1,-1,android.view.Gravity.CENTER));
+        gvBlackClock=text("---"); gvBlackClock.setTextSize(20);
+        gvBlackName=text("BLACK"); gvBlackName.setTextSize(18); gvBlackName.setGravity(android.view.Gravity.CENTER);
+        gvBlackTime=text("---"); gvBlackTime.setGravity(android.view.Gravity.RIGHT);
+        LinearLayout bottom=new LinearLayout(this); bottom.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        bottom.addView(gvBlackClock,new LinearLayout.LayoutParams(0,-2,1)); bottom.addView(gvBlackName,new LinearLayout.LayoutParams(0,-2,1.4f)); bottom.addView(gvBlackTime,new LinearLayout.LayoutParams(0,-2,1)); page.addView(bottom,fullWidth());
+        LinearLayout nav=new LinearLayout(this); nav.setGravity(android.view.Gravity.CENTER);
+        Button first=new Button(this); first.setText("<<"); Button prev=new Button(this); prev.setText("<"); gvAnalysisButton=new Button(this); gvAnalysisButton.setText("⏯"); Button next=new Button(this); next.setText(">"); Button last=new Button(this); last.setText(">>");
+        for(Button b:new Button[]{first,prev,gvAnalysisButton,next,last}) nav.addView(b,new LinearLayout.LayoutParams(0,-2,1)); page.addView(nav,fullWidth());
+        first.setOnClickListener(v->showGameViewerPly(0)); prev.setOnClickListener(v->showGameViewerPly(Math.max(0,gameViewerPly-1))); next.setOnClickListener(v->showGameViewerPly(Math.min(gameViewerPositions.size()-1,gameViewerPly+1))); last.setOnClickListener(v->showGameViewerPly(Math.max(0,gameViewerPositions.size()-1)));
+        gvAnalysisButton.setOnClickListener(v->{ gameViewerAnalysisOn=!gameViewerAnalysisOn; gvAnalysisButton.setText(gameViewerAnalysisOn?"⏯ ON":"⏯ OFF"); renderGameViewerPly(); });
+        gvAnalysisButton.setOnLongClickListener(v->{ selectGameViewerAnalysisEngine(); return true; });
+        gvWhiteAnalysis=text("White Eval: ---  Depth: ---  Nodes: ---  NPS: ---"); gvWhiteAnalysis.setTextSize(16); gvWhiteAnalysis.setLines(2); gvWhiteAnalysis.setMaxLines(2); page.addView(gvWhiteAnalysis,fullWidth());
+        gvBlackAnalysis=text("Black Eval: ---  Depth: ---  Nodes: ---  NPS: ---"); gvBlackAnalysis.setTextSize(16); gvBlackAnalysis.setLines(2); gvBlackAnalysis.setMaxLines(2); page.addView(gvBlackAnalysis,fullWidth());
+        gvMoves=text("No PGN loaded."); gvMoves.setTextSize(16); page.addView(gvMoves,fullWidth());
+        gvStatus=text("Open a PGN to review recorded analysis."); page.addView(gvStatus,fullWidth());
+        Button back=new Button(this); back.setText("Close Game Viewer"); page.addView(back,fullWidth()); back.setOnClickListener(v->setContentView(setupView));
+        ScrollView scroll=new ScrollView(this); scroll.setFillViewport(false); scroll.addView(page,new ScrollView.LayoutParams(-1,-2)); gameViewerView=scroll;
+    }
+
+    private void openGameViewerPicker() {
+        Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT); intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType("application/x-chess-pgn");
+        try { startActivityForResult(intent,REQUEST_GAME_VIEWER_PGN); }
+        catch (android.content.ActivityNotFoundException ex) { intent.setType("*/*"); startActivityForResult(intent,REQUEST_GAME_VIEWER_PGN); }
+    }
+
+    private void loadGameViewerPgn(Uri uri) {
+        new Thread(() -> {
+            try {
+                StringBuilder sb=new StringBuilder();
+                try(InputStream in=getContentResolver().openInputStream(uri)) { if(in==null) throw new IOException("Could not open PGN"); byte[] buf=new byte[8192]; int n; while((n=in.read(buf))>0) sb.append(new String(buf,0,n,java.nio.charset.StandardCharsets.UTF_8)); }
+                String pgn=sb.toString();
+                GameTree tree=new GameTree(null); org.petero.droidfish.PGNOptions options=new org.petero.droidfish.PGNOptions(); options.imp.comments=true; options.imp.variations=false; options.imp.nag=true;
+                if(!tree.readPGN(pgn,options)) throw new IOException("No valid chess game found in this PGN");
+                while(!tree.currentNode.equals(tree.rootNode)) tree.goBack();
+                ArrayList<String> moves=extractViewerMoves(pgn);
+                ArrayList<Position> positions=new ArrayList<>(); positions.add(new Position(tree.currentPos));
+                for(int i=0;i<moves.size() && i<2000;i++) { tree.goForward(-1); positions.add(new Position(tree.currentPos)); }
+                ArrayList<String> comments=extractViewerComments(pgn);
+                while(moves.size()>positions.size()-1) moves.remove(moves.size()-1);
+                while(moves.size()<positions.size()-1) moves.add("?");
+                while(comments.size()<positions.size()-1) comments.add("");
+                final GameTree finalTree=tree; final ArrayList<Position> finalPositions=positions; final ArrayList<String> finalComments=comments; final ArrayList<String> finalMoves=moves; final String finalPgn=pgn;
+                runOnUiThread(() -> {
+                    gameViewerTree=finalTree; gameViewerPositions.clear(); gameViewerPositions.addAll(finalPositions); gameViewerComments.clear(); gameViewerComments.addAll(finalComments); gameViewerMoves.clear(); gameViewerMoves.addAll(finalMoves); gameViewerPgn=finalPgn; gameViewerPly=0;
+                    setContentView(gameViewerView); renderGameViewerPly();
+                    Toast.makeText(this,"PGN loaded · "+Math.max(0,gameViewerPositions.size()-1)+" plies",Toast.LENGTH_SHORT).show();
+                });
+            } catch(Exception e) { runOnUiThread(() -> Toast.makeText(this,"Could not load PGN: "+e.getMessage(),Toast.LENGTH_LONG).show()); }
+        },"game-viewer-pgn-loader").start();
+    }
+
+    private ArrayList<String> extractViewerComments(String pgn) {
+        String main=pgn.replaceAll("(?m)^\\s*\\[[^\\]]*\\]\\s*$", " ");
+        StringBuilder clean=new StringBuilder(); int depth=0; boolean inComment=false;
+        for(int i=0;i<main.length();i++) { char ch=main.charAt(i); if(ch=='{' && depth==0) inComment=true; if(ch=='(') depth++; if(depth==0) clean.append(ch); if(ch==')' && depth>0) depth--; if(ch=='}' && inComment) inComment=false; }
+        ArrayList<String> out=new ArrayList<>(); java.util.regex.Matcher m=java.util.regex.Pattern.compile("\\{([^}]*)\\}").matcher(clean.toString());
+        while(m.find()) out.add(m.group(1).trim()); return out;
+    }
+    private ArrayList<String> extractViewerMoves(String pgn) {
+        String body=pgn.replaceAll("(?m)^\\s*\\[[^\\]]*\\]\\s*$", " "); body=body.replaceAll("\\{[^}]*\\}|;[^\\r\\n]*", " ").replaceAll("\\([^)]*\\)", " ");
+        java.util.regex.Matcher m=java.util.regex.Pattern.compile("(?<![A-Za-z0-9])(?:\\d+\\.(?:\\.\\.)?\\s*)?([KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[+#]?|O-O-O[+#]?|O-O[+#]?)(?![A-Za-z0-9])").matcher(body);
+        ArrayList<String> out=new ArrayList<>(); while(m.find()) out.add(m.group(1)); return out;
+    }
+
+    private void showGameViewerPly(int ply) {
+        if(gameViewerPositions.isEmpty()) return; gameViewerPly=Math.max(0,Math.min(ply,gameViewerPositions.size()-1)); renderGameViewerPly();
+    }
+    private void renderGameViewerPly() {
+        if(gameViewerPositions.isEmpty()) return;
+        gameViewerBoard.setPosition(new Position(gameViewerPositions.get(gameViewerPly)));
+        String[] names=extractPgnNames(gameViewerPgn); gvWhiteName.setText(names[0]); gvBlackName.setText(names[1]);
+        String whiteComment="", blackComment="";
+        String whiteClock="", blackClock="", whiteUsed="", blackUsed="";
+        for(int ply=1; ply<=gameViewerPly && ply<=gameViewerComments.size(); ply++) {
+            String c=gameViewerComments.get(ply-1);
+            if((ply & 1)==1) {
+                if(!c.isEmpty()) whiteComment=c;
+                String clock=findCommentValue(c,"WhiteClock|WClock|ClockW|Clock");
+                String used=findCommentValue(c,"WhiteTime|WTime|TimeWhite|T|Time|TimeUsed");
+                if(!clock.isEmpty()) whiteClock=clock; if(!used.isEmpty()) whiteUsed=used;
+            } else {
+                if(!c.isEmpty()) blackComment=c;
+                String clock=findCommentValue(c,"BlackClock|BClock|ClockB|Clock");
+                String used=findCommentValue(c,"BlackTime|BTime|TimeBlack|T|Time|TimeUsed");
+                if(!clock.isEmpty()) blackClock=clock; if(!used.isEmpty()) blackUsed=used;
+            }
+        }
+        gvWhiteClock.setText(whiteClock.isEmpty()?"---":whiteClock); gvBlackClock.setText(blackClock.isEmpty()?"---":blackClock);
+        gvWhiteTime.setText(whiteUsed.isEmpty()?"---":whiteUsed); gvBlackTime.setText(blackUsed.isEmpty()?"---":blackUsed);
+        String whiteAnalysis=analysisFromComment(whiteComment), blackAnalysis=analysisFromComment(blackComment);
+        if(!gameViewerAnalysisOn) { whiteAnalysis="Eval: ---  Depth: ---  Nodes: ---  NPS: ---"; blackAnalysis="Eval: ---  Depth: ---  Nodes: ---  NPS: ---"; }
+        gvWhiteAnalysis.setText((gameViewerSelectedWhite ? "▶ White " : "White ")+whiteAnalysis);
+        gvBlackAnalysis.setText((!gameViewerSelectedWhite ? "▶ Black " : "Black ")+blackAnalysis);
+        StringBuilder moves=new StringBuilder();
+        for(int i=0;i<gameViewerMoves.size() && i<gameViewerPly;i++) { if(i%2==0) { if(moves.length()>0)moves.append(' '); moves.append((i/2+1)).append('.'); } else moves.append(' '); moves.append(gameViewerMoves.get(i)); }
+        gvMoves.setText(moves.length()==0?"No moves yet.":moves.toString()); gvStatus.setText("Ply "+gameViewerPly+" / "+(gameViewerPositions.size()-1));
+    }
+    private String analysisFromComment(String c) {
+        if(c==null||c.isEmpty()) return "Eval: ---  Depth: ---  Nodes: ---  NPS: ---";
+        String eval=findCommentValue(c,"Eval|eval"); String depth=findCommentValue(c,"D|Depth"); String nodes=findCommentValue(c,"N|Nodes"); String nps=findCommentValue(c,"NPS|nps");
+        return "Eval: "+dash(eval)+"  Depth: "+dash(depth)+"  Nodes: "+dash(nodes)+"  NPS: "+dash(nps);
+    }
+    private String[] extractPgnNames(String pgn) {
+        String white="White", black="Black"; java.util.regex.Matcher m=java.util.regex.Pattern.compile("(?m)^\\[White\\s+\"([^\"]*)\"\\]").matcher(pgn); if(m.find())white=m.group(1);
+        m=java.util.regex.Pattern.compile("(?m)^\\[Black\\s+\"([^\"]*)\"\\]").matcher(pgn); if(m.find())black=m.group(1); return new String[]{white,black};
+    }
+    private String findAnalysis(int ply, boolean white) {
+        if(ply<=0) return "Eval: ---  Depth: ---  Nodes: ---  NPS: ---";
+        String c=ply-1<gameViewerComments.size()?gameViewerComments.get(ply-1):"";
+        String eval=findCommentValue(c,"Eval|eval"); String depth=findCommentValue(c,"D|Depth"); String nodes=findCommentValue(c,"N|Nodes"); String nps=findCommentValue(c,"NPS|nps");
+        return "Eval: "+dash(eval)+"  Depth: "+dash(depth)+"  Nodes: "+dash(nodes)+"  NPS: "+dash(nps);
+    }
+    private String dash(String v) { return v==null||v.isEmpty()?"---":v; }
+    private String findCommentValue(String comment,String keys) {
+        if(comment==null) return ""; String[] ks=keys.split("\\|");
+        for(String k:ks) { java.util.regex.Matcher m=java.util.regex.Pattern.compile("(?i)(?:^|[\\s,;])"+java.util.regex.Pattern.quote(k)+"\\s*[:=]\\s*([^\\s,;]+)").matcher(comment); if(m.find()) return m.group(1); }
+        return "";
+    }
+    private void selectGameViewerAnalysisEngine() {
+        new AlertDialog.Builder(this).setTitle("Select recorded analysis side")
+            .setItems(new String[]{gvWhiteName.getText().toString(),gvBlackName.getText().toString()},(d,w)->{gameViewerSelectedWhite=w==0; Toast.makeText(this,"Selected "+(gameViewerSelectedWhite?"White":"Black")+" recorded analysis",Toast.LENGTH_SHORT).show(); renderGameViewerPly();})
+            .setNegativeButton("Cancel",null).show();
     }
 
     private boolean handleBoardSwipe(android.view.MotionEvent event) {
@@ -695,6 +878,11 @@ public final class TournamentActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_GAME_VIEWER_PGN && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            Uri viewerUri = data.getData();
+            try { getContentResolver().takePersistableUriPermission(viewerUri, Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (SecurityException ignored) { }
+            loadGameViewerPgn(viewerUri); return;
+        }
         if (requestCode != REQUEST_OPENING_PGN || resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         try {
