@@ -726,7 +726,6 @@ public final class TournamentActivity extends Activity {
                                         tournamentBoard.setMoveHints(hints);
                                     }
                                 }
-                            }
                         } catch (RuntimeException ignored) { }
                     } else if (tournamentBoard != null) { whiteHintMove = null; blackHintMove = null; tournamentBoard.setMoveHints(null); }
                 });
