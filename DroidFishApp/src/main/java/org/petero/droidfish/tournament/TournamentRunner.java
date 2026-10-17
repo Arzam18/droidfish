@@ -493,6 +493,17 @@ public final class TournamentRunner {
             if (value >= 1_000) return String.format(java.util.Locale.US, "%.0fK", value / 1_000.0);
             return Long.toString(value);
         }
+        private String centerColumn(String value, int width) {
+            if (value == null) value = "";
+            if (value.length() >= width) return value;
+            int left = (width - value.length()) / 2;
+            int right = width - value.length() - left;
+            StringBuilder padded = new StringBuilder(width);
+            for (int i = 0; i < left; i++) padded.append(' ');
+            padded.append(value);
+            for (int i = 0; i < right; i++) padded.append(' ');
+            return padded.toString();
+        }
         private void publishAnalysis() {
             if (stopped || finished) return;
             String score = "—";
@@ -507,8 +518,13 @@ public final class TournamentRunner {
             }
             String nodes = compactCount(lastNodes);
             String nps = compactCount(lastNps);
-            String text = "Eval      Depth    Nodes    NPS\n" + score + "        " + lastDepth +
-                    "        " + nodes + "      " + nps + (pvLine.isEmpty() ? "" : "\n" + pvLine);
+            // Fixed-width metric columns: each value sits beneath its own heading.
+            String text = String.format(java.util.Locale.US,
+                    "%-8s%8s%8s%8s\n%-8s%8s%8s%8s",
+                    "Eval", "Depth", "Nodes", "NPS",
+                    score, centerColumn(Integer.toString(lastDepth), 8),
+                    centerColumn(nodes, 8), centerColumn(nps, 8)) +
+                    (pvLine.isEmpty() ? "" : "\n" + pvLine);
             if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
             if (!positionHistory.isEmpty() && reviewPly < 0) {
                 int last = positionHistory.size() - 1;
