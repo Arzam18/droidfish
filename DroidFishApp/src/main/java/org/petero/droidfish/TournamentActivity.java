@@ -179,7 +179,7 @@ public final class TournamentActivity extends Activity {
     private void buildPlayUi() {
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(12), dp(8), dp(12), dp(8));
+        page.setPadding(0, dp(8), 0, dp(8));
         page.setBackgroundColor(0xFF303030);
 
         tournamentTitleText = text("MY TOURNAMENT");
@@ -191,7 +191,9 @@ public final class TournamentActivity extends Activity {
         // Upper engine analysis panel, kept above its clock/name row.
         blackAnalysisText = text("Eval: —    Depth: —    Nodes: —    NPS: —");
         blackAnalysisText.setTextSize(18);
-        blackAnalysisText.setMaxLines(5);
+        blackAnalysisText.setMinLines(4);
+        blackAnalysisText.setMaxLines(4);
+        blackAnalysisText.setIncludeFontPadding(false);
         blackAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(blackAnalysisText, fullWidth());
 
@@ -206,9 +208,17 @@ public final class TournamentActivity extends Activity {
         blackClockRow.addView(blackMoveTimeText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(blackClockRow, fullWidth());
 
-        FrameLayout boardFrame = new FrameLayout(this);
+        FrameLayout boardFrame = new FrameLayout(this) {
+            @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+                int availableWidth = MeasureSpec.getSize(widthMeasureSpec);
+                int size = availableWidth;
+                setMeasuredDimension(availableWidth, size);
+                int childSpec = MeasureSpec.makeMeasureSpec(size, MeasureSpec.EXACTLY);
+                for (int i = 0; i < getChildCount(); i++) getChildAt(i).measure(childSpec, childSpec);
+            }
+        };
         LinearLayout.LayoutParams frameParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(360));
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         frameParams.topMargin = dp(4);
         frameParams.bottomMargin = dp(4);
         page.addView(boardFrame, frameParams);
@@ -238,11 +248,13 @@ public final class TournamentActivity extends Activity {
 
         whiteAnalysisText = text("Eval: —    Depth: —    Nodes: —    NPS: —");
         whiteAnalysisText.setTextSize(18);
-        whiteAnalysisText.setMaxLines(5);
+        whiteAnalysisText.setMinLines(4);
+        whiteAnalysisText.setMaxLines(4);
+        whiteAnalysisText.setIncludeFontPadding(false);
         whiteAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(whiteAnalysisText, fullWidth());
         openingText = text("Opening: Starting position");
-        openingText.setTextSize(13);
+        openingText.setTextSize(15);
         page.addView(openingText, fullWidth());
         moveStatusText = text("Waiting for tournament");
         page.addView(moveStatusText, fullWidth());
@@ -517,14 +529,15 @@ public final class TournamentActivity extends Activity {
                     blackClockText.setText(formatClock(blackTimeMs));
                     whiteClockText.setAlpha(whiteToMove ? 1.0f : 0.72f);
                     blackClockText.setAlpha(whiteToMove ? 0.72f : 1.0f);
-                    moveStatusText.setText((whiteToMove ? "White to move" : "Black to move") +
-                            "  ·  " + whiteName + " vs " + blackName);
+                    whiteNameText.setText(whiteName + (whiteToMove ? " ⚪" : ""));
+                    blackNameText.setText(blackName + (!whiteToMove ? " ⚫" : ""));
+                    moveStatusText.setText("PGN: " + (openingText == null ? "Game in progress" : openingText.getText().toString().replace("Opening: ", "")));
                 });
             }
             @Override public void onEngineAnalysis(boolean white, String analysis) {
                 runOnUiThread(() -> {
                     TextView target = white ? whiteAnalysisText : blackAnalysisText;
-                    if (target != null) target.setText(analysis);
+                    if (target != null) setAnalysisText(target, analysis);
                     if (tournamentBoard != null && showTournamentArrowsCheck != null && showTournamentArrowsCheck.isChecked()
                             && android.preference.PreferenceManager.getDefaultSharedPreferences(TournamentActivity.this).getString("thinkingArrows", "4").equals("0") == false) {
                         try {
@@ -549,8 +562,8 @@ public final class TournamentActivity extends Activity {
                     latestPosition = new Position(position);
                     tournamentBoard.setPosition(position);
                     tournamentBoard.setMoveHints(null);
-                    whiteAnalysisText.setText(whiteAnalysis);
-                    blackAnalysisText.setText(blackAnalysis);
+                    setAnalysisText(whiteAnalysisText, whiteAnalysis);
+                    setAnalysisText(blackAnalysisText, blackAnalysis);
                     moveStatusText.setText("PAUSED · Reviewing ply " + ply + "/" + totalPlies + " · Next/Previous to navigate");
                     String used = ply == 0 ? "—" : formatClockDuration(moveTimeMs);
                     if (ply > 0 && (ply % 2 == 1)) whiteMoveTimeText.setText(used); else if (ply > 0) blackMoveTimeText.setText(used);
@@ -788,6 +801,16 @@ public final class TournamentActivity extends Activity {
     private EditText field(String hint, String value) {
         EditText e = new EditText(this); e.setSingleLine(false); e.setHint(hint); e.setText(value); return e;
     }
+    private void setAnalysisText(TextView target, String value) {
+        if (target == null) return;
+        android.text.SpannableString styled = new android.text.SpannableString(value == null ? "" : value);
+        int newline = value == null ? -1 : value.indexOf('\n');
+        if (newline >= 0 && newline + 1 < styled.length()) {
+            styled.setSpan(new android.text.style.RelativeSizeSpan(0.75f), newline + 1, styled.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        target.setText(styled);
+    }
+
     private TextView text(String value) { TextView t = new TextView(this); t.setText(value); t.setTextSize(16); t.setPadding(0, dp(6), 0, dp(6)); return t; }
     private LinearLayout.LayoutParams fullWidth() { return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT); }
     private String formatClock(long millis) {
