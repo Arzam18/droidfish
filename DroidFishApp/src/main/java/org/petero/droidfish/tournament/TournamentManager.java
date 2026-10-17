@@ -91,7 +91,17 @@ public final class TournamentManager {
         if (context == null || engines == null || engines.size() < 2) throw new IllegalArgumentException("At least two engines are required");
         if (gamesPerPair < 1) throw new IllegalArgumentException("Games per pairing must be positive");
         if (baseTimeMs < 1 || incrementMs < 0 || openingPlies < 0) throw new IllegalArgumentException("Invalid tournament settings");
-        this.context = context.getApplicationContext(); this.fileName = "cet_tournament_" + System.currentTimeMillis() + ".json";
+        this.context = context.getApplicationContext();
+        // Millisecond timestamps can collide when a user creates tournaments rapidly.
+        // Choose a unique persistent filename so a new event never overwrites another.
+        String candidate;
+        long stamp = System.currentTimeMillis();
+        int suffix = 0;
+        do {
+            candidate = "cet_tournament_" + stamp + (suffix == 0 ? "" : "_" + suffix) + ".json";
+            suffix++;
+        } while (new java.io.File(this.context.getFilesDir(), candidate).exists());
+        this.fileName = candidate;
         this.title = title == null ? "CET Tournament" : title; this.format = format; this.gamesPerPair = gamesPerPair;
         this.baseTimeMs = baseTimeMs; this.incrementMs = incrementMs;
         this.timeMode = timeMode == null ? TimeMode.CLOCK : timeMode; this.limitValue = Math.max(1, limitValue);
@@ -148,8 +158,12 @@ public final class TournamentManager {
     }
 
     private static long savedTimestamp(String name) {
-        try { return Long.parseLong(name.substring("cet_tournament_".length(), name.length() - 5)); }
-        catch (RuntimeException e) { return 0L; }
+        try {
+            String value = name.substring("cet_tournament_".length(), name.length() - 5);
+            int suffix = value.indexOf('_');
+            if (suffix >= 0) value = value.substring(0, suffix);
+            return Long.parseLong(value);
+        } catch (RuntimeException e) { return 0L; }
     }
 
     public static void deleteSavedTournament(Context context, String fileName) throws IOException {
