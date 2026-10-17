@@ -493,17 +493,6 @@ public final class TournamentRunner {
             if (value >= 1_000) return String.format(java.util.Locale.US, "%.0fK", value / 1_000.0);
             return Long.toString(value);
         }
-        private String centerColumn(String value, int width) {
-            if (value == null) value = "";
-            if (value.length() >= width) return value;
-            int left = (width - value.length()) / 2;
-            int right = width - value.length() - left;
-            StringBuilder padded = new StringBuilder(width);
-            for (int i = 0; i < left; i++) padded.append(' ');
-            padded.append(value);
-            for (int i = 0; i < right; i++) padded.append(' ');
-            return padded.toString();
-        }
         private void publishAnalysis() {
             if (stopped || finished) return;
             String score = "—";
@@ -518,13 +507,25 @@ public final class TournamentRunner {
             }
             String nodes = compactCount(lastNodes);
             String nps = compactCount(lastNps);
-            // Fixed-width metric columns: each value sits beneath its own heading.
-            String text = String.format(java.util.Locale.US,
-                    "%-8s%8s%8s%8s\n%-8s%8s%8s%8s",
-                    "Eval", "Depth", "Nodes", "NPS",
-                    score, centerColumn(Integer.toString(lastDepth), 8),
-                    centerColumn(nodes, 8), centerColumn(nps, 8)) +
-                    (pvLine.isEmpty() ? "" : "\n" + pvLine);
+            StringBuilder variation = new StringBuilder();
+            if (!pvLine.isEmpty()) {
+                // Wrap long principal variations into readable lines so they do not compete
+                // with the board for layout space. The panel itself has a bounded line count.
+                String[] moves = pvLine.trim().split("\\s+");
+                int lineMoves = 0;
+                for (String move : moves) {
+                    if (variation.length() > 0 && lineMoves >= 5) {
+                        variation.append('\n');
+                        lineMoves = 0;
+                    } else if (variation.length() > 0 && variation.charAt(variation.length() - 1) != '\n') {
+                        variation.append(' ');
+                    }
+                    variation.append(move);
+                    lineMoves++;
+                }
+            }
+            String text = "Eval: " + score + "    Depth: " + lastDepth + "    Nodes: " + nodes + "    NPS: " + nps +
+                    (variation.length() == 0 ? "" : "\n" + variation);
             if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
             if (!positionHistory.isEmpty() && reviewPly < 0) {
                 int last = positionHistory.size() - 1;
