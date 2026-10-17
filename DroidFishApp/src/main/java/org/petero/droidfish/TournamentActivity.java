@@ -665,7 +665,7 @@ public final class TournamentActivity extends Activity {
 
     private void launchTournament(final TournamentManager tournament) {
         runner = new TournamentRunner(tournament, new TournamentRunner.Listener() {
-            @Override public void onGameStarted(TournamentManager.Pairing pairing, String white, String black, String pgnMoves) {
+            @Override public void onGameStarted(TournamentManager.Pairing pairing, String white, String black) {
                 runOnUiThread(() -> {
                     setContentView(playView);
                     if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
@@ -718,13 +718,12 @@ public final class TournamentActivity extends Activity {
                                 if (firstSpace >= 0 && firstSpace + 1 < pvLine.length()) pvLine = pvLine.substring(firstSpace + 1).trim();
                                 int end = pvLine.indexOf(' '); if (end >= 0) pvLine = pvLine.substring(0, end);
                                 org.petero.droidfish.gamelogic.Move move = org.petero.droidfish.gamelogic.TextIO.stringToMove(new Position(latestPosition), pvLine);
-                                    if (move != null) {
-                                        if (white) whiteHintMove = move; else blackHintMove = move;
-                                        java.util.ArrayList<org.petero.droidfish.gamelogic.Move> hints = new java.util.ArrayList<>();
-                                        if (whiteHintMove != null) hints.add(whiteHintMove);
-                                        if (blackHintMove != null) hints.add(blackHintMove);
-                                        tournamentBoard.setMoveHints(hints);
-                                    }
+                                if (move != null) {
+                                    if (white) whiteHintMove = move; else blackHintMove = move;
+                                    java.util.ArrayList<org.petero.droidfish.gamelogic.Move> hints = new java.util.ArrayList<>();
+                                    if (whiteHintMove != null) hints.add(whiteHintMove);
+                                    if (blackHintMove != null) hints.add(blackHintMove);
+                                    tournamentBoard.setMoveHints(hints);
                                 }
                             }
                         } catch (RuntimeException ignored) { }
