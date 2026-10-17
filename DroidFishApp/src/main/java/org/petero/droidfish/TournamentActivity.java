@@ -665,7 +665,7 @@ public final class TournamentActivity extends Activity {
 
     private void launchTournament(final TournamentManager tournament) {
         runner = new TournamentRunner(tournament, new TournamentRunner.Listener() {
-            @Override public void onGameStarted(TournamentManager.Pairing pairing, String white, String black) {
+            @Override public void onGameStarted(TournamentManager.Pairing pairing, String white, String black, String pgnMoves) {
                 runOnUiThread(() -> {
                     setContentView(playView);
                     if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
@@ -726,6 +726,7 @@ public final class TournamentActivity extends Activity {
                                         tournamentBoard.setMoveHints(hints);
                                     }
                                 }
+                            }
                         } catch (RuntimeException ignored) { }
                     } else if (tournamentBoard != null) { whiteHintMove = null; blackHintMove = null; tournamentBoard.setMoveHints(null); }
                 });
