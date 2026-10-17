@@ -72,6 +72,42 @@ public final class TournamentRunner {
     private long lastMoveTimeMs;
     private long currentTurnStartedNs;
     private boolean humanAdjudication;
+    private boolean drawRulesEnabled = true;
+    private int drawMoveLimit = 50;
+    private int drawRepetitionLimit = 3;
+    private int drawMaximumFullMoves = 160;
+
+    /** Configure tournament-only automatic draw adjudication before start(). */
+    public synchronized void configureDrawRules(boolean enabled, int moveRule, int repetitionCount, int maximumFullMoves) {
+        if (game != null || pairing != null) throw new IllegalStateException("Draw rules must be configured before starting the tournament");
+        drawRulesEnabled = enabled;
+        drawMoveLimit = Math.max(1, Math.min(10000, moveRule));
+        drawRepetitionLimit = Math.max(2, Math.min(100, repetitionCount));
+        drawMaximumFullMoves = Math.max(1, Math.min(10000, maximumFullMoves));
+    }
+
+    private boolean applyConfiguredDrawRules() {
+        if (!drawRulesEnabled || game == null) return false;
+        Position pos = game.currPos();
+        if (pos.halfMoveClock >= drawMoveLimit * 2) {
+            game.adjudicateTournament("1/2-1/2");
+            finishCurrentGame(TournamentManager.Outcome.DRAW);
+            return true;
+        }
+        if (pos.fullMoveCounter > drawMaximumFullMoves) {
+            game.adjudicateTournament("1/2-1/2");
+            finishCurrentGame(TournamentManager.Outcome.DRAW);
+            return true;
+        }
+        long hash = pos.zobristHash(); int occurrences = 0;
+        for (Position historic : positionHistory) if (historic.zobristHash() == hash) occurrences++;
+        if (occurrences >= drawRepetitionLimit) {
+            game.adjudicateTournament("1/2-1/2");
+            finishCurrentGame(TournamentManager.Outcome.DRAW);
+            return true;
+        }
+        return false;
+    }
 
     public TournamentRunner(TournamentManager tournament, Listener listener,
                             EngineOptions engineOptions, BookOptions bookOptions,
@@ -391,6 +427,7 @@ public final class TournamentRunner {
         recordPosition(lastMoveTimeMs);
         listener.onMoveTime(!game.currPos().whiteMove, lastMoveTimeMs, currentOpeningName);
         notifyPosition();
+        if (applyConfiguredDrawRules()) return;
         if (game.getGameState() != Game.GameState.ALIVE) {
             finishCurrentGame(resultForState(game.getGameState()));
             return;
