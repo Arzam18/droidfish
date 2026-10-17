@@ -263,12 +263,15 @@ public final class TournamentActivity extends Activity {
         playPauseButton = new Button(this); playPauseButton.setText("P");
         Button results = new Button(this); results.setText("R");
         Button setup = new Button(this); setup.setText("S");
+        Button schedule = new Button(this); schedule.setText("Sch");
         Button adjudicateButton = new Button(this); adjudicateButton.setText("A");
         controls.addView(playPauseButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(results, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(setup, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        controls.addView(schedule, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(adjudicateButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         setup.setOnClickListener(v -> setContentView(setupView));
+        schedule.setOnClickListener(v -> showScheduleDialog());
         adjudicateButton.setOnClickListener(v -> showAdjudicationDialog());
         page.addView(controls, fullWidth());
         playPauseButton.setOnClickListener(v -> togglePauseResume());
@@ -336,6 +339,50 @@ public final class TournamentActivity extends Activity {
                     })
                     .setPositiveButton("OK", null).show();
         }
+    }
+
+    private void showScheduleDialog() {
+        try {
+            TournamentManager tournament = TournamentManager.restore(this);
+            List<TournamentManager.Engine> engines = tournament.engines();
+            StringBuilder out = new StringBuilder();
+            for (TournamentManager.Pairing pairing : tournament.pairings()) {
+                String white = engineDisplayName(engines, pairing.whiteEngineId);
+                String black = engineDisplayName(engines, pairing.blackEngineId);
+                String result;
+                switch (pairing.outcome) {
+                    case WHITE_WIN: result = "1-0"; break;
+                    case DRAW: result = "½"; break;
+                    case BLACK_WIN: result = "0-1"; break;
+                    default: result = "*"; break;
+                }
+                out.append(pairing.index + 1).append('.').append(white)
+                   .append("   (").append(result).append(")   ").append(black).append('\n');
+            }
+            if (out.length() == 0) out.append("No scheduled games.");
+            TextView text = text(out.toString());
+            text.setTextIsSelectable(true);
+            text.setTextSize(14);
+            text.setPadding(dp(12), dp(8), dp(12), dp(8));
+            ScrollView scroll = new ScrollView(this);
+            scroll.setFillViewport(false);
+            scroll.addView(text, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            new AlertDialog.Builder(this).setTitle("Schedule · " + tournament.pairings().size() + " games")
+                    .setView(scroll)
+                    .setNegativeButton("COPY", (dialog, which) -> {
+                        ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+                        if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Tournament schedule", out.toString()));
+                        Toast.makeText(this, "Schedule copied", Toast.LENGTH_SHORT).show();
+                    })
+                    .setPositiveButton("CLOSE", null).show();
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not load tournament schedule: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private String engineDisplayName(List<TournamentManager.Engine> engines, String id) {
+        for (TournamentManager.Engine engine : engines) if (engine.id.equals(id)) return engine.displayName;
+        return id;
     }
 
     private static final class TournamentChessBoard extends ChessBoardPlay {
