@@ -457,11 +457,19 @@ public final class TournamentRunner {
                 StringBuilder line = new StringBuilder();
                 if (pv.pv != null) {
                     Position cursor = new Position(pos);
-                    int suggestedMoveNumber = 1;
                     for (Move m : pv.pv) {
+                        boolean whiteToMove = cursor.whiteMove;
+                        int moveNumber = cursor.fullMoveCounter;
                         String san = org.petero.droidfish.gamelogic.TextIO.moveToString(cursor, m, false, false);
                         if (line.length() > 0) line.append(' ');
-                        line.append(suggestedMoveNumber++).append('.').append(san);
+                        if (whiteToMove) {
+                            line.append(moveNumber).append('.').append(san);
+                        } else {
+                            // Standard PGN-style numbering: 1.e4 e5 2.Nf3 Nf6.
+                            // If a variation starts with Black to move, retain 1... notation.
+                            if (line.length() == 0) line.append(moveNumber).append("...");
+                            line.append(san);
+                        }
                         cursor.makeMove(m, new org.petero.droidfish.gamelogic.UndoInfo());
                     }
                 }
@@ -508,8 +516,8 @@ public final class TournamentRunner {
             String nodes = compactCount(lastNodes);
             String nps = compactCount(lastNps);
             String variation = pvLine == null ? "" : pvLine.trim();
-            String text = "Eval: " + score + "    Depth: " + lastDepth + "    Nodes: " + nodes + "    NPS: " + nps +
-                    (variation.length() == 0 ? "" : "\n" + variation);
+            String header = "Eval: " + score + "    Depth: " + lastDepth + "    Nodes: " + nodes + "    NPS: " + nps;
+            String text = header + (variation.length() == 0 ? "" : "\n" + variation);
             if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
             if (!positionHistory.isEmpty() && reviewPly < 0) {
                 int last = positionHistory.size() - 1;
