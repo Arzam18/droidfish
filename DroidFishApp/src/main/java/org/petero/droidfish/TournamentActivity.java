@@ -38,6 +38,10 @@ import org.petero.droidfish.gamelogic.TextIO;
 import org.petero.droidfish.ChessBoardPlay;
 import org.petero.droidfish.tournament.TournamentManager;
 import org.petero.droidfish.tournament.TournamentRunner;
+import org.petero.droidfish.engine.DroidComputerPlayer;
+import org.petero.droidfish.gamelogic.SearchListener;
+import org.petero.droidfish.gamelogic.SearchListener.PvInfo;
+import org.petero.droidfish.gamelogic.Move;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -93,14 +97,21 @@ public final class TournamentActivity extends Activity {
     private TextView gvWhiteClock, gvBlackClock, gvWhiteName, gvBlackName, gvWhiteTime, gvBlackTime;
     private TextView gvWhiteAnalysis, gvBlackAnalysis, gvMoves, gvStatus;
     private Button gvAnalysisButton;
+    private EditText gvMoveInput;
     private GameTree gameViewerTree;
     private final ArrayList<Position> gameViewerPositions = new ArrayList<>();
     private final ArrayList<String> gameViewerMoves = new ArrayList<>();
     private final ArrayList<String> gameViewerComments = new ArrayList<>();
     private int gameViewerPly = 0;
-    private boolean gameViewerAnalysisOn = true;
+    private boolean gameViewerAnalysisOn = false;
     private boolean gameViewerSelectedWhite = true;
     private String gameViewerPgn = "";
+    private DroidComputerPlayer gameViewerEngine;
+    private String gameViewerEngineId = "";
+    private int gameViewerSearchId = 50000;
+    private final ArrayList<Move> gameViewerHints = new ArrayList<>();
+    private CheckBox drawRulesCheck;
+    private EditText drawMoveRuleInput, drawRepetitionInput, drawMaximumInput;
 
     private CheckBox repeatOpeningCheck;
     private Button startButton, resumeButton, stopButton, playPauseButton;
@@ -123,6 +134,8 @@ public final class TournamentActivity extends Activity {
         restoreSetup();
         uiHandler.post(clockRefresh);
     }
+
+    @Override protected void onDestroy() { stopGameViewerAnalysis(); if (runner != null) runner.stop(); uiHandler.removeCallbacks(clockRefresh); super.onDestroy(); }
 
     private void buildUi() {
         ScrollView scroll = new ScrollView(this);
@@ -199,6 +212,11 @@ public final class TournamentActivity extends Activity {
         fastWinRuleCheck.setText("Enable Fast Win Rule (both engines must agree on the winning side)");
         fastWinRuleCheck.setChecked(true);
         root.addView(fastWinRuleCheck, fullWidth());
+        drawRulesCheck = new CheckBox(this); drawRulesCheck.setText("Enable tournament draw rules"); drawRulesCheck.setChecked(true); root.addView(drawRulesCheck, fullWidth());
+        drawMoveRuleInput = field("Move rule (half-moves; default 50)", "50"); root.addView(drawMoveRuleInput, fullWidth());
+        drawRepetitionInput = field("Repetition count (default 3)", "3"); root.addView(drawRepetitionInput, fullWidth());
+        drawMaximumInput = field("Maximum full moves (default 160)", "160"); root.addView(drawMaximumInput, fullWidth());
+        drawRulesCheck.setOnCheckedChangeListener((button, checked) -> { drawMoveRuleInput.setEnabled(checked); drawRepetitionInput.setEnabled(checked); drawMaximumInput.setEnabled(checked); });
 
         startButton = new Button(this); startButton.setText("Start tournament"); root.addView(startButton, fullWidth());
         resumeButton = new Button(this); resumeButton.setText("Resume saved tournament"); root.addView(resumeButton, fullWidth());
@@ -495,14 +513,33 @@ public final class TournamentActivity extends Activity {
         Button first=new Button(this); first.setText("<<"); Button prev=new Button(this); prev.setText("<"); gvAnalysisButton=new Button(this); gvAnalysisButton.setText("⏯"); Button next=new Button(this); next.setText(">"); Button last=new Button(this); last.setText(">>");
         for(Button b:new Button[]{first,prev,gvAnalysisButton,next,last}) nav.addView(b,new LinearLayout.LayoutParams(0,-2,1)); page.addView(nav,fullWidth());
         first.setOnClickListener(v->showGameViewerPly(0)); prev.setOnClickListener(v->showGameViewerPly(Math.max(0,gameViewerPly-1))); next.setOnClickListener(v->showGameViewerPly(Math.min(gameViewerPositions.size()-1,gameViewerPly+1))); last.setOnClickListener(v->showGameViewerPly(Math.max(0,gameViewerPositions.size()-1)));
-        gvAnalysisButton.setOnClickListener(v->{ gameViewerAnalysisOn=!gameViewerAnalysisOn; gvAnalysisButton.setText(gameViewerAnalysisOn?"⏯ ON":"⏯ OFF"); renderGameViewerPly(); });
+        gvAnalysisButton.setOnClickListener(v->{ if (gameViewerEngineId.isEmpty()) { Toast.makeText(this, "Long-press ⏯ to select an engine first", Toast.LENGTH_SHORT).show(); return; } gameViewerAnalysisOn=!gameViewerAnalysisOn; gvAnalysisButton.setText(gameViewerAnalysisOn?"⏯ ON":"⏯ OFF"); if (gameViewerAnalysisOn) startGameViewerAnalysis(); else stopGameViewerAnalysis(); renderGameViewerPly(); });
         gvAnalysisButton.setOnLongClickListener(v->{ selectGameViewerAnalysisEngine(); return true; });
         gvWhiteAnalysis=text("White Eval: ---  Depth: ---  Nodes: ---  NPS: ---"); gvWhiteAnalysis.setTextSize(16); gvWhiteAnalysis.setLines(2); gvWhiteAnalysis.setMaxLines(2); page.addView(gvWhiteAnalysis,fullWidth());
         gvBlackAnalysis=text("Black Eval: ---  Depth: ---  Nodes: ---  NPS: ---"); gvBlackAnalysis.setTextSize(16); gvBlackAnalysis.setLines(2); gvBlackAnalysis.setMaxLines(2); page.addView(gvBlackAnalysis,fullWidth());
         gvMoves=text("No PGN loaded."); gvMoves.setTextSize(16); page.addView(gvMoves,fullWidth());
         gvStatus=text("Open a PGN to review recorded analysis."); page.addView(gvStatus,fullWidth());
-        Button back=new Button(this); back.setText("Close Game Viewer"); page.addView(back,fullWidth()); back.setOnClickListener(v->setContentView(setupView));
+        Button fresh=new Button(this); fresh.setText("New empty game"); page.addView(fresh,fullWidth()); fresh.setOnClickListener(v -> startEmptyGameViewer());
+        Button openBottom=new Button(this); openBottom.setText("Open a PGN"); page.addView(openBottom,fullWidth()); openBottom.setOnClickListener(v->openGameViewerPicker());
+        Button back=new Button(this); back.setText("Go to Setup"); page.addView(back,fullWidth()); back.setOnClickListener(v->{ stopGameViewerAnalysis(); setContentView(setupView); });
         ScrollView scroll=new ScrollView(this); scroll.setFillViewport(false); scroll.addView(page,new ScrollView.LayoutParams(-1,-2)); gameViewerView=scroll;
+    }
+
+    private void applyGameViewerManualMove() {
+        if (gameViewerPositions.isEmpty()) startEmptyGameViewer();
+        Position pos = new Position(gameViewerPositions.get(gameViewerPly));
+        String text = gvMoveInput == null ? "" : gvMoveInput.getText().toString().trim();
+        if (text.isEmpty()) return;
+        Move move = TextIO.stringToMove(pos, text);
+        if (move == null) { Toast.makeText(this, "Illegal move: " + text, Toast.LENGTH_SHORT).show(); return; }
+        String san = TextIO.moveToString(pos, move, false, false);
+        pos.makeMove(move, new org.petero.droidfish.gamelogic.UndoInfo());
+        while (gameViewerPositions.size() > gameViewerPly + 1) gameViewerPositions.remove(gameViewerPositions.size()-1);
+        while (gameViewerMoves.size() > gameViewerPly) gameViewerMoves.remove(gameViewerMoves.size()-1);
+        while (gameViewerComments.size() > gameViewerPly) gameViewerComments.remove(gameViewerComments.size()-1);
+        gameViewerPositions.add(pos); gameViewerMoves.add(san); gameViewerComments.add(""); gameViewerPly++;
+        if (gvMoveInput != null) gvMoveInput.setText(""); renderGameViewerPly();
+        if (gameViewerAnalysisOn && !gameViewerEngineId.isEmpty()) startGameViewerAnalysis();
     }
 
     private void openGameViewerPicker() {
@@ -530,7 +567,7 @@ public final class TournamentActivity extends Activity {
                 final GameTree finalTree=tree; final ArrayList<Position> finalPositions=positions; final ArrayList<String> finalComments=comments; final ArrayList<String> finalMoves=moves; final String finalPgn=pgn;
                 runOnUiThread(() -> {
                     gameViewerTree=finalTree; gameViewerPositions.clear(); gameViewerPositions.addAll(finalPositions); gameViewerComments.clear(); gameViewerComments.addAll(finalComments); gameViewerMoves.clear(); gameViewerMoves.addAll(finalMoves); gameViewerPgn=finalPgn; gameViewerPly=0;
-                    setContentView(gameViewerView); renderGameViewerPly();
+                    setContentView(gameViewerView); renderGameViewerPly(); if(gameViewerAnalysisOn && !gameViewerEngineId.isEmpty()) startGameViewerAnalysis();
                     Toast.makeText(this,"PGN loaded · "+Math.max(0,gameViewerPositions.size()-1)+" plies",Toast.LENGTH_SHORT).show();
                 });
             } catch(Exception e) { runOnUiThread(() -> Toast.makeText(this,"Could not load PGN: "+e.getMessage(),Toast.LENGTH_LONG).show()); }
@@ -551,10 +588,10 @@ public final class TournamentActivity extends Activity {
     }
 
     private void showGameViewerPly(int ply) {
-        if(gameViewerPositions.isEmpty()) return; gameViewerPly=Math.max(0,Math.min(ply,gameViewerPositions.size()-1)); renderGameViewerPly();
+        if(gameViewerPositions.isEmpty()) return; gameViewerPly=Math.max(0,Math.min(ply,gameViewerPositions.size()-1)); renderGameViewerPly(); if(gameViewerAnalysisOn && !gameViewerEngineId.isEmpty()) startGameViewerAnalysis();
     }
     private void renderGameViewerPly() {
-        if(gameViewerPositions.isEmpty()) return;
+        if(gameViewerPositions.isEmpty()) { gameViewerPositions.add(new Position()); gameViewerPly=0; }
         gameViewerBoard.setPosition(new Position(gameViewerPositions.get(gameViewerPly)));
         String[] names=extractPgnNames(gameViewerPgn); gvWhiteName.setText(names[0]); gvBlackName.setText(names[1]);
         String whiteComment="", blackComment="";
@@ -576,9 +613,9 @@ public final class TournamentActivity extends Activity {
         gvWhiteClock.setText(whiteClock.isEmpty()?"---":whiteClock); gvBlackClock.setText(blackClock.isEmpty()?"---":blackClock);
         gvWhiteTime.setText(whiteUsed.isEmpty()?"---":whiteUsed); gvBlackTime.setText(blackUsed.isEmpty()?"---":blackUsed);
         String whiteAnalysis=analysisFromComment(whiteComment), blackAnalysis=analysisFromComment(blackComment);
-        if(!gameViewerAnalysisOn) { whiteAnalysis="Eval: ---  Depth: ---  Nodes: ---  NPS: ---"; blackAnalysis="Eval: ---  Depth: ---  Nodes: ---  NPS: ---"; }
-        gvWhiteAnalysis.setText((gameViewerSelectedWhite ? "▶ White " : "White ")+whiteAnalysis);
-        gvBlackAnalysis.setText((!gameViewerSelectedWhite ? "▶ Black " : "Black ")+blackAnalysis);
+        // When live analysis is off, keep the PGN's recorded per-move analysis visible.
+        gvWhiteAnalysis.setText("White "+whiteAnalysis);
+        gvBlackAnalysis.setText("Black "+blackAnalysis);
         StringBuilder moves=new StringBuilder();
         for(int i=0;i<gameViewerMoves.size() && i<gameViewerPly;i++) { if(i%2==0) { if(moves.length()>0)moves.append(' '); moves.append((i/2+1)).append('.'); } else moves.append(' '); moves.append(gameViewerMoves.get(i)); }
         gvMoves.setText(moves.length()==0?"No moves yet.":moves.toString()); gvStatus.setText("Ply "+gameViewerPly+" / "+(gameViewerPositions.size()-1));
@@ -605,10 +642,51 @@ public final class TournamentActivity extends Activity {
         return "";
     }
     private void selectGameViewerAnalysisEngine() {
-        new AlertDialog.Builder(this).setTitle("Select recorded analysis side")
-            .setItems(new String[]{gvWhiteName.getText().toString(),gvBlackName.getText().toString()},(d,w)->{gameViewerSelectedWhite=w==0; Toast.makeText(this,"Selected "+(gameViewerSelectedWhite?"White":"Black")+" recorded analysis",Toast.LENGTH_SHORT).show(); renderGameViewerPly();})
+        if (availableEngines.isEmpty()) loadEngineChoices();
+        String[] labels = new String[availableEngines.size()]; for (int i=0;i<labels.length;i++) labels[i]=availableEngines.get(i).name;
+        new AlertDialog.Builder(this).setTitle("Select engine for live analysis")
+            .setItems(labels,(d,w)->{ if(w>=0 && w<availableEngines.size()) { stopGameViewerAnalysis(); gameViewerEngineId=availableEngines.get(w).id; gameViewerSelectedWhite=true; Toast.makeText(this,"Selected "+availableEngines.get(w).name,Toast.LENGTH_SHORT).show(); if(gameViewerAnalysisOn) startGameViewerAnalysis(); } })
             .setNegativeButton("Cancel",null).show();
     }
+
+    private void startEmptyGameViewer() {
+        stopGameViewerAnalysis(); gameViewerPgn=""; gameViewerTree=new GameTree(null); gameViewerPositions.clear(); gameViewerPositions.add(new Position()); gameViewerMoves.clear(); gameViewerComments.clear(); gameViewerPly=0;
+        setContentView(gameViewerView); renderGameViewerPly();
+    }
+
+    private void stopGameViewerAnalysis() {
+        if (gameViewerEngine != null) { try { gameViewerEngine.stopSearch(); gameViewerEngine.shutdownEngine(); } catch (RuntimeException ignored) {} gameViewerEngine=null; }
+        if (gameViewerBoard != null) gameViewerBoard.setMoveHints(null); gameViewerHints.clear();
+    }
+
+    private void startGameViewerAnalysis() {
+        if (!gameViewerAnalysisOn || gameViewerEngineId.isEmpty() || gameViewerPositions.isEmpty()) return;
+        stopGameViewerEngineOnly();
+        gameViewerEngine = new DroidComputerPlayer(new SearchListener() {
+            @Override public void notifyDepth(int id,int depth) { }
+            @Override public void notifyCurrMove(int id,Position pos,Move m,int moveNr) { }
+            @Override public void notifyStats(int id,long nodes,int nps,long tbHits,int hash,int time,int seldepth) { }
+            @Override public void notifyBookInfo(int id,String bookInfo,ArrayList<Move> moveList,String eco,int distToEcoTree) { }
+            @Override public void notifyEngineName(String name) { runOnUiThread(()->gvBlackName.setText(name)); }
+            @Override public void reportEngineError(String errMsg) { runOnUiThread(()->Toast.makeText(TournamentActivity.this,"Analysis engine: "+errMsg,Toast.LENGTH_LONG).show()); }
+            @Override public void notifyEngineInitialized() { }
+            @Override public void notifySearchResult(int id,String cmd,Move ponder) { }
+            @Override public void notifyPV(int id,Position pos,ArrayList<PvInfo> infos,Move ponderMove) {
+                if (infos==null || infos.isEmpty() || infos.get(0)==null) return; PvInfo pv=infos.get(0);
+                String eval=pv.isMate?((pv.score>=0?"+M":"-M")+Math.abs(pv.score)) : String.format(java.util.Locale.US,"%+.2f",pv.score/100.0);
+                StringBuilder variation=new StringBuilder(); Position cursor=new Position(pos); ArrayList<Move> hints=new ArrayList<>();
+                if(pv.pv!=null) for(Move m:pv.pv) { if(hints.size()<2) hints.add(m); String san=TextIO.moveToString(cursor,m,false,false); if(variation.length()>0)variation.append(' '); if(cursor.whiteMove)variation.append(cursor.fullMoveCounter).append('.'); variation.append(san); cursor.makeMove(m,new org.petero.droidfish.gamelogic.UndoInfo()); }
+                String output="Eval: "+eval+"    Depth: "+pv.depth+"    Nodes: "+compactViewerCount(pv.nodes)+"    NPS: "+compactViewerCount(pv.nps)+"\n"+variation;
+                runOnUiThread(()->{ if(!gameViewerAnalysisOn)return; gvWhiteAnalysis.setText(output); gvBlackAnalysis.setText("Black Eval: ---  Depth: ---  Nodes: ---  NPS: ---"); gameViewerHints.clear(); gameViewerHints.addAll(hints); gameViewerBoard.setMoveHints(gameViewerHints); });
+            }
+        });
+        gameViewerEngine.setEngineOptions(new org.petero.droidfish.EngineOptions()); gameViewerEngine.setBookOptions(new BookOptions());
+        int id=++gameViewerSearchId; gameViewerEngine.queueStartEngine(id,gameViewerEngineId);
+        Position pos=new Position(gameViewerPositions.get(gameViewerPly));
+        uiHandler.postDelayed(()->{ if(gameViewerEngine==null||!gameViewerAnalysisOn)return; try { gameViewerEngine.queueAnalyzeRequest(DroidComputerPlayer.SearchRequest.analyzeRequest(++gameViewerSearchId,pos,new ArrayList<Move>(),pos,false,gameViewerEngineId,1)); } catch(RuntimeException ex) { Toast.makeText(this,"Unable to start analysis: "+ex.getMessage(),Toast.LENGTH_LONG).show(); } },700);
+    }
+    private void stopGameViewerEngineOnly() { if(gameViewerEngine!=null) { try { gameViewerEngine.stopSearch(); gameViewerEngine.shutdownEngine(); } catch(RuntimeException ignored){} gameViewerEngine=null; } }
+    private String compactViewerCount(long value) { if(value>=1_000_000)return String.format(java.util.Locale.US,"%.1fM",value/1_000_000.0); if(value>=1_000)return String.format(java.util.Locale.US,"%.0fK",value/1_000.0); return Long.toString(value); }
 
     private boolean handleBoardSwipe(android.view.MotionEvent event) {
         switch (event.getActionMasked()) {
@@ -803,6 +881,10 @@ public final class TournamentActivity extends Activity {
         e.putBoolean("setupArrows", showTournamentArrowsCheck.isChecked());
         e.putString("setupAutoWinEval", autoWinEvalInput.getText().toString());
         e.putBoolean("setupFastWin", fastWinRuleCheck.isChecked());
+        e.putBoolean("setupDrawRules", drawRulesCheck != null && drawRulesCheck.isChecked());
+        if (drawMoveRuleInput != null) e.putString("setupDrawMove", drawMoveRuleInput.getText().toString());
+        if (drawRepetitionInput != null) e.putString("setupDrawRep", drawRepetitionInput.getText().toString());
+        if (drawMaximumInput != null) e.putString("setupDrawMax", drawMaximumInput.getText().toString());
         e.putString("setupOpeningPgn", selectedOpeningPgn);
         e.putString("setupOpeningName", selectedOpeningFileName);
         StringBuilder ids = new StringBuilder(); for (EngineChoice c : selectedEngines) { if (ids.length()>0) ids.append("\n"); ids.append(c.id); }
@@ -818,7 +900,11 @@ public final class TournamentActivity extends Activity {
         openingStartInput.setText(p.getString("setupOpeningStart", openingStartInput.getText().toString())); repeatOpeningCheck.setChecked(p.getBoolean("setupRepeat", false));
         showTournamentArrowsCheck.setChecked(p.getBoolean("setupArrows", true));
         autoWinEvalInput.setText(p.getString("setupAutoWinEval", "10"));
-        fastWinRuleCheck.setChecked(p.getBoolean("setupFastWin", true)); selectedOpeningPgn=p.getString("setupOpeningPgn", ""); selectedOpeningFileName=p.getString("setupOpeningName", selectedOpeningPgn.isEmpty()?"No PGN file selected":"Saved PGN book loaded"); openingFileText.setText(selectedOpeningFileName);
+        fastWinRuleCheck.setChecked(p.getBoolean("setupFastWin", true));
+        if (drawRulesCheck != null) drawRulesCheck.setChecked(p.getBoolean("setupDrawRules", true));
+        if (drawMoveRuleInput != null) drawMoveRuleInput.setText(p.getString("setupDrawMove", "50"));
+        if (drawRepetitionInput != null) drawRepetitionInput.setText(p.getString("setupDrawRep", "3"));
+        if (drawMaximumInput != null) drawMaximumInput.setText(p.getString("setupDrawMax", "160")); selectedOpeningPgn=p.getString("setupOpeningPgn", ""); selectedOpeningFileName=p.getString("setupOpeningName", selectedOpeningPgn.isEmpty()?"No PGN file selected":"Saved PGN book loaded"); openingFileText.setText(selectedOpeningFileName);
         selectedEngines.clear(); String ids=p.getString("setupEngineIds", ""); if (!ids.isEmpty()) for(String id:ids.split("\n")) for(EngineChoice c:availableEngines) if(c.id.equals(id)){selectedEngines.add(c); break;} updateSelectedText();
     }
     private void refreshLiveClocks() {
@@ -1159,6 +1245,12 @@ public final class TournamentActivity extends Activity {
         if (playPauseButton != null) playPauseButton.setText("P");
         if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
         setContentView(playView);
+        int moveRule = 50, repetitionRule = 3, maximumMoves = 160;
+        try { moveRule = Integer.parseInt(drawMoveRuleInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
+        try { repetitionRule = Integer.parseInt(drawRepetitionInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
+        try { maximumMoves = Integer.parseInt(drawMaximumInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
+        runner.configureDrawRules(drawRulesCheck.isChecked(), moveRule, repetitionRule, maximumMoves);
+        saveSetup();
         runner.start();
     }
 
