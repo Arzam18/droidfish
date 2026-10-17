@@ -57,6 +57,7 @@ public final class TournamentActivity extends Activity {
     private String currentWhiteName = "WHITE", currentBlackName = "BLACK";
     private TextView whiteAnalysisText, blackAnalysisText, whiteMoveTimeText, blackMoveTimeText, openingText;
     private View mirrorView;
+    private int currentTournamentScreen = 0; // 0 = live board, 1 = mirror board
     private ChessBoardPlay mirrorBoard;
     private TextView mirrorAnalysisText, mirrorWhiteClock, mirrorBlackClock, mirrorWhiteName, mirrorBlackName,
             mirrorWhiteMoveTime, mirrorBlackMoveTime, mirrorMovesText, mirrorStatusText;
@@ -300,7 +301,7 @@ public final class TournamentActivity extends Activity {
         playPauseButton = new Button(this); playPauseButton.setText("P");
         Button results = new Button(this); results.setText("R");
         Button menu = new Button(this); menu.setText("M");
-        Button schedule = new Button(this); schedule.setText("Sch");
+        Button schedule = new Button(this); schedule.setText("Switch");
 
         controls.addView(playPauseButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(results, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -309,13 +310,14 @@ public final class TournamentActivity extends Activity {
 
         menu.setOnClickListener(v -> new AlertDialog.Builder(TournamentActivity.this)
                 .setTitle("Tournament menu")
-                .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Moves", "Mirror Board"}, (dialog, which) -> {
+                .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Moves", "Schedule"}, (dialog, which) -> {
                     if (which == 0) showAdjudicationDialog();
                     else if (which == 1) setContentView(setupView);
-                    else if (which == 2) { toggleTournamentFlip(); }
-                    else showMovesDialog();
+                    else if (which == 2) toggleTournamentFlip();
+                    else if (which == 3) showMovesDialog();
+                    else showScheduleDialog();
                 }).show());
-        schedule.setOnClickListener(v -> showScheduleDialog());
+        schedule.setOnClickListener(v -> switchTournamentAndMirror());
         page.addView(controls, fullWidth());
         playPauseButton.setOnClickListener(v -> togglePauseResume());
         results.setOnClickListener(v -> showStandingsDialog());
@@ -368,7 +370,7 @@ public final class TournamentActivity extends Activity {
         page.addView(nav,fullWidth());
         mirrorMovesText=text("No moves played yet."); mirrorMovesText.setTextSize(16); page.addView(mirrorMovesText,fullWidth());
         mirrorStatusText=text("Mirror follows the live tournament."); page.addView(mirrorStatusText,fullWidth());
-        Button back=new Button(this); back.setText("Close mirror"); page.addView(back,fullWidth()); back.setOnClickListener(v->setContentView(playView));
+        Button back=new Button(this); back.setText("Switch to tournament board"); page.addView(back,fullWidth()); back.setOnClickListener(v->switchTournamentAndMirror());
         first.setOnClickListener(v->navigateMirror(0)); prev.setOnClickListener(v->navigateMirror(Math.max(0, mirrorDisplayedPly()-1)));
         next.setOnClickListener(v->navigateMirror(Math.min(mirrorPositions.size()-1, mirrorDisplayedPly()+1)));
         last.setOnClickListener(v->navigateMirror(Math.max(0,mirrorPositions.size()-1)));
@@ -377,7 +379,22 @@ public final class TournamentActivity extends Activity {
     }
 
     private int mirrorDisplayedPly() { return mirrorPly < 0 ? Math.max(0, mirrorPositions.size()-1) : mirrorPly; }
-    private void openMirrorBoard() { syncMirrorFromLive(); setContentView(mirrorView); }
+    private void openMirrorBoard() { syncMirrorFromLive(); currentTournamentScreen = 1; setContentView(mirrorView); }
+
+    /** Switches between the live tournament board and its independent mirror view. */
+    private void switchTournamentAndMirror() {
+        if (mirrorView == null || playView == null) return;
+        if (isMirrorShowing()) {
+            currentTournamentScreen = 0;
+            setContentView(playView);
+        } else {
+            syncMirrorFromLive();
+            currentTournamentScreen = 1;
+            setContentView(mirrorView);
+        }
+    }
+
+    private boolean isMirrorShowing() { return currentTournamentScreen == 1; }
     private void syncMirrorFromLive() {
         if (mirrorBoard == null) return;
         if (mirrorPositions.isEmpty() || !samePosition(mirrorPositions.get(mirrorPositions.size()-1), latestPosition)) mirrorPositions.add(new Position(latestPosition));
@@ -472,7 +489,7 @@ public final class TournamentActivity extends Activity {
         TextView body = text(moves); body.setTextIsSelectable(true); body.setTextSize(16); body.setPadding(dp(12), dp(8), dp(12), dp(8));
         ScrollView sc = new ScrollView(this); sc.addView(body);
         new AlertDialog.Builder(this).setTitle("Current game moves").setView(sc)
-                .setPositiveButton("TOURNAMENT", (d, w) -> setContentView(playView)).setNegativeButton("CLOSE", null).show();
+                .setPositiveButton("TOURNAMENT", (d, w) -> { currentTournamentScreen = 0; setContentView(playView); }).setNegativeButton("CLOSE", null).show();
     }
 
     private void showScheduleDialog() {
@@ -817,6 +834,7 @@ public final class TournamentActivity extends Activity {
         runner = new TournamentRunner(tournament, new TournamentRunner.Listener() {
             @Override public void onGameStarted(TournamentManager.Pairing pairing, String white, String black) {
                 runOnUiThread(() -> {
+                    currentTournamentScreen = 0;
                     setContentView(playView);
                     if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
                     if (playPauseButton != null) playPauseButton.setText(runner != null && runner.isPaused() ? "Play" : "Pause");
