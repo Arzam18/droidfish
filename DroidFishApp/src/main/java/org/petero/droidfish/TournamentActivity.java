@@ -62,7 +62,7 @@ public final class TournamentActivity extends Activity {
     private String selectedOpeningFileName = "No PGN file selected";
     private static final int REQUEST_OPENING_PGN = 7314;
     private CheckBox repeatOpeningCheck;
-    private Button startButton, resumeButton, stopButton, exportButton, playPauseButton;
+    private Button startButton, resumeButton, stopButton, playPauseButton;
     private boolean autoPaused;
     private TournamentRunner runner;
 
@@ -106,7 +106,7 @@ public final class TournamentActivity extends Activity {
         timeModeSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
                 new String[]{"Time Clock: Time + Increment", "Time per move", "Depth per move", "Nodes per move"}));
         root.addView(timeModeSpinner, fullWidth());
-        baseInput = field("Base time per side (seconds)", "30"); root.addView(baseInput, fullWidth());
+        baseInput = field("Base time per side (minutes)", "0.5"); root.addView(baseInput, fullWidth());
         incrementInput = field("Increment per move (seconds; e.g. 1 for +1)", "0.5"); root.addView(incrementInput, fullWidth());
         limitInput = field("Time per move (seconds), depth, or nodes", "2"); root.addView(limitInput, fullWidth());
         timeModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
@@ -146,14 +146,12 @@ public final class TournamentActivity extends Activity {
 
         startButton = new Button(this); startButton.setText("Start tournament"); root.addView(startButton, fullWidth());
         resumeButton = new Button(this); resumeButton.setText("Resume saved tournament"); root.addView(resumeButton, fullWidth());
-        stopButton = new Button(this); stopButton.setText("Stop tournament"); stopButton.setEnabled(false); root.addView(stopButton, fullWidth());
-        exportButton = new Button(this); exportButton.setText("Export completed games to PGN"); root.addView(exportButton, fullWidth());
+        stopButton = new Button(this); stopButton.setText("Go to tournament board"); stopButton.setEnabled(false); root.addView(stopButton, fullWidth());
         statusText = text("Ready"); root.addView(statusText, fullWidth());
         standingsText = text(""); root.addView(standingsText, fullWidth());
         startButton.setOnClickListener(v -> startTournament());
         resumeButton.setOnClickListener(v -> resumeTournament());
-        stopButton.setOnClickListener(v -> stopTournament());
-        exportButton.setOnClickListener(v -> exportTournamentPgn());
+        stopButton.setOnClickListener(v -> setContentView(playView));
         scroll.setOnTouchListener((v, event) -> {
             if (event.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
                 touchDownX = event.getX(); touchDownY = event.getY(); return false;
@@ -192,7 +190,7 @@ public final class TournamentActivity extends Activity {
         // Upper engine analysis panel, kept above its clock/name row.
         blackAnalysisText = text("Eval: —    Depth: —    Nodes: —    NPS: —");
         blackAnalysisText.setTextSize(18);
-        blackAnalysisText.setMinLines(6);
+        blackAnalysisText.setLines(6);
         blackAnalysisText.setMaxLines(6);
         blackAnalysisText.setIncludeFontPadding(false);
         blackAnalysisText.setTextColor(0xFFD5D5D5);
@@ -248,7 +246,7 @@ public final class TournamentActivity extends Activity {
 
         whiteAnalysisText = text("Eval: —    Depth: —    Nodes: —    NPS: —");
         whiteAnalysisText.setTextSize(18);
-        whiteAnalysisText.setMinLines(6);
+        whiteAnalysisText.setLines(6);
         whiteAnalysisText.setMaxLines(6);
         whiteAnalysisText.setIncludeFontPadding(false);
         whiteAnalysisText.setTextColor(0xFFD5D5D5);
@@ -262,12 +260,15 @@ public final class TournamentActivity extends Activity {
 
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
-        playPauseButton = new Button(this); playPauseButton.setText("Pause");
-        Button results = new Button(this); results.setText("Results");
-        Button adjudicateButton = new Button(this); adjudicateButton.setText("Adjudicate");
+        playPauseButton = new Button(this); playPauseButton.setText("P");
+        Button results = new Button(this); results.setText("R");
+        Button setup = new Button(this); setup.setText("S");
+        Button adjudicateButton = new Button(this); adjudicateButton.setText("A");
         controls.addView(playPauseButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(results, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        controls.addView(setup, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(adjudicateButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        setup.setOnClickListener(v -> setContentView(setupView));
         adjudicateButton.setOnClickListener(v -> showAdjudicationDialog());
         page.addView(controls, fullWidth());
         playPauseButton.setOnClickListener(v -> togglePauseResume());
@@ -297,7 +298,7 @@ public final class TournamentActivity extends Activity {
                         if (runner != null && !runner.isPaused()) {
                             runner.pause();
                             autoPaused = true;
-                            if (playPauseButton != null) playPauseButton.setText("Play");
+                            if (playPauseButton != null) playPauseButton.setText("P");
                             if (moveStatusText != null) moveStatusText.setText("PAUSED · Return to tournament to continue");
                         }
                         Intent main = new Intent(TournamentActivity.this, DroidFish.class);
@@ -410,7 +411,8 @@ public final class TournamentActivity extends Activity {
         try {
             int games = positiveInt(gamesInput, "games per pairing", 1);
             int timeModeIndex = timeModeSpinner.getSelectedItemPosition();
-            int seconds = timeModeIndex == 0 ? positiveInt(baseInput, "base time", 1) : 30;
+            double baseMinutes = timeModeIndex == 0 ? positiveDouble(baseInput, "base time in minutes", 0.01) : 0.5;
+            long baseMillis = Math.round(baseMinutes * 60_000.0);
             int increment = timeModeIndex == 0 ? (int)Math.round(nonNegativeDouble(incrementInput, "increment") * 1000.0) : 0;
             int limitValue = timeModeIndex == 1 ? (int)Math.min(Integer.MAX_VALUE / 1000L, Math.round(positiveDouble(limitInput, "seconds per move", 1) * 1000.0)) :
                     (timeModeIndex == 2 ? positiveInt(limitInput, "depth per move", 1) :
@@ -420,7 +422,7 @@ public final class TournamentActivity extends Activity {
             // A selected PGN is applied in full by default (0); positive values cap half-moves.
             if (openingPlies > 0 && selectedOpeningPgn.trim().isEmpty())
                 throw new IllegalArgumentException("Select a PGN opening file before setting a custom opening-ply limit");
-            if (seconds > Integer.MAX_VALUE / 1000) throw new IllegalArgumentException("Base time is too large");
+            if (baseMillis > Integer.MAX_VALUE * 1000L) throw new IllegalArgumentException("Base time is too large");
             TournamentManager.Format format = TournamentManager.Format.values()[formatSpinner.getSelectedItemPosition()];
             if (format == TournamentManager.Format.MATCH && selectedEngines.size() != 2)
                 throw new IllegalArgumentException("Match format requires exactly two engines");
@@ -429,13 +431,13 @@ public final class TournamentActivity extends Activity {
             String tournamentName = titleInput.getText().toString().trim();
             if (tournamentName.isEmpty()) tournamentName = "My Tournament";
             TournamentManager tournament = new TournamentManager(this, tournamentName, format,
-                    engines, games, seconds * 1000L, increment, selectedOpeningPgn, openingPlies,
+                    engines, games, baseMillis, increment, selectedOpeningPgn, openingPlies,
                     repeatOpeningCheck.isChecked(), TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart);
             tournament.save();
             launchTournament(tournament);
         } catch (Exception e) {
             if (runner != null) runner.stop();
-            runner = null; startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(false);
+            runner = null; startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(runner != null);
             Toast.makeText(this, "Could not start tournament: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
@@ -604,20 +606,20 @@ public final class TournamentActivity extends Activity {
                     statusText.setText("Tournament complete");
                     moveStatusText.setText("TOURNAMENT COMPLETE");
                     standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
-                    runner = null; startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(false);
+                    runner = null; startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(runner != null);
                 });
             }
             @Override public void onError(String message, Throwable error) {
                 runOnUiThread(() -> {
                     statusText.setText("Tournament error: " + message + (error == null ? "" : " (" + error.getMessage() + ")"));
                     if (runner != null) { runner.stop(); runner = null; }
-                    startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(false);
+                    startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(runner != null);
                 });
             }
         }, new EngineOptions(), new BookOptions(), tournament.baseTimeMs(), tournament.incrementMs(),
                 tournament.openingPgn(), tournament.openingPlies(), tournament.repeatOpening(), tournament.openingStartIndex());
         startButton.setEnabled(false); resumeButton.setEnabled(false); stopButton.setEnabled(true);
-        if (playPauseButton != null) playPauseButton.setText("Pause");
+        if (playPauseButton != null) playPauseButton.setText("P");
         if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
         setContentView(playView);
         runner.start();
@@ -691,12 +693,12 @@ public final class TournamentActivity extends Activity {
         if (runner.isPaused()) {
             runner.resume();
             autoPaused = false;
-            playPauseButton.setText("Pause");
+            playPauseButton.setText("P");
             moveStatusText.setText("Resuming tournament…");
         } else {
             runner.pause();
             autoPaused = false;
-            playPauseButton.setText("Play");
+            playPauseButton.setText("P");
             moveStatusText.setText("PAUSED · Tap Play to continue");
         }
     }
@@ -763,14 +765,14 @@ public final class TournamentActivity extends Activity {
         if (runner != null) { runner.stop(); runner = null; }
         statusText.setText("Tournament stopped. Completed results are saved.");
         if (moveStatusText != null) moveStatusText.setText("TOURNAMENT STOPPED");
-        startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(false);
+        startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(runner != null);
     }
 
     @Override public void onBackPressed() {
         if (runner != null) {
             if (!runner.isPaused()) runner.pause();
             autoPaused = true;
-            if (playPauseButton != null) playPauseButton.setText("Play");
+            if (playPauseButton != null) playPauseButton.setText("P");
             Intent main = new Intent(this, DroidFish.class);
             main.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
             startActivity(main);
@@ -793,7 +795,7 @@ public final class TournamentActivity extends Activity {
         if (runner != null && autoPaused && runner.isPaused()) {
             runner.resume();
             autoPaused = false;
-            if (playPauseButton != null) playPauseButton.setText("Pause");
+            if (playPauseButton != null) playPauseButton.setText("P");
         }
     }
 
