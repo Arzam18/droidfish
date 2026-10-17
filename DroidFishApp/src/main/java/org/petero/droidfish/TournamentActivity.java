@@ -200,14 +200,15 @@ public final class TournamentActivity extends Activity {
         blackClockRow.addView(blackClockText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(blackClockRow, fullWidth());
         blackAnalysisText = text("BLACK analysis waiting…");
-        blackAnalysisText.setTextSize(20);
+        blackAnalysisText.setTextSize(16);
+        blackAnalysisText.setTypeface(android.graphics.Typeface.MONOSPACE);
         blackAnalysisText.setMaxLines(5);
         blackAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(blackAnalysisText, fullWidth());
 
         FrameLayout boardFrame = new FrameLayout(this);
         LinearLayout.LayoutParams frameParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(320));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(360));
         frameParams.topMargin = dp(4);
         frameParams.bottomMargin = dp(4);
         page.addView(boardFrame, frameParams);
@@ -245,7 +246,8 @@ public final class TournamentActivity extends Activity {
         whiteClockRow.addView(whiteClockText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(whiteClockRow, fullWidth());
         whiteAnalysisText = text("WHITE analysis waiting…");
-        whiteAnalysisText.setTextSize(20);
+        whiteAnalysisText.setTextSize(16);
+        whiteAnalysisText.setTypeface(android.graphics.Typeface.MONOSPACE);
         whiteAnalysisText.setMaxLines(5);
         whiteAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(whiteAnalysisText, fullWidth());
@@ -276,6 +278,19 @@ public final class TournamentActivity extends Activity {
         playScroll.addView(page, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         playView = playScroll;
+    }
+
+    private CharSequence formatAnalysisDisplay(String analysis) {
+        if (analysis == null) return "";
+        android.text.SpannableString styled = new android.text.SpannableString(analysis);
+        int firstNewline = analysis.indexOf('\n');
+        int secondNewline = firstNewline < 0 ? -1 : analysis.indexOf('\n', firstNewline + 1);
+        if (secondNewline >= 0 && secondNewline + 1 < analysis.length()) {
+            // Keep the metrics readable while shrinking the suggested variation to ~40% size.
+            styled.setSpan(new android.text.style.RelativeSizeSpan(0.4f), secondNewline + 1,
+                    analysis.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        return styled;
     }
 
     private boolean handleBoardSwipe(android.view.MotionEvent event) {
@@ -534,7 +549,7 @@ public final class TournamentActivity extends Activity {
             @Override public void onEngineAnalysis(boolean white, String analysis) {
                 runOnUiThread(() -> {
                     TextView target = white ? whiteAnalysisText : blackAnalysisText;
-                    if (target != null) target.setText(analysis);
+                    if (target != null) target.setText(formatAnalysisDisplay(analysis));
                     if (tournamentBoard != null && showTournamentArrowsCheck != null && showTournamentArrowsCheck.isChecked()
                             && android.preference.PreferenceManager.getDefaultSharedPreferences(TournamentActivity.this).getString("thinkingArrows", "4").equals("0") == false) {
                         try {
@@ -559,8 +574,8 @@ public final class TournamentActivity extends Activity {
                     latestPosition = new Position(position);
                     tournamentBoard.setPosition(position);
                     tournamentBoard.setMoveHints(null);
-                    whiteAnalysisText.setText(whiteAnalysis);
-                    blackAnalysisText.setText(blackAnalysis);
+                    whiteAnalysisText.setText(formatAnalysisDisplay(whiteAnalysis));
+                    blackAnalysisText.setText(formatAnalysisDisplay(blackAnalysis));
                     moveStatusText.setText("PAUSED · Reviewing ply " + ply + "/" + totalPlies + " · Next/Previous to navigate");
                     String used = ply == 0 ? "—" : formatClockDuration(moveTimeMs);
                     if (ply > 0 && (ply % 2 == 1)) whiteMoveTimeText.setText(used); else if (ply > 0) blackMoveTimeText.setText(used);
