@@ -135,8 +135,6 @@ public final class TournamentActivity extends Activity {
         uiHandler.post(clockRefresh);
     }
 
-    @Override protected void onDestroy() { stopGameViewerAnalysis(); if (runner != null) runner.stop(); uiHandler.removeCallbacks(clockRefresh); super.onDestroy(); }
-
     private void buildUi() {
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -1454,6 +1452,7 @@ public final class TournamentActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        stopGameViewerAnalysis();
         uiHandler.removeCallbacks(clockRefresh);
         if (runner != null) {
             runner.pause();
