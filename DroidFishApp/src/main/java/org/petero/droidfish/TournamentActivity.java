@@ -192,8 +192,8 @@ public final class TournamentActivity extends Activity {
         // Upper engine analysis panel, kept above its clock/name row.
         blackAnalysisText = text("Eval: —    Depth: —    Nodes: —    NPS: —");
         blackAnalysisText.setTextSize(18);
-        blackAnalysisText.setMinLines(4);
-        blackAnalysisText.setMaxLines(4);
+        blackAnalysisText.setMinLines(6);
+        blackAnalysisText.setMaxLines(6);
         blackAnalysisText.setIncludeFontPadding(false);
         blackAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(blackAnalysisText, fullWidth());
@@ -248,8 +248,8 @@ public final class TournamentActivity extends Activity {
 
         whiteAnalysisText = text("Eval: —    Depth: —    Nodes: —    NPS: —");
         whiteAnalysisText.setTextSize(18);
-        whiteAnalysisText.setMinLines(4);
-        whiteAnalysisText.setMaxLines(4);
+        whiteAnalysisText.setMinLines(6);
+        whiteAnalysisText.setMaxLines(6);
         whiteAnalysisText.setIncludeFontPadding(false);
         whiteAnalysisText.setTextColor(0xFFD5D5D5);
         page.addView(whiteAnalysisText, fullWidth());
@@ -536,7 +536,15 @@ public final class TournamentActivity extends Activity {
             @Override public void onEngineAnalysis(boolean white, String analysis) {
                 runOnUiThread(() -> {
                     TextView target = white ? whiteAnalysisText : blackAnalysisText;
-                    if (target != null) target.setText(analysis);
+                    if (target != null) {
+                        android.text.SpannableString styled = new android.text.SpannableString(analysis);
+                        int variationStart = analysis.indexOf('\n');
+                        if (variationStart >= 0 && variationStart + 1 < analysis.length()) {
+                            styled.setSpan(new android.text.style.RelativeSizeSpan(0.75f), variationStart + 1,
+                                    analysis.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                        }
+                        target.setText(styled);
+                    }
                     if (tournamentBoard != null && showTournamentArrowsCheck != null && showTournamentArrowsCheck.isChecked()
                             && android.preference.PreferenceManager.getDefaultSharedPreferences(TournamentActivity.this).getString("thinkingArrows", "4").equals("0") == false) {
                         try {
