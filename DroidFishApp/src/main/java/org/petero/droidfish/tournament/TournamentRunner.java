@@ -25,7 +25,7 @@ import java.util.Map;
  */
 public final class TournamentRunner {
     public interface Listener {
-        void onGameStarted(TournamentManager.Pairing pairing, String whiteName, String blackName);
+        void onGameStarted(TournamentManager.Pairing pairing, String whiteName, String blackName, String pgnMoves);
         /** Current tournament position, copied so the UI can safely render it. */
         void onPositionChanged(Position position, boolean whiteToMove, long whiteTimeMs, long blackTimeMs,
                                String whiteName, String blackName);
@@ -371,6 +371,7 @@ public final class TournamentRunner {
             return;
         }
         lastMoveTimeMs = tournament.timeMode() == TournamentManager.TimeMode.CLOCK ? clock.lastTurnElapsedMs() : Math.max(0, (System.nanoTime() - currentTurnStartedNs) / 1_000_000L);
+        addMoveAnalysisComment(whiteEngineSide, lastMoveTimeMs);
         recordPosition(lastMoveTimeMs);
         listener.onMoveTime(!game.currPos().whiteMove, lastMoveTimeMs, currentOpeningName);
         notifyPosition();
@@ -386,13 +387,51 @@ public final class TournamentRunner {
         requestMove(game.currPos().whiteMove);
     }
 
+    private String currentPgnMoves() {
+        if (game == null || game.tree == null) return "";
+        try {
+            android.util.Pair<java.util.List<GameTree.Node>, Integer> list = game.tree.getMoveList();
+            StringBuilder out = new StringBuilder();
+            Position cursor = new Position();
+            for (GameTree.Node node : list.first) {
+                Move move = node.move;
+                if (move == null) continue;
+                if (out.length() > 0) out.append(' ');
+                if (cursor.whiteMove) out.append(cursor.fullMoveCounter).append('.');
+                else if (out.length() == 0) out.append(cursor.fullMoveCounter).append("...");
+                out.append(org.petero.droidfish.gamelogic.TextIO.moveToString(cursor, move, false, false));
+                cursor.makeMove(move, new org.petero.droidfish.gamelogic.UndoInfo());
+            }
+            return out.toString();
+        } catch (RuntimeException ignored) { return ""; }
+    }
+
+    private String clockText(long ms) {
+        long tenths = Math.max(0, ms) / 100;
+        return String.format(java.util.Locale.US, "%d:%02d.%d", tenths / 600, (tenths / 10) % 60, tenths % 10);
+    }
+
+    private void addMoveAnalysisComment(boolean whiteMoved, long moveMs) {
+        try {
+            android.util.Pair<java.util.List<GameTree.Node>, Integer> list = game.tree.getMoveList();
+            if (list.first.isEmpty()) return;
+            GameTree.Node node = list.first.get(list.first.size() - 1);
+            String analysis = whiteMoved ? latestWhiteAnalysis : latestBlackAnalysis;
+            String eval = "—", depth = "0", nodes = "0", nps = "0";
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("Eval: ([^ ]+)\\s+Depth: ([^ ]+)\\s+Nodes: ([^ ]+)\\s+NPS: ([^\\n]+)").matcher(analysis);
+            if (m.find()) { eval=m.group(1); depth=m.group(2); nodes=m.group(3); nps=m.group(4).trim(); }
+            long remaining = clock == null ? 0 : clock.remainingMs(whiteMoved);
+            node.setPostComment("Eval:" + eval + " D:" + depth + " N:" + nodes + " NPS:" + nps + " Clock:" + clockText(remaining) + " T:" + clockText(moveMs));
+        } catch (RuntimeException ignored) { }
+    }
+
     private void notifyPosition() {
         if (game == null || pairing == null || whiteEngine == null || blackEngine == null) return;
         CetClock activeClock = clock;
         long whiteMs = activeClock == null || tournament.timeMode() != TournamentManager.TimeMode.CLOCK ? 0 : activeClock.remainingMs(true);
         long blackMs = activeClock == null || tournament.timeMode() != TournamentManager.TimeMode.CLOCK ? 0 : activeClock.remainingMs(false);
         listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove,
-                whiteMs, blackMs, whiteEngine.displayName, blackEngine.displayName);
+                whiteMs, blackMs, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves());
     }
 
     private String terminationForState(Game.GameState state) {
