@@ -155,6 +155,14 @@ public final class TournamentRunner {
     }
 
     public synchronized boolean isPaused() { return paused; }
+    public synchronized long remainingMs(boolean white) {
+        CetClock c=clock; if(c==null || tournament.timeMode()!=TournamentManager.TimeMode.CLOCK) return -1; return c.remainingMs(white);
+    }
+    public synchronized boolean whiteToMove() { return game != null && game.currPos().whiteMove; }
+    public synchronized long activeMoveTimeMs() {
+        if(game==null || pairing==null || paused || finished || stopped || currentTurnStartedNs==0) return -1;
+        return Math.max(0,(System.nanoTime()-currentTurnStartedNs)/1_000_000L);
+    }
 
     public synchronized void stop() {
         stopped = true;
