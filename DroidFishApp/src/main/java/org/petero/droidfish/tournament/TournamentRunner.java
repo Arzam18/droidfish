@@ -48,6 +48,10 @@ public final class TournamentRunner {
     private final int openingPlies;
     private final int openingStartIndex;
     private final boolean repeatOpening;
+    private final double autoWinThreshold;
+    private final boolean fastWinEnabled;
+    private volatile double latestWhiteEvalPawns = Double.NaN;
+    private volatile double latestBlackEvalPawns = Double.NaN;
     private final DroidComputerPlayer whitePlayer, blackPlayer;
     private Game game;
     private volatile CetClock clock;
@@ -87,6 +91,14 @@ public final class TournamentRunner {
                             EngineOptions engineOptions, BookOptions bookOptions,
                             long baseTimeMs, long incrementMs,
                             String openingPgn, int openingPlies, boolean repeatOpening, int openingStartIndex) {
+        this(tournament, listener, engineOptions, bookOptions, baseTimeMs, incrementMs, openingPgn, openingPlies, repeatOpening, openingStartIndex, 10.0, false);
+    }
+
+    public TournamentRunner(TournamentManager tournament, Listener listener,
+                            EngineOptions engineOptions, BookOptions bookOptions,
+                            long baseTimeMs, long incrementMs,
+                            String openingPgn, int openingPlies, boolean repeatOpening, int openingStartIndex,
+                            double autoWinThreshold, boolean fastWinEnabled) {
         if (tournament == null || listener == null) throw new IllegalArgumentException("Tournament and listener are required");
         if (baseTimeMs < 1 || baseTimeMs > Integer.MAX_VALUE || incrementMs < 0 || incrementMs > Integer.MAX_VALUE)
             throw new IllegalArgumentException("Time values are outside supported UCI millisecond range");
@@ -100,6 +112,8 @@ public final class TournamentRunner {
         this.openingPlies = Math.max(0, openingPlies);
         this.repeatOpening = repeatOpening;
         this.openingStartIndex = Math.max(1, openingStartIndex);
+        this.autoWinThreshold = autoWinThreshold > 0.0 && !Double.isInfinite(autoWinThreshold) && !Double.isNaN(autoWinThreshold) ? autoWinThreshold : 10.0;
+        this.fastWinEnabled = fastWinEnabled;
         pgnOptions = new PGNOptions();
         whitePlayer = new DroidComputerPlayer(new EngineListener(true));
         blackPlayer = new DroidComputerPlayer(new EngineListener(false));
@@ -221,6 +235,8 @@ public final class TournamentRunner {
     private void startNextGame() {
         if (stopped || finished || paused) return;
         pairing = tournament.current();
+        latestWhiteEvalPawns = Double.NaN;
+        latestBlackEvalPawns = Double.NaN;
         if (pairing == null) {
             finished = true;
             whitePlayer.shutdownEngine();
@@ -427,6 +443,9 @@ public final class TournamentRunner {
 
     private void notifyPosition() {
         if (game == null || pairing == null || whiteEngine == null || blackEngine == null) return;
+        // Require fresh evaluations from both engines for every position before fast adjudication.
+        latestWhiteEvalPawns = Double.NaN;
+        latestBlackEvalPawns = Double.NaN;
         CetClock activeClock = clock;
         long whiteMs = activeClock == null || tournament.timeMode() != TournamentManager.TimeMode.CLOCK ? 0 : activeClock.remainingMs(true);
         long blackMs = activeClock == null || tournament.timeMode() != TournamentManager.TimeMode.CLOCK ? 0 : activeClock.remainingMs(false);
@@ -523,6 +542,11 @@ public final class TournamentRunner {
                 // UCI scores are from the engine's point of view. Convert both
                 // centipawn and mate scores to a consistent White-positive view.
                 int whitePerspectiveScore = white ? pv.score : -pv.score;
+                if (!pv.isMate) {
+                    double evalPawns = whitePerspectiveScore / 100.0;
+                    if (white) latestWhiteEvalPawns = evalPawns; else latestBlackEvalPawns = evalPawns;
+                    checkFastWinRule();
+                }
                 String scoreText = pv.isMate ? (whitePerspectiveScore >= 0 ? "+M" : "-M") + Math.abs(whitePerspectiveScore) :
                         String.format(java.util.Locale.US, "%+.2f", whitePerspectiveScore / 100.0);
                 lastPv = "eval " + scoreText + (line.length() == 0 ? "" : "  " + line);
@@ -543,6 +567,27 @@ public final class TournamentRunner {
                 publishAnalysis();
             }
         }
+        private void checkFastWinRule() {
+            if (!fastWinEnabled || stopped || finished || paused || game == null || pairing == null) return;
+            double whiteEval = latestWhiteEvalPawns;
+            double blackEval = latestBlackEvalPawns;
+            if (Double.isNaN(whiteEval) || Double.isNaN(blackEval)) return;
+            String result = null;
+            if (whiteEval >= autoWinThreshold && blackEval >= autoWinThreshold) result = "1-0";
+            else if (whiteEval <= -autoWinThreshold && blackEval <= -autoWinThreshold) result = "0-1";
+            if (result == null) return;
+            synchronized (TournamentRunner.this) {
+                if (stopped || finished || paused || game == null || pairing == null) return;
+                turnGeneration++;
+                if (clock != null) clock.pause();
+                whitePlayer.stopSearch();
+                blackPlayer.stopSearch();
+                humanAdjudication = true;
+                game.adjudicateTournament(result);
+                TournamentManager.Outcome outcome = "1-0".equals(result) ? TournamentManager.Outcome.WHITE_WIN : TournamentManager.Outcome.BLACK_WIN;
+                finishCurrentGame(outcome);
+            }
+        }
         private String compactCount(long value) {
             if (value >= 1_000_000) return String.format(java.util.Locale.US, "%.1fM", value / 1_000_000.0);
             if (value >= 1_000) return String.format(java.util.Locale.US, "%.0fK", value / 1_000.0);
@@ -554,7 +599,7 @@ public final class TournamentRunner {
                 String value = score.trim();
                 if (value.startsWith("+M") || value.startsWith("-M"))
                     return value.startsWith("+") ? "99,1,0" : "0,1,99";
-                double cp = Double.parseDouble(value);
+                double cp = Double.parseDouble(value) * 100.0;
                 double expected = 1.0 / (1.0 + Math.exp(-cp * 0.004));
                 double draw = 0.32 * Math.exp(-Math.abs(cp) / 180.0);
                 double win = Math.max(0.0, expected - draw / 2.0);
