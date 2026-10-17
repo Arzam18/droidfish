@@ -25,10 +25,10 @@ import java.util.Map;
  */
 public final class TournamentRunner {
     public interface Listener {
-        void onGameStarted(TournamentManager.Pairing pairing, String whiteName, String blackName);
+        void onGameStarted(TournamentManager.Pairing pairing, String whiteName, String blackName, String pgnMoves);
         /** Current tournament position, copied so the UI can safely render it. */
         void onPositionChanged(Position position, boolean whiteToMove, long whiteTimeMs, long blackTimeMs,
-                               String whiteName, String blackName, String pgnMoves);
+                               String whiteName, String blackName);
         /** Persistent per-engine analysis text; each side retains its last line after moving. */
         void onEngineAnalysis(boolean white, String analysis);
         void onReviewPosition(Position position, int ply, int totalPlies, String whiteAnalysis, String blackAnalysis, long moveTimeMs);
@@ -548,6 +548,22 @@ public final class TournamentRunner {
             if (value >= 1_000) return String.format(java.util.Locale.US, "%.0fK", value / 1_000.0);
             return Long.toString(value);
         }
+        /** Approximate W/D/L from the displayed centipawn score; informational only. */
+        private String estimateWdl(String score) {
+            try {
+                String value = score.trim();
+                if (value.startsWith("+M") || value.startsWith("-M"))
+                    return value.startsWith("+") ? "99,1,0" : "0,1,99";
+                double cp = Double.parseDouble(value);
+                double expected = 1.0 / (1.0 + Math.exp(-cp * 0.004));
+                double draw = 0.32 * Math.exp(-Math.abs(cp) / 180.0);
+                double win = Math.max(0.0, expected - draw / 2.0);
+                int w = (int)Math.round(win * 100.0);
+                int d = (int)Math.round(draw * 100.0);
+                int l = Math.max(0, 100 - w - d);
+                return w + "," + d + "," + l;
+            } catch (RuntimeException ex) { return "33,34,33"; }
+        }
         private void publishAnalysis() {
             if (stopped || finished) return;
             String score = "—";
@@ -563,8 +579,10 @@ public final class TournamentRunner {
             String nodes = compactCount(lastNodes);
             String nps = compactCount(lastNps);
             String variation = pvLine == null ? "" : pvLine.trim();
+            String wdl = estimateWdl(score);
             String header = "Eval: " + score + "    Depth: " + lastDepth + "    Nodes: " + nodes + "    NPS: " + nps;
-            String text = header + (variation.length() == 0 ? "" : "\n" + variation);
+            String text = header + "\nW: " + wdl.split(",")[0] + "%   D: " + wdl.split(",")[1] + "%   L: " + wdl.split(",")[2] + "%"
+                    + (variation.length() == 0 ? "" : "\n" + variation);
             if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
             if (!positionHistory.isEmpty() && reviewPly < 0) {
                 int last = positionHistory.size() - 1;
