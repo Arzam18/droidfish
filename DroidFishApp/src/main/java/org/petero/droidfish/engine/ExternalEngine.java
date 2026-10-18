@@ -26,6 +26,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.channels.FileChannel;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.petero.droidfish.DroidFishApp;
 import org.petero.droidfish.EngineOptions;
@@ -34,6 +35,9 @@ import android.content.Context;
 
 /** Engine running as a process started from an external resource. */
 public class ExternalEngine extends UCIEngineBase {
+    /* Each engine process needs its own executable path. Android may reject replacing
+       an executable while another process is still running it (ETXTBSY). */
+    private static final AtomicLong ENGINE_INSTANCE_ID = new AtomicLong();
     protected final Context context;
 
     private File engineFileName;
@@ -70,8 +74,12 @@ public class ExternalEngine extends UCIEngineBase {
     @Override
     protected void startProcess() {
         try {
-            File exeDir = new File(context.getFilesDir(), "engine");
-            exeDir.mkdir();
+            // Do not share engine.exe between simultaneous tournament engines.
+            // A process may still be executing the old file when another engine is copied.
+            File exeDir = new File(context.getFilesDir(), "engine" + File.separator +
+                    "instance_" + android.os.Process.myPid() + "_" + ENGINE_INSTANCE_ID.incrementAndGet());
+            if (!exeDir.exists() && !exeDir.mkdirs())
+                throw new IOException("Could not create private engine directory: " + exeDir);
             String exePath = copyFile(engineFileName, exeDir);
             chmod(exePath);
             cleanUpExeDir(exeDir, exePath);

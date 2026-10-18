@@ -413,8 +413,12 @@ public class DroidComputerPlayer {
     /** Stop the engine process. */
     public final synchronized void shutdownEngine() {
         if (uciEngine != null) {
-            engineMonitor.interrupt();
+            // Startup failures and concurrent shutdown paths can leave no monitor thread.
+            // Guard it so cleanup still shuts down the engine instead of throwing NPE.
+            Thread monitor = engineMonitor;
             engineMonitor = null;
+            if (monitor != null)
+                monitor.interrupt();
             uciEngine.shutDown();
             uciEngine = null;
         }

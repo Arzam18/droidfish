@@ -112,7 +112,9 @@ public class InternalStockFish extends ExternalEngine {
         // on the assumption that it will reduce memory wear.
         long oldCSum = readCheckSum(new File(internalSFPath()));
         long newCSum = computeAssetsCheckSum(sfExe);
-        if (oldCSum != newCSum) {
+        // Every ExternalEngine instance has a private executable directory. The shared
+        // checksum alone cannot prove that this instance's engine.exe exists.
+        if (oldCSum != newCSum || !to.isFile() || to.length() == 0) {
             copyAssetFile(sfExe, to);
             writeCheckSum(new File(internalSFPath()), newCSum);
         }
