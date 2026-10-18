@@ -211,6 +211,8 @@ public final class TournamentRunner {
     }
 
     public synchronized boolean isPaused() { return paused; }
+    public boolean isFinished() { return finished; }
+    public boolean isStopped() { return stopped; }
     public synchronized long remainingMs(boolean white) {
         CetClock c=clock; if(c==null || tournament.timeMode()!=TournamentManager.TimeMode.CLOCK) return -1; return c.remainingMs(white);
     }
