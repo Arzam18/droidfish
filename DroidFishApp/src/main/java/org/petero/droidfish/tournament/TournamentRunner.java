@@ -76,19 +76,25 @@ public final class TournamentRunner {
     private int drawMoveLimit = 50;
     private int drawRepetitionLimit = 3;
     private int drawMaximumFullMoves = 160;
+    private int ruleStartFullMove = 1;
 
     /** Configure tournament-only automatic draw adjudication before start(). */
     public synchronized void configureDrawRules(boolean enabled, int moveRule, int repetitionCount, int maximumFullMoves) {
+        configureDrawRules(enabled, moveRule, repetitionCount, maximumFullMoves, 1);
+    }
+    public synchronized void configureDrawRules(boolean enabled, int moveRule, int repetitionCount, int maximumFullMoves, int startFullMove) {
         if (game != null || pairing != null) throw new IllegalStateException("Draw rules must be configured before starting the tournament");
         drawRulesEnabled = enabled;
         drawMoveLimit = Math.max(1, Math.min(10000, moveRule));
         drawRepetitionLimit = Math.max(2, Math.min(100, repetitionCount));
         drawMaximumFullMoves = Math.max(1, Math.min(10000, maximumFullMoves));
+        ruleStartFullMove = Math.max(1, Math.min(10000, startFullMove));
     }
 
     private boolean applyConfiguredDrawRules() {
         if (!drawRulesEnabled || game == null) return false;
         Position pos = game.currPos();
+        if (pos.fullMoveCounter < ruleStartFullMove) return false;
         if (pos.halfMoveClock >= drawMoveLimit * 2) {
             game.adjudicateTournament("1/2-1/2");
             finishCurrentGame(TournamentManager.Outcome.DRAW);
@@ -474,7 +480,7 @@ public final class TournamentRunner {
             java.util.regex.Matcher m = java.util.regex.Pattern.compile("Eval: ([^ ]+)\\s+Depth: ([^ ]+)\\s+Nodes: ([^ ]+)\\s+NPS: ([^\\n]+)").matcher(analysis);
             if (m.find()) { eval=m.group(1); depth=m.group(2); nodes=m.group(3); nps=m.group(4).trim(); }
             long remaining = clock == null ? 0 : clock.remainingMs(whiteMoved);
-            node.setPostComment("Eval:" + eval + " D:" + depth + " N:" + nodes + " NPS:" + nps + " Clock:" + clockText(remaining) + " T:" + clockText(moveMs));
+            node.setPostComment("E:" + eval + " D:" + depth + " N:" + nodes + " NPS:" + nps + " C:" + clockText(remaining) + " T:" + clockText(moveMs));
         } catch (RuntimeException ignored) { }
     }
 
@@ -606,6 +612,7 @@ public final class TournamentRunner {
         }
         private void checkFastWinRule() {
             if (!fastWinEnabled || stopped || finished || paused || game == null || pairing == null) return;
+            if (game.currPos().fullMoveCounter < ruleStartFullMove) return;
             double whiteEval = latestWhiteEvalPawns;
             double blackEval = latestBlackEvalPawns;
             if (Double.isNaN(whiteEval) || Double.isNaN(blackEval)) return;
