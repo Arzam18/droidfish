@@ -119,6 +119,7 @@ public final class TournamentActivity extends Activity {
     private CheckBox repeatOpeningCheck;
     private Button startButton, resumeButton, stopButton, playPauseButton;
     private boolean autoPaused;
+    private boolean activityVisible = true;
     private TournamentRunner runner;
     private EditText eventTimerMinutesInput, heatPauseMinutesInput, heatPlayMinutesInput;
     private long eventStartElapsedNs = 0L;
@@ -261,23 +262,8 @@ public final class TournamentActivity extends Activity {
         startButton.setOnClickListener(v -> startTournament());
         resumeButton.setOnClickListener(v -> chooseSavedTournament());
         stopButton.setOnClickListener(v -> stopAndSaveTournament());
-        scroll.setOnTouchListener((v, event) -> {
-            if (event.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
-                touchDownX = event.getX(); touchDownY = event.getY(); return false;
-            }
-            if (event.getActionMasked() == android.view.MotionEvent.ACTION_UP) {
-                float dx = event.getX() - touchDownX;
-                float dy = event.getY() - touchDownY;
-                if (Math.abs(dx) > dp(80) && Math.abs(dx) > Math.abs(dy) * 1.25f) {
-                    if (dx > 0) {
-                        setContentView(playView);
-                        return true;
-                    }
-                }
-                return false;
-            }
-            return false;
-        });
+        // Horizontal swipes no longer navigate between setup and tournament screens.
+        scroll.setOnTouchListener((v, event) -> false);
         setupView = scroll;
         buildPlayUi();
         setContentView(setupView);
@@ -341,8 +327,8 @@ public final class TournamentActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.Gravity.CENTER);
         boardFrame.addView(tournamentBoard, boardParams);
-        boardFrame.setOnTouchListener((v, event) -> handleBoardSwipe(event));
-        tournamentBoard.setOnTouchListener((v, event) -> handleBoardSwipe(event));
+        boardFrame.setOnTouchListener((v, event) -> false);
+        tournamentBoard.setOnTouchListener((v, event) -> false);
 
         // Move-navigation buttons are temporarily hidden as requested.
         whiteClockRow = new LinearLayout(this);
@@ -369,7 +355,7 @@ public final class TournamentActivity extends Activity {
         openingText.setTextSize(16);
         page.addView(openingText, fullWidth());
         moveStatusText = text("PGN: —");
-        page.addView(moveStatusText, fullWidth());
+        moveStatusText.setVisibility(View.GONE); // PGN move list is shown only on the mirror board.
 
 
         LinearLayout controls = new LinearLayout(this);
@@ -413,7 +399,7 @@ public final class TournamentActivity extends Activity {
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(0, dp(8), 0, dp(8));
         page.setBackgroundColor(0xFF303030);
-        mirrorHeaderText = text("Game —/—       MIRROR BOARD       TC —"); mirrorHeaderText.setTextSize(18); mirrorHeaderText.setTypeface(null, android.graphics.Typeface.BOLD);
+        mirrorHeaderText = text("Game —/—  Mirror Board  TC —  T 0:00:0"); mirrorHeaderText.setTextSize(18); mirrorHeaderText.setTypeface(null, android.graphics.Typeface.BOLD); mirrorHeaderText.setSingleLine(true); mirrorHeaderText.setIncludeFontPadding(false);
         mirrorHeaderText.setGravity(android.view.Gravity.CENTER); page.addView(mirrorHeaderText, fullWidth());
         mirrorAnalysisText = text("Select an engine with Analysis");
         mirrorAnalysisText.setTextSize(18); mirrorAnalysisText.setLines(7); mirrorAnalysisText.setMaxLines(7);
@@ -447,7 +433,27 @@ public final class TournamentActivity extends Activity {
         page.addView(nav,fullWidth());
         mirrorMovesText=text("No moves played yet."); mirrorMovesText.setTextSize(16); page.addView(mirrorMovesText,fullWidth());
         mirrorStatusText=text("Mirror follows the live tournament."); page.addView(mirrorStatusText,fullWidth());
-        Button back=new Button(this); back.setText("Switch to tournament board"); page.addView(back,fullWidth()); back.setOnClickListener(v->switchTournamentAndMirror());
+        LinearLayout mirrorControls = new LinearLayout(this);
+        mirrorControls.setOrientation(LinearLayout.HORIZONTAL);
+        Button mirrorPause = new Button(this); mirrorPause.setText("PAUSE / PLAY");
+        Button mirrorResults = new Button(this); mirrorResults.setText("RESULTS");
+        Button mirrorMenu = new Button(this); mirrorMenu.setText("MENU");
+        Button back=new Button(this); back.setText("SWITCH");
+        for (Button b : new Button[]{mirrorPause, mirrorResults, mirrorMenu, back})
+            mirrorControls.addView(b, new LinearLayout.LayoutParams(0, -2, 1));
+        page.addView(mirrorControls, fullWidth());
+        mirrorPause.setOnClickListener(v -> togglePauseResume());
+        mirrorResults.setOnClickListener(v -> showStandingsDialog());
+        mirrorMenu.setOnClickListener(v -> new AlertDialog.Builder(TournamentActivity.this)
+                .setTitle("Tournament menu")
+                .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Schedule", "Moves"}, (dialog, which) -> {
+                    if (which == 0) showAdjudicationDialog();
+                    else if (which == 1) setContentView(setupView);
+                    else if (which == 2) toggleTournamentFlip();
+                    else if (which == 3) showScheduleDialog();
+                    else showMovesDialog();
+                }).show());
+        back.setOnClickListener(v->switchTournamentAndMirror());
         first.setOnClickListener(v->navigateMirror(0)); prev.setOnClickListener(v->navigateMirror(Math.max(0, mirrorDisplayedPly()-1)));
         next.setOnClickListener(v->navigateMirror(Math.min(mirrorPositions.size()-1, mirrorDisplayedPly()+1)));
         last.setOnClickListener(v->navigateMirror(Math.max(0,mirrorPositions.size()-1)));
@@ -950,14 +956,20 @@ public final class TournamentActivity extends Activity {
     }
     private String mirrorHeaderLabel() {
         return "Game " + (currentGameNumber == 0 ? "—" : currentGameNumber) + "/" +
-                (currentGameTotal == 0 ? "—" : currentGameTotal) + "  TC:" + mirrorTcLabel +
-                "  Mirror Board  T " + formatElapsedTenths(currentEventElapsedMs());
+                (currentGameTotal == 0 ? "—" : currentGameTotal) +
+                "  Mirror Board  TC " + mirrorTcLabel + "  T " + formatElapsedSeconds(currentEventElapsedMs());
     }
 
     private String formatElapsedTenths(long ms) {
         long safe = Math.max(0, ms);
         return String.format(java.util.Locale.US, "%02d:%02d:%d", safe / 3_600_000L,
                 (safe / 60_000L) % 60L, (safe / 1_000L) % 60L) + "." + ((safe % 1000L) / 100L);
+    }
+
+    private String formatElapsedSeconds(long ms) {
+        long seconds = Math.max(0L, ms) / 1000L;
+        return String.format(java.util.Locale.US, "%d:%02d:%d", seconds / 3600L,
+                (seconds / 60L) % 60L, seconds % 60L);
     }
 
     private long currentEventElapsedMs() {
@@ -1010,9 +1022,17 @@ public final class TournamentActivity extends Activity {
         heatPhaseStartNs = 0L;
     }
 
-    // Event duration is wall elapsed time and deliberately continues during manual/automatic pauses.
-    private void freezeEventElapsedClock() { }
-    private void resumeEventElapsedClock() { }
+    // Active-play elapsed clock: pauses do not consume Timer 1; resume continues from saved elapsed time.
+    private void freezeEventElapsedClock() {
+        if (eventStartElapsedNs != 0L) {
+            eventAccumulatedMs += Math.max(0L, (System.nanoTime() - eventStartElapsedNs) / 1_000_000L);
+            eventStartElapsedNs = 0L;
+        }
+    }
+    private void resumeEventElapsedClock() {
+        if (eventStartElapsedNs == 0L) eventStartElapsedNs = System.nanoTime();
+        eventLastResumeNs = eventStartElapsedNs;
+    }
 
     private void tickAutomaticTimers() {
         TournamentRunner r = runner;
@@ -1033,7 +1053,7 @@ public final class TournamentActivity extends Activity {
                     if (moveStatusText != null) moveStatusText.setText("AUTO PAUSE · Cooling interval");
                 }
             }
-        } else if (heatCycleEnabled && heatCooling && heatPhaseStartNs != 0L && !eventTimerHomeTriggered) {
+        } else if (activityVisible && heatCycleEnabled && heatCooling && heatPhaseStartNs != 0L && !eventTimerHomeTriggered) {
             if ((now - heatPhaseStartNs) / 1_000_000L >= heatPauseDurationMs) {
                 heatCooling = false;
                 heatPhaseStartNs = 0L;
@@ -1283,7 +1303,11 @@ public final class TournamentActivity extends Activity {
                     String incrementLabel = (incrementSeconds == Math.rint(incrementSeconds))
                             ? String.format(java.util.Locale.US, "%.0f", incrementSeconds)
                             : String.format(java.util.Locale.US, "%.1f", incrementSeconds);
-                    mirrorTcLabel = String.format(java.util.Locale.US, "%d+%s", tournament.baseTimeMs()/60000, incrementLabel);
+                    double baseMinutes = tournament.baseTimeMs() / 60000.0;
+                    String baseLabel = (baseMinutes == Math.rint(baseMinutes))
+                            ? String.format(java.util.Locale.US, "%.0f", baseMinutes)
+                            : String.format(java.util.Locale.US, "%.1f", baseMinutes);
+                    mirrorTcLabel = String.format(java.util.Locale.US, "%s+%s", baseLabel, incrementLabel);
                     if (mirrorHeaderText != null) mirrorHeaderText.setText(mirrorHeaderLabel());
                     statusText.setText("Game " + currentGameNumber + "/" + currentGameTotal + " " + tournament.title());
                     if (openingStartInput != null && tournament.repeatOpening()) openingStartInput.setText(String.valueOf(tournament.openingStartIndex() + Math.max(0, (pairing.gameNumber - 1) / 2)));
@@ -1523,6 +1547,11 @@ public final class TournamentActivity extends Activity {
             return;
         }
         if (runner.isPaused()) {
+            // Timer 1 is a repeating play-session limit: each manual Play starts a fresh interval.
+            eventAccumulatedMs = 0L;
+            eventStartElapsedNs = System.nanoTime();
+            eventLastResumeNs = eventStartElapsedNs;
+            eventTimerHomeTriggered = false;
             if (heatCooling) { heatCooling = false; heatPhaseStartNs = 0L; heatPlayAccumulatedMs = 0L; }
             resumeEventElapsedClock();
             if (heatCycleEnabled) heatLastResumeNs = System.nanoTime();
@@ -1647,25 +1676,23 @@ public final class TournamentActivity extends Activity {
     }
 
     @Override protected void onPause() {
+        activityVisible = false;
         saveSetup();
         if (runner != null && !runner.isPaused()) {
             runner.pause();
             freezeEventElapsedClock();
             heatLastResumeNs = 0L;
             autoPaused = true;
+            if (playPauseButton != null) playPauseButton.setText("Play");
         }
         super.onPause();
     }
 
     @Override protected void onResume() {
         super.onResume();
-        if (runner != null && autoPaused && runner.isPaused()) {
-            runner.resume();
-            resumeEventElapsedClock();
-            if (heatCycleEnabled && !heatCooling) heatLastResumeNs = System.nanoTime();
-            autoPaused = false;
-            if (playPauseButton != null) playPauseButton.setText("P");
-        }
+        activityVisible = true;
+        // Do not auto-resume when returning from Home/Recents. The user explicitly taps Play.
+        if (runner != null && runner.isPaused() && playPauseButton != null) playPauseButton.setText("Play");
     }
 
     @Override protected void onDestroy() {
