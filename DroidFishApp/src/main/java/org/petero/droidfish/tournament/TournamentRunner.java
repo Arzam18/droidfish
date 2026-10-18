@@ -476,11 +476,19 @@ public final class TournamentRunner {
             if (list.first.isEmpty()) return;
             GameTree.Node node = list.first.get(list.first.size() - 1);
             String analysis = whiteMoved ? latestWhiteAnalysis : latestBlackAnalysis;
-            String eval = "—", depth = "0", nodes = "0", nps = "0";
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile("Eval: ([^ ]+)\\s+Depth: ([^ ]+)\\s+Nodes: ([^ ]+)\\s+NPS: ([^\\n]+)").matcher(analysis);
-            if (m.find()) { eval=m.group(1); depth=m.group(2); nodes=m.group(3); nps=m.group(4).trim(); }
+            String eval = "---", depth = "---", nodes = "---", nps = "---";
+            // Analysis display uses padded columns; accept any whitespace and tolerate
+            // signed/mate evaluations so the PGN receives the same data as the board.
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                    "(?s)Eval:\\s*(.*?)\\s+Depth:\\s*(.*?)\\s+Nodes:\\s*(.*?)\\s+NPS:\\s*([^\\r\\n]+)").matcher(analysis == null ? "" : analysis);
+            if (m.find()) {
+                eval = m.group(1).trim(); depth = m.group(2).trim();
+                nodes = m.group(3).trim(); nps = m.group(4).trim();
+            }
             long remaining = clock == null ? 0 : clock.remainingMs(whiteMoved);
-            node.setPostComment("E:" + eval + " D:" + depth + " N:" + nodes + " NPS:" + nps + " C:" + clockText(remaining) + " T:" + clockText(moveMs));
+            String comment = "E:" + eval + " D:" + depth + " N:" + nodes + " NPS:" + nps
+                    + " C:" + clockText(remaining) + " T:" + clockText(moveMs);
+            node.setPostComment(comment);
         } catch (RuntimeException ignored) { }
     }
 
