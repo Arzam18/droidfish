@@ -67,7 +67,10 @@ public final class TournamentActivity extends Activity {
     private int currentTournamentScreen = 0; // 0 = live board, 1 = mirror board
     private ChessBoardPlay mirrorBoard;
     private TextView mirrorAnalysisText, mirrorWhiteClock, mirrorBlackClock, mirrorWhiteName, mirrorBlackName,
-            mirrorWhiteMoveTime, mirrorBlackMoveTime, mirrorMovesText, mirrorStatusText;
+            mirrorWhiteMoveTime, mirrorBlackMoveTime, mirrorMovesText, mirrorStatusText, mirrorHeaderText;
+    private int currentGameNumber = 0, currentGameTotal = 0;
+    private TournamentManager activeTournamentManager;
+    private String mirrorTcLabel = "—";
     private Button mirrorAnalysisButton;
     private final ArrayList<Position> mirrorPositions = new ArrayList<>();
     private int mirrorPly = -1;
@@ -111,7 +114,7 @@ public final class TournamentActivity extends Activity {
     private int gameViewerSearchId = 50000;
     private final ArrayList<Move> gameViewerHints = new ArrayList<>();
     private CheckBox drawRulesCheck;
-    private EditText drawMoveRuleInput, drawRepetitionInput, drawMaximumInput;
+    private EditText drawMoveRuleInput, drawRepetitionInput, drawMaximumInput, ruleStartMoveInput;
 
     private CheckBox repeatOpeningCheck;
     private Button startButton, resumeButton, stopButton, playPauseButton;
@@ -211,19 +214,20 @@ public final class TournamentActivity extends Activity {
         fastWinRuleCheck.setChecked(true);
         root.addView(fastWinRuleCheck, fullWidth());
         drawRulesCheck = new CheckBox(this); drawRulesCheck.setText("Enable tournament draw rules"); drawRulesCheck.setChecked(true); root.addView(drawRulesCheck, fullWidth());
-        drawMoveRuleInput = field("Move rule (half-moves; default 50)", "50"); root.addView(drawMoveRuleInput, fullWidth());
+        drawMoveRuleInput = field("Move rule (full moves; default 50)", "50"); root.addView(drawMoveRuleInput, fullWidth());
+        ruleStartMoveInput = field("Start checking fast-win and draw rules at full move (default 1)", "1"); root.addView(ruleStartMoveInput, fullWidth());
         drawRepetitionInput = field("Repetition count (default 3)", "3"); root.addView(drawRepetitionInput, fullWidth());
         drawMaximumInput = field("Maximum full moves (default 160)", "160"); root.addView(drawMaximumInput, fullWidth());
         drawRulesCheck.setOnCheckedChangeListener((button, checked) -> { drawMoveRuleInput.setEnabled(checked); drawRepetitionInput.setEnabled(checked); drawMaximumInput.setEnabled(checked); });
 
         startButton = new Button(this); startButton.setText("Start tournament"); root.addView(startButton, fullWidth());
         resumeButton = new Button(this); resumeButton.setText("Resume saved tournament"); root.addView(resumeButton, fullWidth());
-        stopButton = new Button(this); stopButton.setText("Go to tournament board"); stopButton.setEnabled(false); root.addView(stopButton, fullWidth());
+        stopButton = new Button(this); stopButton.setText("Stop and Save Tournament"); stopButton.setEnabled(false); root.addView(stopButton, fullWidth());
         statusText = text("Ready"); root.addView(statusText, fullWidth());
         standingsText = text(""); root.addView(standingsText, fullWidth());
         startButton.setOnClickListener(v -> startTournament());
         resumeButton.setOnClickListener(v -> chooseSavedTournament());
-        stopButton.setOnClickListener(v -> setContentView(playView));
+        stopButton.setOnClickListener(v -> stopAndSaveTournament());
         scroll.setOnTouchListener((v, event) -> {
             if (event.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
                 touchDownX = event.getX(); touchDownY = event.getY(); return false;
@@ -376,8 +380,8 @@ public final class TournamentActivity extends Activity {
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(0, dp(8), 0, dp(8));
         page.setBackgroundColor(0xFF303030);
-        TextView title = text("MIRROR BOARD"); title.setTextSize(18); title.setTypeface(null, android.graphics.Typeface.BOLD);
-        title.setGravity(android.view.Gravity.CENTER); page.addView(title, fullWidth());
+        mirrorHeaderText = text("Game —/—       MIRROR BOARD       TC —"); mirrorHeaderText.setTextSize(18); mirrorHeaderText.setTypeface(null, android.graphics.Typeface.BOLD);
+        mirrorHeaderText.setGravity(android.view.Gravity.CENTER); page.addView(mirrorHeaderText, fullWidth());
         mirrorAnalysisText = text("Select an engine with Analysis");
         mirrorAnalysisText.setTextSize(18); mirrorAnalysisText.setLines(7); mirrorAnalysisText.setMaxLines(7);
         mirrorAnalysisText.setHeight(dp(147)); mirrorAnalysisText.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
@@ -446,6 +450,7 @@ public final class TournamentActivity extends Activity {
         if (tournamentBoard != null) mirrorBoard.flipped = tournamentBoard.flipped;
         if (mirrorMovesText != null) mirrorMovesText.setText(currentPgnMoves.isEmpty() ? "No moves played yet." : currentPgnMoves);
         if (mirrorWhiteName != null) { mirrorWhiteName.setText(currentWhiteName); mirrorBlackName.setText(currentBlackName); }
+        if (mirrorHeaderText != null) mirrorHeaderText.setText("Game " + (currentGameNumber == 0 ? "—" : currentGameNumber) + "/" + (currentGameTotal == 0 ? "—" : currentGameTotal) + "       MIRROR BOARD       TC " + mirrorTcLabel);
         if (mirrorWhiteClock != null) { mirrorWhiteClock.setText(whiteClockText == null ? "—" : whiteClockText.getText()); mirrorBlackClock.setText(blackClockText == null ? "—" : blackClockText.getText()); }
         if (mirrorWhiteMoveTime != null) { mirrorWhiteMoveTime.setText(whiteMoveTimeText == null ? "—" : whiteMoveTimeText.getText()); mirrorBlackMoveTime.setText(blackMoveTimeText == null ? "—" : blackMoveTimeText.getText()); }
         if (mirrorAnalysisOn && mirrorAnalysisText != null) mirrorAnalysisText.setText(mirrorAnalysisWhite ? lastWhiteAnalysis : lastBlackAnalysis);
@@ -762,12 +767,13 @@ public final class TournamentActivity extends Activity {
                 String result;
                 switch (pairing.outcome) {
                     case WHITE_WIN: result = "1-0"; break;
-                    case DRAW: result = "½"; break;
+                    case DRAW: result = "½-½"; break;
                     case BLACK_WIN: result = "0-1"; break;
                     default: result = "*"; break;
                 }
-                out.append(pairing.index + 1).append('.').append(white)
-                   .append("   (").append(result).append(")   ").append(black).append('\n');
+                int endedAtMoves = countFullMoves(pairing.pgn);
+                out.append(pairing.index + 1).append('.').append(white).append("  -  ").append(black)
+                   .append("  (").append(result).append(") ").append(endedAtMoves).append(" moves").append('\n');
             }
             if (out.length() == 0) out.append("No scheduled games.");
             TextView text = text(out.toString());
@@ -881,6 +887,7 @@ public final class TournamentActivity extends Activity {
         e.putBoolean("setupFastWin", fastWinRuleCheck.isChecked());
         e.putBoolean("setupDrawRules", drawRulesCheck != null && drawRulesCheck.isChecked());
         if (drawMoveRuleInput != null) e.putString("setupDrawMove", drawMoveRuleInput.getText().toString());
+        if (ruleStartMoveInput != null) e.putString("setupRuleStartMove", ruleStartMoveInput.getText().toString());
         if (drawRepetitionInput != null) e.putString("setupDrawRep", drawRepetitionInput.getText().toString());
         if (drawMaximumInput != null) e.putString("setupDrawMax", drawMaximumInput.getText().toString());
         e.putString("setupOpeningPgn", selectedOpeningPgn);
@@ -901,6 +908,7 @@ public final class TournamentActivity extends Activity {
         fastWinRuleCheck.setChecked(p.getBoolean("setupFastWin", true));
         if (drawRulesCheck != null) drawRulesCheck.setChecked(p.getBoolean("setupDrawRules", true));
         if (drawMoveRuleInput != null) drawMoveRuleInput.setText(p.getString("setupDrawMove", "50"));
+        if (ruleStartMoveInput != null) ruleStartMoveInput.setText(p.getString("setupRuleStartMove", "1"));
         if (drawRepetitionInput != null) drawRepetitionInput.setText(p.getString("setupDrawRep", "3"));
         if (drawMaximumInput != null) drawMaximumInput.setText(p.getString("setupDrawMax", "160")); selectedOpeningPgn=p.getString("setupOpeningPgn", ""); selectedOpeningFileName=p.getString("setupOpeningName", selectedOpeningPgn.isEmpty()?"No PGN file selected":"Saved PGN book loaded"); openingFileText.setText(selectedOpeningFileName);
         selectedEngines.clear(); String ids=p.getString("setupEngineIds", ""); if (!ids.isEmpty()) for(String id:ids.split("\n")) for(EngineChoice c:availableEngines) if(c.id.equals(id)){selectedEngines.add(c); break;} updateSelectedText();
@@ -1105,6 +1113,7 @@ public final class TournamentActivity extends Activity {
     }
 
     private void launchTournament(final TournamentManager tournament) {
+        activeTournamentManager = tournament;
         double autoWinThreshold = 10.0;
         try { autoWinThreshold = Double.parseDouble(autoWinEvalInput.getText().toString().trim()); }
         catch (RuntimeException ignored) { autoWinThreshold = 10.0; }
@@ -1118,7 +1127,10 @@ public final class TournamentActivity extends Activity {
                     setContentView(playView);
                     if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
                     if (playPauseButton != null) playPauseButton.setText(runner != null && runner.isPaused() ? "Play" : "Pause");
-                    statusText.setText("Game " + (pairing.index + 1) + "/" + tournament.pairings().size() + ": " + white + " vs " + black);
+                    currentGameNumber = pairing.index + 1; currentGameTotal = tournament.pairings().size();
+                    mirrorTcLabel = String.format(java.util.Locale.US, "%d+%d", tournament.baseTimeMs()/60000, tournament.incrementMs()/1000);
+                    if (mirrorHeaderText != null) mirrorHeaderText.setText("Game " + currentGameNumber + "/" + currentGameTotal + "       MIRROR BOARD       TC " + mirrorTcLabel);
+                    statusText.setText("Game " + currentGameNumber + "/" + currentGameTotal + " " + tournament.title());
                     if (openingStartInput != null && tournament.repeatOpening()) openingStartInput.setText(String.valueOf(tournament.openingStartIndex() + Math.max(0, (pairing.gameNumber - 1) / 2)));
                     currentPgnMoves = "";
                     mirrorPositions.clear(); mirrorPly = -1; mirrorNavigationAllowed = false;
@@ -1251,13 +1263,43 @@ public final class TournamentActivity extends Activity {
         if (playPauseButton != null) playPauseButton.setText("P");
         if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
         setContentView(playView);
-        int moveRule = 50, repetitionRule = 3, maximumMoves = 160;
+        int moveRule = 50, repetitionRule = 3, maximumMoves = 160, ruleStartMove = 1;
         try { moveRule = Integer.parseInt(drawMoveRuleInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
         try { repetitionRule = Integer.parseInt(drawRepetitionInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
         try { maximumMoves = Integer.parseInt(drawMaximumInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
-        runner.configureDrawRules(drawRulesCheck.isChecked(), moveRule, repetitionRule, maximumMoves);
+        try { ruleStartMove = Integer.parseInt(ruleStartMoveInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
+        runner.configureDrawRules(drawRulesCheck.isChecked(), moveRule, repetitionRule, maximumMoves, ruleStartMove);
         saveSetup();
         runner.start();
+    }
+
+    private int countFullMoves(String pgn) {
+        if (pgn == null || pgn.trim().isEmpty()) return 0;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:^|\\s)(\\d+)\\.").matcher(pgn);
+        int max = 0; while (m.find()) try { max = Math.max(max, Integer.parseInt(m.group(1))); } catch (NumberFormatException ignored) { }
+        return max;
+    }
+
+    private void stopAndSaveTournament() {
+        if (runner == null) { setContentView(playView); return; }
+        TournamentRunner oldRunner = runner;
+        try {
+            TournamentManager activeTournament = activeTournamentManager;
+            if (activeTournament == null) activeTournament = TournamentManager.restore(this);
+            oldRunner.pause();
+            activeTournament.save();
+            saveTournamentPgnAutomatically(activeTournament);
+            oldRunner.stop();
+            runner = null;
+            startButton.setEnabled(true);
+            resumeButton.setEnabled(true);
+            stopButton.setEnabled(false);
+            statusText.setText("Tournament stopped and saved. Use Resume Saved Tournament to continue.");
+            Toast.makeText(this, "Tournament saved", Toast.LENGTH_LONG).show();
+            setContentView(setupView);
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not save tournament: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
     }
 
     private void exportTournamentPgn() {
