@@ -223,6 +223,16 @@ public final class TournamentActivity extends Activity {
         startButton = new Button(this); startButton.setText("Start tournament"); root.addView(startButton, fullWidth());
         resumeButton = new Button(this); resumeButton.setText("Resume saved tournament"); root.addView(resumeButton, fullWidth());
         stopButton = new Button(this); stopButton.setText("Stop and Save Tournament"); stopButton.setEnabled(false); root.addView(stopButton, fullWidth());
+        Button goToTournamentBoardButton = new Button(this);
+        goToTournamentBoardButton.setText("Go to Tournament Board");
+        goToTournamentBoardButton.setEnabled(true);
+        root.addView(goToTournamentBoardButton, fullWidth());
+        goToTournamentBoardButton.setOnClickListener(v -> {
+            if (playView != null) {
+                currentTournamentScreen = 0;
+                setContentView(playView);
+            }
+        });
         statusText = text("Ready"); root.addView(statusText, fullWidth());
         standingsText = text(""); root.addView(standingsText, fullWidth());
         startButton.setOnClickListener(v -> startTournament());
@@ -1123,12 +1133,17 @@ public final class TournamentActivity extends Activity {
         runner = new TournamentRunner(tournament, new TournamentRunner.Listener() {
             @Override public void onGameStarted(TournamentManager.Pairing pairing, String white, String black) {
                 runOnUiThread(() -> {
-                    currentTournamentScreen = 0;
-                    setContentView(playView);
+                    // Keep the user's chosen board. A new game must not force Mirror Board
+                    // back to the live board; Switch is the only board-selection control.
+                    if (!isMirrorShowing()) setContentView(playView);
                     if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
                     if (playPauseButton != null) playPauseButton.setText(runner != null && runner.isPaused() ? "Play" : "Pause");
                     currentGameNumber = pairing.index + 1; currentGameTotal = tournament.pairings().size();
-                    mirrorTcLabel = String.format(java.util.Locale.US, "%d+%d", tournament.baseTimeMs()/60000, tournament.incrementMs()/1000);
+                    double incrementSeconds = tournament.incrementMs() / 1000.0;
+                    String incrementLabel = (incrementSeconds == Math.rint(incrementSeconds))
+                            ? String.format(java.util.Locale.US, "%.0f", incrementSeconds)
+                            : String.format(java.util.Locale.US, "%.1f", incrementSeconds);
+                    mirrorTcLabel = String.format(java.util.Locale.US, "%d+%s", tournament.baseTimeMs()/60000, incrementLabel);
                     if (mirrorHeaderText != null) mirrorHeaderText.setText("Game " + currentGameNumber + "/" + currentGameTotal + "       MIRROR BOARD       TC " + mirrorTcLabel);
                     statusText.setText("Game " + currentGameNumber + "/" + currentGameTotal + " " + tournament.title());
                     if (openingStartInput != null && tournament.repeatOpening()) openingStartInput.setText(String.valueOf(tournament.openingStartIndex() + Math.max(0, (pairing.gameNumber - 1) / 2)));
