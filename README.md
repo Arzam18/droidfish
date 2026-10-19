@@ -1,6 +1,12 @@
-# Tournament mode documentation
+# DroidFishTournament
 
-For the tournament feature overview, setup instructions, time-control units, mirror-board behavior, timers, PGN recovery, performance notes, and troubleshooting, see [Tournament.md](Tournament.md).
+**Version 1.0**
+
+DroidFishTournament's tournament mode is an original implementation developed through AI-assisted coding and human direction, design decisions, review, and testing. It was not copied from or ported from the previous tournament application / Chess Engines Tournament.
+
+The tournament-mode implementation is released under **GNU General Public License v3.0 (GPL-3.0)**. See `Tournament.md` for its features, usage guide, design notes, and licensing statement. This repository also contains upstream DroidFish code and third-party components that retain their applicable notices and licenses.
+
+For tournament-specific documentation, read [Tournament.md](Tournament.md).
 
 # Introduction
 

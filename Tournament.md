@@ -1,4 +1,13 @@
-# DroidFishTournament — Tournament Mode Guide
+# DroidFishTournament v1.0 — Tournament Mode Guide
+
+## Project origin, version, and license
+
+- **Application:** DroidFishTournament
+- **Version:** 1.0
+- **Tournament-mode authorship:** This tournament mode is an original implementation created through AI-assisted coding and human direction. Its architecture, behavior, and feature decisions were developed for this project; its implementation was not copied from or ported from another tournament application.
+- **License for the tournament implementation:** GNU General Public License, version 3 (GPL-3.0). The tournament-mode source is intended to be distributed and modified under GPL-3.0, including the corresponding rights to study, share, and modify it under that license's terms.
+- **Repository notice:** This application is based on DroidFish and includes third-party/upstream components. Their existing copyright notices and individual licenses remain applicable; the statement above specifically identifies the license and origin of the tournament implementation and does not relicense third-party code.
+
 
 This document describes the tournament features added to this DroidFish-derived application. The exact options available can vary by source revision; always check the Setup screen in the installed build.
 
