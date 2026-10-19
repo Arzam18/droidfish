@@ -184,8 +184,8 @@ public final class TournamentActivity extends Activity {
         timeModeSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
                 new String[]{"Time Clock: Time + Increment", "Time per move", "Depth per move", "Nodes per move"}));
         root.addView(timeModeSpinner, fullWidth());
-        baseInput = field("Base time per side (minutes)", "0.5"); root.addView(baseInput, fullWidth());
-        incrementInput = field("Increment per move (seconds; e.g. 1 for +1)", "0.5"); root.addView(incrementInput, fullWidth());
+        baseInput = field("Base time per side (minutes; 0.5 = 30 seconds)", "0.5"); root.addView(baseInput, fullWidth());
+        incrementInput = field("Increment per move (seconds; 0.5 = half a second)", "0.5"); root.addView(incrementInput, fullWidth());
         limitInput = field("Time per move (seconds), depth, or nodes", "2"); root.addView(limitInput, fullWidth());
         timeModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
@@ -1303,10 +1303,15 @@ public final class TournamentActivity extends Activity {
                     String incrementLabel = (incrementSeconds == Math.rint(incrementSeconds))
                             ? String.format(java.util.Locale.US, "%.0f", incrementSeconds)
                             : String.format(java.util.Locale.US, "%.1f", incrementSeconds);
-                    double baseMinutes = tournament.baseTimeMs() / 60000.0;
-                    String baseLabel = (baseMinutes == Math.rint(baseMinutes))
-                            ? String.format(java.util.Locale.US, "%.0f", baseMinutes)
-                            : String.format(java.util.Locale.US, "%.1f", baseMinutes);
+                    // Display the base time as an actual clock duration, not decimal minutes.
+                    // Example: 0.5 minutes -> 0:30; 1.7 minutes -> 1:42.
+                    long baseSeconds = Math.max(0L, Math.round(tournament.baseTimeMs() / 1000.0));
+                    String baseLabel;
+                    if (baseSeconds >= 60) {
+                        baseLabel = String.format(java.util.Locale.US, "%d:%02d", baseSeconds / 60, baseSeconds % 60);
+                    } else {
+                        baseLabel = String.format(java.util.Locale.US, "0:%02d", baseSeconds);
+                    }
                     mirrorTcLabel = String.format(java.util.Locale.US, "%s+%s", baseLabel, incrementLabel);
                     if (mirrorHeaderText != null) mirrorHeaderText.setText(mirrorHeaderLabel());
                     statusText.setText("Game " + currentGameNumber + "/" + currentGameTotal + " " + tournament.title());
