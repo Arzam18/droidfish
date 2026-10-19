@@ -129,7 +129,7 @@
         </activity>
         <provider
             android:name="androidx.core.content.FileProvider"
-            android:authorities="org.petero.droidfish.fileprovider"
+            android:authorities="org.petero.droidfishtournament.fileprovider"
             android:grantUriPermissions="true"
             android:exported="false">
             <meta-data
