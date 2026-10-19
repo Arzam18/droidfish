@@ -1,3 +1,7 @@
+# Tournament mode documentation
+
+For the tournament feature overview, setup instructions, time-control units, mirror-board behavior, timers, PGN recovery, performance notes, and troubleshooting, see [Tournament.md](Tournament.md).
+
 # Introduction
 
 *DroidFish* is a feature-rich graphical chess user interface, combined with
