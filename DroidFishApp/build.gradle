@@ -4,7 +4,7 @@ android {
     compileSdkVersion 28
 
     defaultConfig {
-        applicationId "org.petero.droidfish"
+        applicationId "org.petero.droidfishtournament"
         minSdkVersion 16
         targetSdkVersion 28
         versionCode 100
@@ -60,6 +60,8 @@ android {
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
     implementation 'androidx.appcompat:appcompat:1.1.0'
+    // Explicit runtime dependency for generated data-binding classes (e.g. TooltipBinding).
+    implementation 'androidx.databinding:databinding-runtime:7.1.1'
     implementation 'androidx.constraintlayout:constraintlayout:1.1.3'
     implementation 'com.google.android.material:material:1.1.0'
     testImplementation 'junit:junit:4.13'
