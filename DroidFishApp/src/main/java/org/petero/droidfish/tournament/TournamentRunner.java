@@ -435,11 +435,13 @@ public final class TournamentRunner {
         recordPosition(lastMoveTimeMs);
         listener.onMoveTime(!game.currPos().whiteMove, lastMoveTimeMs, currentOpeningName);
         notifyPosition();
-        if (applyConfiguredDrawRules()) return;
+        // Native chess outcomes (checkmate, stalemate, insufficient material, etc.)
+        // take precedence over tournament draw adjudication on the same move.
         if (game.getGameState() != Game.GameState.ALIVE) {
             finishCurrentGame(resultForState(game.getGameState()));
             return;
         }
+        if (applyConfiguredDrawRules()) return;
         if (result.second == null) {
             listener.onError("Engine returned a non-move command without ending the game: " + cmd, null);
             stop();
@@ -481,8 +483,9 @@ public final class TournamentRunner {
             String eval = "---", depth = "---", nodes = "---", nps = "---";
             // Analysis display uses padded columns; accept any whitespace and tolerate
             // signed/mate evaluations so the PGN receives the same data as the board.
+            String analysisHeader = analysis == null ? "" : analysis.split("\\r?\\n", 2)[0];
             java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                    "(?s)Eval:\\s*(.*?)\\s+Depth:\\s*(.*?)\\s+Nodes:\\s*(.*?)\\s+NPS:\\s*([^\\r\\n]+)").matcher(analysis == null ? "" : analysis);
+                    "Eval:\\s*(.*?)\\s+Depth:\\s*(.*?)\\s+Nodes:\\s*(.*?)\\s+NPS:\\s*(\\S+)").matcher(analysisHeader);
             if (m.find()) {
                 eval = m.group(1).trim(); depth = m.group(2).trim();
                 nodes = m.group(3).trim(); nps = m.group(4).trim();
