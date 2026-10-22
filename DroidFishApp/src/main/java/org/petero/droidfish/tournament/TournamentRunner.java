@@ -29,6 +29,11 @@ public final class TournamentRunner {
         /** Current tournament position, copied so the UI can safely render it. */
         void onPositionChanged(Position position, boolean whiteToMove, long whiteTimeMs, long blackTimeMs,
                                String whiteName, String blackName, String pgnMoves);
+        /** Current position plus the actual move that led to it, for last-move highlighting. */
+        default void onPositionChanged(Position position, boolean whiteToMove, long whiteTimeMs, long blackTimeMs,
+                                       String whiteName, String blackName, String pgnMoves, Move lastMove) {
+            onPositionChanged(position, whiteToMove, whiteTimeMs, blackTimeMs, whiteName, blackName, pgnMoves);
+        }
         /** Persistent per-engine analysis text; each side retains its last line after moving. */
         void onEngineAnalysis(boolean white, String analysis);
         void onReviewPosition(Position position, int ply, int totalPlies, String whiteAnalysis, String blackAnalysis, long moveTimeMs);
@@ -335,7 +340,7 @@ public final class TournamentRunner {
                     // Publish each individual ply and allow the UI to render it before
                     // applying the next opening move. Engines are started only after this loop.
                     listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove,
-                            0, 0, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves());
+                            0, 0, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves(), game.getLastMove());
                     try { Thread.sleep(500); }
                     catch (InterruptedException e) { Thread.currentThread().interrupt(); return false; }
                 }
@@ -545,7 +550,7 @@ public final class TournamentRunner {
         long whiteMs = activeClock == null || tournament.timeMode() != TournamentManager.TimeMode.CLOCK ? 0 : activeClock.remainingMs(true);
         long blackMs = activeClock == null || tournament.timeMode() != TournamentManager.TimeMode.CLOCK ? 0 : activeClock.remainingMs(false);
         listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove,
-                whiteMs, blackMs, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves());
+                whiteMs, blackMs, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves(), game.getLastMove());
     }
 
     private String terminationForState(Game.GameState state) {
