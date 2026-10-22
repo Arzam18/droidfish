@@ -102,19 +102,19 @@ public final class TournamentRunner {
         if (pos.fullMoveCounter < ruleStartFullMove) return false;
         if (pos.halfMoveClock >= drawMoveLimit * 2) {
             game.adjudicateTournament("1/2-1/2");
-            finishCurrentGame(TournamentManager.Outcome.DRAW);
+            finishCurrentGame(TournamentManager.Outcome.DRAW, "50-move rule");
             return true;
         }
         if (pos.fullMoveCounter > drawMaximumFullMoves) {
             game.adjudicateTournament("1/2-1/2");
-            finishCurrentGame(TournamentManager.Outcome.DRAW);
+            finishCurrentGame(TournamentManager.Outcome.DRAW, "maximum-move rule");
             return true;
         }
         long hash = pos.zobristHash(); int occurrences = 0;
         for (Position historic : positionHistory) if (historic.zobristHash() == hash) occurrences++;
         if (occurrences >= drawRepetitionLimit) {
             game.adjudicateTournament("1/2-1/2");
-            finishCurrentGame(TournamentManager.Outcome.DRAW);
+            finishCurrentGame(TournamentManager.Outcome.DRAW, "threefold repetition");
             return true;
         }
         return false;
@@ -180,9 +180,20 @@ public final class TournamentRunner {
         blackPlayer.setBookOptions(tournamentBookOptions);
     }
 
-    public synchronized void start() {
-        if (stopped) throw new IllegalStateException("Runner has been stopped");
-        startNextGame();
+    public void start() {
+        synchronized (this) {
+            if (stopped) throw new IllegalStateException("Runner has been stopped");
+        }
+        // Opening playback deliberately waits 500 ms per ply. Never run that loop on
+        // the Android UI thread: queued board updates would otherwise all render at once.
+        Thread starter = new Thread(() -> {
+            synchronized (TournamentRunner.this) {
+                if (stopped || finished || paused) return;
+            }
+            startNextGame();
+        }, "Tournament-Game-Starter");
+        starter.setDaemon(true);
+        starter.start();
     }
 
     /** Pause without discarding the current game, position, or completed schedule. */
@@ -265,7 +276,7 @@ public final class TournamentRunner {
         game.adjudicateTournament(result);
         TournamentManager.Outcome outcome = "1-0".equals(result) ? TournamentManager.Outcome.WHITE_WIN :
                 "0-1".equals(result) ? TournamentManager.Outcome.BLACK_WIN : TournamentManager.Outcome.DRAW;
-        finishCurrentGame(outcome);
+        finishCurrentGame(outcome, "manual adjudication");
     }
 
     private void publishReviewPosition() {
@@ -569,12 +580,18 @@ public final class TournamentRunner {
         }
     }
 
-    private synchronized void finishCurrentGame(TournamentManager.Outcome outcome) {
+    private void finishCurrentGame(TournamentManager.Outcome outcome) {
+        finishCurrentGame(outcome, null);
+    }
+
+    private synchronized void finishCurrentGame(TournamentManager.Outcome outcome, String explicitReason) {
         if (stopped || finished || pairing == null || outcome == TournamentManager.Outcome.UNFINISHED) return;
         turnGeneration++;
         boolean wasHumanAdjudication = humanAdjudication;
-        String resultReason = wasHumanAdjudication ? "manual adjudication" : terminationForState(game.getGameState());
-        game.tree.setTournamentTermination(wasHumanAdjudication ? "adjudication" : terminationForState(game.getGameState()));
+        String stateReason = terminationForState(game.getGameState());
+        String resultReason = explicitReason != null && !explicitReason.trim().isEmpty() ? explicitReason :
+                (wasHumanAdjudication ? "automatic evaluation adjudication" : stateReason);
+        game.tree.setTournamentTermination(wasHumanAdjudication ? "adjudication" : resultReason);
         humanAdjudication = false;
         String pgn = game.tree.toPGN(pgnOptions);
         try {
@@ -587,10 +604,18 @@ public final class TournamentRunner {
         TournamentManager.Pairing completed = pairing;
         pairing = null;
         listener.onGameFinished(completed, outcome, pgn, resultReason);
-        // Keep the result announcement visible for 0.5 seconds before advancing.
-        try { Thread.sleep(500); }
-        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        if (!stopped && !finished && !paused) startNextGame();
+        // Do not sleep on the caller: manual adjudication can originate on the UI thread.
+        // A separate continuation lets Android render the result for at least 500 ms.
+        Thread advance = new Thread(() -> {
+            try { Thread.sleep(500); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            synchronized (TournamentRunner.this) {
+                if (stopped || finished || paused) return;
+            }
+            startNextGame();
+        }, "Tournament-Next-Game");
+        advance.setDaemon(true);
+        advance.start();
     }
 
     private final class EngineListener implements SearchListener {
@@ -672,10 +697,10 @@ public final class TournamentRunner {
                 if (clock != null) clock.pause();
                 whitePlayer.stopSearch();
                 blackPlayer.stopSearch();
-                humanAdjudication = true;
+                humanAdjudication = false;
                 game.adjudicateTournament(result);
                 TournamentManager.Outcome outcome = "1-0".equals(result) ? TournamentManager.Outcome.WHITE_WIN : TournamentManager.Outcome.BLACK_WIN;
-                finishCurrentGame(outcome);
+                finishCurrentGame(outcome, "10-evaluation fast-win rule");
             }
         }
         private String compactCount(long value) {
