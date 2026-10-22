@@ -174,11 +174,6 @@ public final class TournamentActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
         scroll.addView(root);
 
-        Button openGameViewer = new Button(this);
-        openGameViewer.setText("Open Game Viewer (PGN / analysis)");
-        root.addView(openGameViewer, fullWidth());
-        openGameViewer.setOnClickListener(v -> openGameViewerPicker());
-
         Button choose = new Button(this);
         choose.setText("Select tournament engines");
         root.addView(choose, fullWidth());
@@ -524,7 +519,7 @@ public final class TournamentActivity extends Activity {
         if (mirrorAnalysisOn && mirrorAnalysisText != null) mirrorAnalysisText.setText(mirrorAnalysisWhite ? lastWhiteAnalysis : lastBlackAnalysis);
     }
     private boolean samePosition(Position a, Position b) { return a != null && b != null && a.toString().equals(b.toString()); }
-    /** Makes each recorded move and move number navigate to its matching saved position. */
+    /** Makes every SAN token navigate to its exact recorded position. */
     private void updateMirrorMoveLinks() {
         if (mirrorMovesText == null) return;
         final String moves = currentPgnMoves == null ? "" : currentPgnMoves.trim();
@@ -534,44 +529,52 @@ public final class TournamentActivity extends Activity {
         }
 
         android.text.SpannableString styled = new android.text.SpannableString(moves);
-        // Tokenize by non-whitespace rather than matching a SAN token plus the next
-        // whitespace. The old expression could create overlapping spans and made later
-        // moves difficult or impossible to tap on some PGN formats.
+        // PGN exporters vary: move numbers can be separate tokens ("1. e4") or
+        // attached to SAN ("1.e4", "1...e5"). Split the move-number prefix
+        // logically while preserving the original character offsets for click spans.
         java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\S+").matcher(moves);
         int ply = 0;
-        boolean inBraceComment = false;
+        boolean inComment = false;
+        int available = mirrorPositions.size();
         while (matcher.find()) {
             String token = matcher.group();
-            if (token.startsWith("{")) inBraceComment = true;
-            if (inBraceComment || token.startsWith(";") || token.startsWith("(") || token.startsWith(")")) {
-                if (token.contains("}")) inBraceComment = false;
+            if (inComment) {
+                if (token.contains("}")) inComment = false;
                 continue;
             }
+            if (token.startsWith("{") || token.startsWith(";") || token.startsWith("%")) {
+                if (token.startsWith("{") && !token.contains("}")) inComment = true;
+                continue;
+            }
+            if (token.startsWith("(") || token.startsWith(")")) continue;
             if (token.matches("1-0|0-1|1/2-1/2|\\*")) continue;
 
-            final int target;
-            if (token.matches("\\d+\\.{1,3}")) {
-                int moveNo;
-                try { moveNo = Integer.parseInt(token.replace(".", "")); }
-                catch (NumberFormatException ex) { continue; }
-                target = Math.max(0, (moveNo - 1) * 2 + (token.endsWith("...") ? 1 : 0));
-            } else {
-                // A SAN token advances one ply. Move-number tokens and comments do not.
-                target = ++ply;
+            int sanStart = matcher.start();
+            String san = token;
+            java.util.regex.Matcher prefix = java.util.regex.Pattern.compile("^\\d+\\.{1,3}").matcher(san);
+            if (prefix.find()) {
+                sanStart += prefix.end();
+                san = san.substring(prefix.end());
+                if (san.isEmpty()) continue; // standalone move-number token
             }
-            // Do not clamp all later tokens to the last recorded position: that made
-            // multiple moves appear clickable while sending them to the same position.
-            if (target < 0 || target >= mirrorPositions.size()) continue;
+            // Ignore NAGs and non-move metadata. Each SAN move corresponds to
+            // exactly one position after the initial position (ply 1..N).
+            if (san.matches("\\$\\d+") || san.startsWith("!" ) || san.startsWith("?")) continue;
+            int target = ++ply;
+            if (sanStart >= matcher.end() || target >= available) continue;
+            final int targetPly = target;
             styled.setSpan(new android.text.style.ClickableSpan() {
-                @Override public void onClick(View widget) { navigateMirror(target); }
+                @Override public void onClick(View widget) { navigateMirror(targetPly); }
                 @Override public void updateDrawState(android.text.TextPaint ds) {
                     ds.setUnderlineText(true);
                     ds.setColor(0xFF80CBC4);
                 }
-            }, matcher.start(), matcher.end(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }, sanStart, matcher.end(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
         mirrorMovesText.setText(styled);
         mirrorMovesText.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
+        mirrorMovesText.setLinksClickable(true);
+        mirrorMovesText.setFocusable(false);
         mirrorMovesText.setHighlightColor(android.graphics.Color.TRANSPARENT);
     }
 
