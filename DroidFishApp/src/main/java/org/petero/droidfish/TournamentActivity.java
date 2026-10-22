@@ -524,32 +524,50 @@ public final class TournamentActivity extends Activity {
         if (mirrorAnalysisOn && mirrorAnalysisText != null) mirrorAnalysisText.setText(mirrorAnalysisWhite ? lastWhiteAnalysis : lastBlackAnalysis);
     }
     private boolean samePosition(Position a, Position b) { return a != null && b != null && a.toString().equals(b.toString()); }
-    /** Makes SAN tokens in the recorded PGN clickable, including moves from the opening line. */
+    /** Makes each recorded move and move number navigate to its matching saved position. */
     private void updateMirrorMoveLinks() {
         if (mirrorMovesText == null) return;
-        String moves = currentPgnMoves == null ? "" : currentPgnMoves.trim();
-        if (moves.isEmpty()) { mirrorMovesText.setText("No moves played yet."); return; }
+        final String moves = currentPgnMoves == null ? "" : currentPgnMoves.trim();
+        if (moves.isEmpty()) {
+            mirrorMovesText.setText("No moves played yet.");
+            return;
+        }
+
         android.text.SpannableString styled = new android.text.SpannableString(moves);
-        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\d+\\.{1,3}|[^\\s]+\\s*").matcher(moves);
+        // Tokenize by non-whitespace rather than matching a SAN token plus the next
+        // whitespace. The old expression could create overlapping spans and made later
+        // moves difficult or impossible to tap on some PGN formats.
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\S+").matcher(moves);
         int ply = 0;
+        boolean inBraceComment = false;
         while (matcher.find()) {
-            String token = matcher.group().trim();
-            if (token.isEmpty() || token.matches("1-0|0-1|1/2-1/2|\\*|\\{.*\\}")) continue;
-            if (token.matches("\\d+\\.{1,3}")) {
-                int moveNo;
-                try { moveNo = Integer.parseInt(token.replaceAll("\\.", "")); } catch (RuntimeException ex) { continue; }
-                int target = Math.max(0, Math.min(mirrorPositions.size()-1, (moveNo-1)*2 + (token.endsWith("...") ? 1 : 0)));
-                styled.setSpan(new android.text.style.ClickableSpan() {
-                    @Override public void onClick(View widget) { navigateMirror(target); }
-                    @Override public void updateDrawState(android.text.TextPaint ds) { ds.setUnderlineText(true); ds.setColor(0xFF80CBC4); }
-                }, matcher.start(), matcher.end(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            String token = matcher.group();
+            if (token.startsWith("{")) inBraceComment = true;
+            if (inBraceComment || token.startsWith(";") || token.startsWith("(") || token.startsWith(")")) {
+                if (token.contains("}")) inBraceComment = false;
                 continue;
             }
-            if (token.startsWith("{") || token.startsWith(";") || token.startsWith("(") || token.matches("\\d+\\.")) continue;
-            final int target = Math.max(0, Math.min(mirrorPositions.size()-1, ++ply));
+            if (token.matches("1-0|0-1|1/2-1/2|\\*")) continue;
+
+            final int target;
+            if (token.matches("\\d+\\.{1,3}")) {
+                int moveNo;
+                try { moveNo = Integer.parseInt(token.replace(".", "")); }
+                catch (NumberFormatException ex) { continue; }
+                target = Math.max(0, (moveNo - 1) * 2 + (token.endsWith("...") ? 1 : 0));
+            } else {
+                // A SAN token advances one ply. Move-number tokens and comments do not.
+                target = ++ply;
+            }
+            // Do not clamp all later tokens to the last recorded position: that made
+            // multiple moves appear clickable while sending them to the same position.
+            if (target < 0 || target >= mirrorPositions.size()) continue;
             styled.setSpan(new android.text.style.ClickableSpan() {
                 @Override public void onClick(View widget) { navigateMirror(target); }
-                @Override public void updateDrawState(android.text.TextPaint ds) { ds.setUnderlineText(true); ds.setColor(0xFF80CBC4); }
+                @Override public void updateDrawState(android.text.TextPaint ds) {
+                    ds.setUnderlineText(true);
+                    ds.setColor(0xFF80CBC4);
+                }
             }, matcher.start(), matcher.end(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
         mirrorMovesText.setText(styled);
@@ -1068,8 +1086,11 @@ public final class TournamentActivity extends Activity {
             heatCycleEnabled = playMins > 0;
             heatCooling = false;
             heatPlayAccumulatedMs = 0L;
-            heatLastResumeNs = runner != null && !runner.isPaused() && heatCycleEnabled ? System.nanoTime() : 0L;
             heatPhaseStartNs = 0L;
+            // A running tournament begins a fresh play interval immediately; a paused
+            // tournament starts it from togglePauseResume() when the user presses Play.
+            heatLastResumeNs = runner != null && !runner.isPaused() && heatCycleEnabled
+                    ? System.nanoTime() : 0L;
             if (showToast) Toast.makeText(this, "Advanced timers saved. They apply to the active tournament.", Toast.LENGTH_SHORT).show();
         } catch (RuntimeException ex) {
             Toast.makeText(this, "Invalid timer settings: " + ex.getMessage(), Toast.LENGTH_LONG).show();
@@ -1593,6 +1614,10 @@ public final class TournamentActivity extends Activity {
         runner.configureEvaluationDrawRule(evalDrawScore, evalDrawCondition);
         saveSetup();
         runner.start();
+        // Start both interval clocks with the runner, even when the timer settings
+        // were configured before a tournament existed (the old code left the play
+        // interval's resume timestamp at zero in that case).
+        resetAdvancedTimerRuntime();
         applyTournamentKeepScreenOn();
     }
 
