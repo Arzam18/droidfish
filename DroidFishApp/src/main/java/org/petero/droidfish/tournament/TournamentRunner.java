@@ -299,7 +299,7 @@ public final class TournamentRunner {
         latestWhiteAnalysis = "WHITE analysis waiting…"; latestBlackAnalysis = "BLACK analysis waiting…";
         currentOpeningName = "Starting position";
         String eventType = tournament.format().name().toLowerCase(java.util.Locale.US).replace('_', ' ');
-        game.tree.setTournamentMetadata(tournament.title(), "DroidFish", pairing.round + "." + pairing.gameNumber,
+        game.tree.setTournamentMetadata(tournament.title(), "DroidFish", pairing.round + "." + gameNumberInRound(pairing),
                 eventType, (baseTimeMs / 1000) + "+" + String.format(java.util.Locale.US, "%g", incrementMs / 1000.0));
         clock = new CetClock(baseTimeMs, incrementMs);
         game.tree.setTournamentOpening(currentOpeningName);
@@ -312,7 +312,15 @@ public final class TournamentRunner {
             game.tree.setTournamentOpening(currentOpeningName);
             int appliedPlies = PgnOpeningBook.applyMainLine(selectedOpening, openingPlies, san -> {
                 Pair<Boolean, Move> result = game.processString(san);
-                return result != null && Boolean.TRUE.equals(result.first) && result.second != null;
+                boolean applied = result != null && Boolean.TRUE.equals(result.first) && result.second != null;
+                if (applied) {
+                    // Show each opening ply instead of jumping directly to the final book position.
+                    listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove,
+                            0, 0, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves());
+                    try { Thread.sleep(500); }
+                    catch (InterruptedException e) { Thread.currentThread().interrupt(); return false; }
+                }
+                return applied;
             });
             if (appliedPlies == 0) {
                 listener.onError("Selected PGN opening " + (openingIndex + 1) +
@@ -336,6 +344,15 @@ public final class TournamentRunner {
         listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
         notifyPosition();
         requestMove(game.currPos().whiteMove);
+    }
+
+    /** PGN Round uses the sequential game number within a round (1.1 ... 1.N). */
+    private String gameNumberInRound(TournamentManager.Pairing target) {
+        int gameInRound = 0;
+        for (TournamentManager.Pairing p : tournament.pairings()) {
+            if (p.round == target.round && p.index <= target.index) gameInRound++;
+        }
+        return Integer.toString(Math.max(1, gameInRound));
     }
 
     private TournamentManager.Engine findEngine(String id) {
@@ -435,13 +452,11 @@ public final class TournamentRunner {
         recordPosition(lastMoveTimeMs);
         listener.onMoveTime(!game.currPos().whiteMove, lastMoveTimeMs, currentOpeningName);
         notifyPosition();
-        // Native chess outcomes (checkmate, stalemate, insufficient material, etc.)
-        // take precedence over tournament draw adjudication on the same move.
+        if (applyConfiguredDrawRules()) return;
         if (game.getGameState() != Game.GameState.ALIVE) {
             finishCurrentGame(resultForState(game.getGameState()));
             return;
         }
-        if (applyConfiguredDrawRules()) return;
         if (result.second == null) {
             listener.onError("Engine returned a non-move command without ending the game: " + cmd, null);
             stop();
@@ -480,20 +495,33 @@ public final class TournamentRunner {
             if (list.first.isEmpty()) return;
             GameTree.Node node = list.first.get(list.first.size() - 1);
             String analysis = whiteMoved ? latestWhiteAnalysis : latestBlackAnalysis;
-            String eval = "---", depth = "---", nodes = "---", nps = "---";
-            // Analysis display uses padded columns; accept any whitespace and tolerate
-            // signed/mate evaluations so the PGN receives the same data as the board.
-            String analysisHeader = analysis == null ? "" : analysis.split("\\r?\\n", 2)[0];
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                    "Eval:\\s*(.*?)\\s+Depth:\\s*(.*?)\\s+Nodes:\\s*(.*?)\\s+NPS:\\s*(\\S+)").matcher(analysisHeader);
-            if (m.find()) {
-                eval = m.group(1).trim(); depth = m.group(2).trim();
-                nodes = m.group(3).trim(); nps = m.group(4).trim();
+            String eval = "---", depth = "---", nodes = "---", nps = "---", wdl = "", pv = "";
+            String[] lines = (analysis == null ? "" : analysis).split("\\r?\\n");
+            if (lines.length > 0) {
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                        "Eval:\\s*(.*?)\\s+Depth:\\s*(.*?)\\s+Nodes:\\s*(.*?)\\s+NPS:\\s*(\\S+)")
+                        .matcher(lines[0]);
+                if (m.find()) {
+                    eval = m.group(1).trim(); depth = m.group(2).trim();
+                    nodes = m.group(3).trim(); nps = m.group(4).trim();
+                }
+            }
+            for (int i = 1; i < lines.length; i++) {
+                String line = lines[i].trim();
+                if (line.startsWith("W:") && wdl.isEmpty()) wdl = line;
+                else if (!line.isEmpty() && !line.startsWith("Book:")) {
+                    if (!pv.isEmpty()) pv += " | ";
+                    pv += line;
+                }
             }
             long remaining = clock == null ? 0 : clock.remainingMs(whiteMoved);
-            String comment = "E:" + eval + " D:" + depth + " N:" + nodes + " NPS:" + nps
-                    + " C:" + clockText(remaining) + " T:" + clockText(moveMs);
-            node.setPostComment(comment);
+            StringBuilder comment = new StringBuilder("Eval:").append(eval)
+                    .append(" Depth:").append(depth).append(" Nodes:").append(nodes)
+                    .append(" NPS:").append(nps).append(" Clock:").append(clockText(remaining))
+                    .append(" Time:").append(clockText(moveMs));
+            if (!wdl.isEmpty()) comment.append(" ").append(wdl);
+            if (!pv.isEmpty()) comment.append(" PV:").append(pv);
+            node.setPostComment(comment.toString());
         } catch (RuntimeException ignored) { }
     }
 
@@ -557,7 +585,10 @@ public final class TournamentRunner {
         TournamentManager.Pairing completed = pairing;
         pairing = null;
         listener.onGameFinished(completed, outcome, pgn);
-        startNextGame();
+        // Leave the result visible long enough to be noticed before advancing the schedule.
+        try { Thread.sleep(1000); }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        if (!stopped && !finished && !paused) startNextGame();
     }
 
     private final class EngineListener implements SearchListener {
