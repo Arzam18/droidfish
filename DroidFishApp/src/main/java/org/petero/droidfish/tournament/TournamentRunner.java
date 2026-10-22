@@ -34,6 +34,11 @@ public final class TournamentRunner {
         void onReviewPosition(Position position, int ply, int totalPlies, String whiteAnalysis, String blackAnalysis, long moveTimeMs);
         void onMoveTime(boolean whiteMoved, long moveTimeMs, String openingName);
         void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn);
+        /** Result plus the concrete rule/termination reason for the result announcement. */
+        default void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome,
+                                    String pgn, String reason) {
+            onGameFinished(pairing, outcome, pgn);
+        }
         void onTournamentFinished();
         void onError(String message, Throwable error);
     }
@@ -316,7 +321,8 @@ public final class TournamentRunner {
                 Pair<Boolean, Move> result = game.processString(san);
                 boolean applied = result != null && Boolean.TRUE.equals(result.first) && result.second != null;
                 if (applied) {
-                    // Show each opening ply instead of jumping directly to the final book position.
+                    // Publish each individual ply and allow the UI to render it before
+                    // applying the next opening move. Engines are started only after this loop.
                     listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove,
                             0, 0, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves());
                     try { Thread.sleep(500); }
@@ -566,7 +572,9 @@ public final class TournamentRunner {
     private synchronized void finishCurrentGame(TournamentManager.Outcome outcome) {
         if (stopped || finished || pairing == null || outcome == TournamentManager.Outcome.UNFINISHED) return;
         turnGeneration++;
-        game.tree.setTournamentTermination(humanAdjudication ? "adjudication" : terminationForState(game.getGameState()));
+        boolean wasHumanAdjudication = humanAdjudication;
+        String resultReason = wasHumanAdjudication ? "manual adjudication" : terminationForState(game.getGameState());
+        game.tree.setTournamentTermination(wasHumanAdjudication ? "adjudication" : terminationForState(game.getGameState()));
         humanAdjudication = false;
         String pgn = game.tree.toPGN(pgnOptions);
         try {
@@ -578,8 +586,8 @@ public final class TournamentRunner {
         }
         TournamentManager.Pairing completed = pairing;
         pairing = null;
-        listener.onGameFinished(completed, outcome, pgn);
-        // Leave the result visible long enough to be noticed before advancing the schedule.
+        listener.onGameFinished(completed, outcome, pgn, resultReason);
+        // Keep the result announcement visible for 0.5 seconds before advancing.
         try { Thread.sleep(500); }
         catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         if (!stopped && !finished && !paused) startNextGame();
