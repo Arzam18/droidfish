@@ -12,14 +12,9 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextWatcher;
-import android.text.SpannableString;
-import android.text.Spanned;
-import android.text.method.LinkMovementMethod;
-import android.text.style.ClickableSpan;
-import android.graphics.Color;
-import android.view.View;
 import android.text.Editable;
 import android.os.Environment;
+import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -65,7 +60,6 @@ public final class TournamentActivity extends Activity {
     private TextView whiteClockText, blackClockText, whiteNameText, blackNameText, moveStatusText;
     private LinearLayout playPage, blackClockRow, whiteClockRow;
     private boolean tournamentUiFlipped = false;
-    private boolean mirrorUiFlipped = false;
     private boolean currentWhiteToMove = true;
     private String currentWhiteName = "WHITE", currentBlackName = "BLACK";
     private TextView whiteAnalysisText, blackAnalysisText, whiteMoveTimeText, blackMoveTimeText, openingText;
@@ -97,10 +91,12 @@ public final class TournamentActivity extends Activity {
     private CheckBox fastWinRuleCheck;
     private TextView openingFileText;
     private String selectedOpeningPgn = "";
+    private String selectedOpeningBinPath = "";
     private String currentPgnMoves = "";
     private org.petero.droidfish.gamelogic.Move whiteHintMove, blackHintMove;
     private String selectedOpeningFileName = "No PGN file selected";
     private static final int REQUEST_OPENING_PGN = 7314;
+    private static final int REQUEST_OPENING_BIN = 7316;
     private static final int REQUEST_GAME_VIEWER_PGN = 7315;
     private View gameViewerView;
     private ChessBoardPlay gameViewerBoard;
@@ -121,7 +117,7 @@ public final class TournamentActivity extends Activity {
     private int gameViewerSearchId = 50000;
     private final ArrayList<Move> gameViewerHints = new ArrayList<>();
     private CheckBox drawRulesCheck;
-    private EditText drawMoveRuleInput, drawRepetitionInput, drawMaximumInput, ruleStartMoveInput;
+    private EditText drawMoveRuleInput, drawRepetitionInput, drawMaximumInput, ruleStartMoveInput, evalDrawScoreInput, evalDrawConditionInput;
 
     private CheckBox repeatOpeningCheck;
     private Button startButton, resumeButton, stopButton, playPauseButton;
@@ -230,6 +226,8 @@ public final class TournamentActivity extends Activity {
             intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/x-chess-pgn", "application/octet-stream", "text/plain", "*/*"});
             startActivityForResult(intent, REQUEST_OPENING_PGN);
         });
+        Button chooseOpeningBin = new Button(this); chooseOpeningBin.setText("Select Polyglot BIN opening book"); root.addView(chooseOpeningBin, fullWidth());
+        chooseOpeningBin.setOnClickListener(v -> { Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT); intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType("*/*"); intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/octet-stream", "application/x-chess-book", "*/*"}); startActivityForResult(intent, REQUEST_OPENING_BIN); });
         openingStartInput = field("Params Opening PGN — start from game number (1 = first opening)", "1");
         root.addView(openingStartInput, fullWidth());
         showTournamentArrowsCheck = new CheckBox(this);
@@ -256,6 +254,8 @@ public final class TournamentActivity extends Activity {
         ruleStartMoveInput = field("Start checking fast-win and draw rules at full move (default 1)", "1"); root.addView(ruleStartMoveInput, fullWidth());
         drawRepetitionInput = field("Repetition count (default 3)", "3"); root.addView(drawRepetitionInput, fullWidth());
         drawMaximumInput = field("Maximum full moves (default 160)", "160"); root.addView(drawMaximumInput, fullWidth());
+        evalDrawScoreInput = field("Evaluation draw Score (pawns; 0.12 means ±0.12)", "0.12"); root.addView(evalDrawScoreInput, fullWidth());
+        evalDrawConditionInput = field("Evaluation draw Condition (consecutive full moves)", "6"); root.addView(evalDrawConditionInput, fullWidth());
         drawRulesCheck.setOnCheckedChangeListener((button, checked) -> { drawMoveRuleInput.setEnabled(checked); drawRepetitionInput.setEnabled(checked); drawMaximumInput.setEnabled(checked); });
 
         TextView timerHeading = text("Advanced Control Mode — saved independently of tournament setup");
@@ -423,7 +423,7 @@ public final class TournamentActivity extends Activity {
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(0, dp(8), 0, dp(8));
         page.setBackgroundColor(0xFF303030);
-        mirrorHeaderText = text("Game —/—  TC —  T 0:00:0"); mirrorHeaderText.setTextSize(18); mirrorHeaderText.setTypeface(null, android.graphics.Typeface.BOLD); mirrorHeaderText.setSingleLine(true); mirrorHeaderText.setIncludeFontPadding(false);
+        mirrorHeaderText = text("Game —/—  Mirror Board  TC —  T 0:00:0"); mirrorHeaderText.setTextSize(18); mirrorHeaderText.setTypeface(null, android.graphics.Typeface.BOLD); mirrorHeaderText.setSingleLine(true); mirrorHeaderText.setIncludeFontPadding(false);
         mirrorHeaderText.setGravity(android.view.Gravity.CENTER); page.addView(mirrorHeaderText, fullWidth());
         mirrorAnalysisText = text("Select an engine with Analysis");
         mirrorAnalysisText.setTextSize(18); mirrorAnalysisText.setLines(7); mirrorAnalysisText.setMaxLines(7);
@@ -455,7 +455,7 @@ public final class TournamentActivity extends Activity {
         Button next = new Button(this); next.setText(">"); Button last = new Button(this); last.setText(">>");
         for (Button b : new Button[]{first,prev,mirrorAnalysisButton,next,last}) nav.addView(b,new LinearLayout.LayoutParams(0,-2,1));
         page.addView(nav,fullWidth());
-        mirrorMovesText=text("No moves played yet."); mirrorMovesText.setTextSize(16); mirrorMovesText.setMovementMethod(LinkMovementMethod.getInstance()); mirrorMovesText.setHighlightColor(Color.TRANSPARENT); page.addView(mirrorMovesText,fullWidth());
+        mirrorMovesText=text("No moves played yet."); mirrorMovesText.setTextSize(16); page.addView(mirrorMovesText,fullWidth());
         mirrorStatusText=text("Mirror follows the live tournament."); page.addView(mirrorStatusText,fullWidth());
         LinearLayout mirrorControls = new LinearLayout(this);
         mirrorControls.setOrientation(LinearLayout.HORIZONTAL);
@@ -512,46 +512,14 @@ public final class TournamentActivity extends Activity {
         if (mirrorPositions.isEmpty() || !samePosition(mirrorPositions.get(mirrorPositions.size()-1), latestPosition)) mirrorPositions.add(new Position(latestPosition));
         int idx = mirrorPly < 0 ? mirrorPositions.size()-1 : Math.min(mirrorPly,mirrorPositions.size()-1);
         if (idx >= 0) mirrorBoard.setPosition(new Position(mirrorPositions.get(idx)));
-        mirrorBoard.flipped = mirrorUiFlipped;
-        if (mirrorMovesText != null) updateMirrorMovesText();
+        if (tournamentBoard != null) mirrorBoard.flipped = tournamentBoard.flipped;
+        if (mirrorMovesText != null) mirrorMovesText.setText(currentPgnMoves.isEmpty() ? "No moves played yet." : currentPgnMoves);
         if (mirrorWhiteName != null) { mirrorWhiteName.setText(currentWhiteName); mirrorBlackName.setText(currentBlackName); }
         if (mirrorHeaderText != null) mirrorHeaderText.setText(mirrorHeaderLabel());
         if (mirrorWhiteClock != null) { mirrorWhiteClock.setText(whiteClockText == null ? "—" : whiteClockText.getText()); mirrorBlackClock.setText(blackClockText == null ? "—" : blackClockText.getText()); }
         if (mirrorWhiteMoveTime != null) { mirrorWhiteMoveTime.setText(whiteMoveTimeText == null ? "—" : whiteMoveTimeText.getText()); mirrorBlackMoveTime.setText(blackMoveTimeText == null ? "—" : blackMoveTimeText.getText()); }
         if (mirrorAnalysisOn && mirrorAnalysisText != null) mirrorAnalysisText.setText(mirrorAnalysisWhite ? lastWhiteAnalysis : lastBlackAnalysis);
     }
-    /** Render SAN as links so a tap jumps to the corresponding stored position. */
-    private void updateMirrorMovesText() {
-        if (mirrorMovesText == null) return;
-        if (currentPgnMoves == null || currentPgnMoves.trim().isEmpty()) {
-            mirrorMovesText.setText("No moves played yet.");
-            return;
-        }
-        final String source = currentPgnMoves;
-        SpannableString linked = new SpannableString(source);
-        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\S+").matcher(source);
-        int ply = 0;
-        while (matcher.find()) {
-            String token = matcher.group();
-            int targetPly = -1;
-            if (token.matches("\\d+\\.")) {
-                try { targetPly = Math.max(0, (Integer.parseInt(token.substring(0, token.length()-1))-1)*2); } catch (NumberFormatException ignored) { }
-            } else if (token.matches("\\d+\\.\\.\\.")) {
-                try { targetPly = Math.max(0, (Integer.parseInt(token.substring(0, token.length()-3))-1)*2+1); } catch (NumberFormatException ignored) { }
-            } else if (!token.startsWith("{") && !token.matches("(1-0|0-1|1/2-1/2|\\*)")) {
-                ply++;
-                targetPly = ply;
-            }
-            if (targetPly >= 0) {
-                final int goPly = targetPly;
-                linked.setSpan(new ClickableSpan() {
-                    @Override public void onClick(View widget) { navigateMirror(goPly); }
-                }, matcher.start(), matcher.end(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            }
-        }
-        mirrorMovesText.setText(linked);
-    }
-
     private boolean samePosition(Position a, Position b) { return a != null && b != null && a.toString().equals(b.toString()); }
     private void navigateMirror(int ply) {
         if (runner != null && !runner.isPaused()) {
@@ -990,6 +958,9 @@ public final class TournamentActivity extends Activity {
         if (drawMaximumInput != null) e.putString("setupDrawMax", drawMaximumInput.getText().toString());
         e.putString("setupOpeningPgn", selectedOpeningPgn);
         e.putString("setupOpeningName", selectedOpeningFileName);
+        e.putString("setupOpeningBinPath", selectedOpeningBinPath);
+        if (evalDrawScoreInput != null) e.putString("setupEvalDrawScore", evalDrawScoreInput.getText().toString());
+        if (evalDrawConditionInput != null) e.putString("setupEvalDrawCondition", evalDrawConditionInput.getText().toString());
         StringBuilder ids = new StringBuilder(); for (EngineChoice c : selectedEngines) { if (ids.length()>0) ids.append("\n"); ids.append(c.id); }
         e.putString("setupEngineIds", ids.toString()); e.apply();
     }
@@ -1009,13 +980,17 @@ public final class TournamentActivity extends Activity {
         if (drawMoveRuleInput != null) drawMoveRuleInput.setText(p.getString("setupDrawMove", "50"));
         if (ruleStartMoveInput != null) ruleStartMoveInput.setText(p.getString("setupRuleStartMove", "1"));
         if (drawRepetitionInput != null) drawRepetitionInput.setText(p.getString("setupDrawRep", "3"));
-        if (drawMaximumInput != null) drawMaximumInput.setText(p.getString("setupDrawMax", "160")); selectedOpeningPgn=p.getString("setupOpeningPgn", ""); selectedOpeningFileName=p.getString("setupOpeningName", selectedOpeningPgn.isEmpty()?"No PGN file selected":"Saved PGN book loaded"); openingFileText.setText(selectedOpeningFileName);
+        if (drawMaximumInput != null) drawMaximumInput.setText(p.getString("setupDrawMax", "160"));
+        if (evalDrawScoreInput != null) evalDrawScoreInput.setText(p.getString("setupEvalDrawScore", "0.12"));
+        if (evalDrawConditionInput != null) evalDrawConditionInput.setText(p.getString("setupEvalDrawCondition", "6"));
+        selectedOpeningBinPath = p.getString("setupOpeningBinPath", "");
+        selectedOpeningPgn=p.getString("setupOpeningPgn", ""); selectedOpeningFileName=p.getString("setupOpeningName", selectedOpeningPgn.isEmpty()?"No PGN file selected":"Saved PGN book loaded"); openingFileText.setText(selectedOpeningFileName);
         selectedEngines.clear(); String ids=p.getString("setupEngineIds", ""); if (!ids.isEmpty()) for(String id:ids.split("\n")) for(EngineChoice c:availableEngines) if(c.id.equals(id)){selectedEngines.add(c); break;} updateSelectedText();
     }
     private String mirrorHeaderLabel() {
         return "Game " + (currentGameNumber == 0 ? "—" : currentGameNumber) + "/" +
                 (currentGameTotal == 0 ? "—" : currentGameTotal) +
-                "  TC " + mirrorTcLabel + "  T " + formatElapsedSeconds(currentEventElapsedMs());
+                "  Mirror Board  TC " + mirrorTcLabel + "  T " + formatElapsedSeconds(currentEventElapsedMs());
     }
 
     private String formatElapsedTenths(long ms) {
@@ -1173,7 +1148,7 @@ public final class TournamentActivity extends Activity {
             int openingPlies = nonNegativeInt(openingPliesInput, "opening plies");
             int openingStart = positiveInt(openingStartInput, "starting PGN opening number", 1);
             // A selected PGN is applied in full by default (0); positive values cap half-moves.
-            if (openingPlies > 0 && selectedOpeningPgn.trim().isEmpty())
+            if (openingPlies > 0 && selectedOpeningPgn.trim().isEmpty() && selectedOpeningBinPath.trim().isEmpty())
                 throw new IllegalArgumentException("Select a PGN opening file before setting a custom opening-ply limit");
             if (baseMillis > Integer.MAX_VALUE * 1000L) throw new IllegalArgumentException("Base time is too large");
             TournamentManager.Format format = TournamentManager.Format.values()[formatSpinner.getSelectedItemPosition()];
@@ -1187,6 +1162,7 @@ public final class TournamentActivity extends Activity {
             TournamentManager tournament = new TournamentManager(this, tournamentName, format,
                     engines, games, baseMillis, increment, selectedOpeningPgn, openingPlies,
                     repeatOpeningCheck.isChecked(), TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart);
+            tournament.setOpeningBinPath(selectedOpeningBinPath);
             tournament.save();
             launchTournament(tournament);
         } catch (Exception e) {
@@ -1211,6 +1187,20 @@ public final class TournamentActivity extends Activity {
             try { getContentResolver().takePersistableUriPermission(viewerUri, Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (SecurityException ignored) { }
             loadGameViewerPgn(viewerUri); return;
         }
+        if (requestCode == REQUEST_OPENING_BIN && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            Uri binUri = data.getData();
+            new Thread(() -> {
+                try (InputStream in = getContentResolver().openInputStream(binUri)) {
+                    if (in == null) throw new IOException("Could not open selected BIN book");
+                    File target = new File(getFilesDir(), "tournament_opening_book_" + System.currentTimeMillis() + ".bin");
+                    try (FileOutputStream out = new FileOutputStream(target, false)) { byte[] buffer = new byte[32768]; int n; while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n); }
+                    if (target.length() < 16 || target.length() % 16 != 0) throw new IOException("Invalid Polyglot BIN file size");
+                    String name = queryDisplayName(binUri);
+                    runOnUiThread(() -> { selectedOpeningBinPath = target.getAbsolutePath(); selectedOpeningFileName = name + " · BIN book loaded (takes priority over PGN while selected)"; openingFileText.setText(selectedOpeningFileName); saveSetup(); Toast.makeText(this, "Polyglot BIN book selected", Toast.LENGTH_LONG).show(); });
+                } catch (Exception e) { runOnUiThread(() -> Toast.makeText(this, "Could not read BIN book: " + e.getMessage(), Toast.LENGTH_LONG).show()); }
+            }, "BIN-book-loader").start();
+            return;
+        }
         if (requestCode != REQUEST_OPENING_PGN || resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         try {
@@ -1226,6 +1216,7 @@ public final class TournamentActivity extends Activity {
                 final String name = queryDisplayName(uri);
                 runOnUiThread(() -> {
                     selectedOpeningPgn = pgn;
+                    selectedOpeningBinPath = "";
                     selectedOpeningFileName = name + " · PGN book loaded (contents are not displayed)";
                     openingFileText.setText(selectedOpeningFileName);
                     Toast.makeText(this, "PGN book selected. Choose the starting game number below.", Toast.LENGTH_LONG).show();
@@ -1312,13 +1303,9 @@ public final class TournamentActivity extends Activity {
     /** Flip player panels together with the board, preserving each side's data. */
     private void toggleTournamentFlip() {
         if (tournamentBoard != null) tournamentBoard.setFlipped(!tournamentBoard.flipped);
-        if (mirrorBoard != null) {
-            mirrorUiFlipped = !mirrorUiFlipped;
-            mirrorBoard.setFlipped(mirrorUiFlipped);
-        }
         tournamentUiFlipped = !tournamentUiFlipped;
         if (playPage == null || blackClockRow == null || whiteClockRow == null ||
-                blackAnalysisText == null || whiteAnalysisText == null || tournamentBoard == null) return;
+                blackAnalysisText == null || whiteAnalysisText == null) return;
         View boardFrame = (View) tournamentBoard.getParent();
         playPage.removeView(blackAnalysisText);
         playPage.removeView(blackClockRow);
@@ -1551,6 +1538,10 @@ public final class TournamentActivity extends Activity {
         try { maximumMoves = Integer.parseInt(drawMaximumInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
         try { ruleStartMove = Integer.parseInt(ruleStartMoveInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
         runner.configureDrawRules(drawRulesCheck.isChecked(), moveRule, repetitionRule, maximumMoves, ruleStartMove);
+        double evalDrawScore = 0.12; int evalDrawCondition = 6;
+        try { evalDrawScore = Double.parseDouble(evalDrawScoreInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
+        try { evalDrawCondition = Integer.parseInt(evalDrawConditionInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
+        runner.configureEvaluationDrawRule(evalDrawScore, evalDrawCondition);
         saveSetup();
         runner.start();
         applyTournamentKeepScreenOn();
