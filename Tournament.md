@@ -80,3 +80,17 @@ If timer controls are present in the Setup screen, check their current labels an
 ## Development notes
 
 The tournament activity and runner are coupled to DroidFish's chess model, engine lifecycle, and GUI. Porting tournament logic to another chess application should separate pairing/scheduling, time control, PGN persistence, engine adapters, and UI rendering. Avoid changing the engine search or adjudication logic while optimizing screen refreshes. Run a full Gradle build and device test before treating a source ZIP as release-ready.
+
+## Recent tournament-mode updates (October 2026)
+
+- **Opening PGN selection:** The setup field `Params Opening PGN — start from game number` selects the first PGN game to use. When **Repeat opening for paired color-reversal games** is enabled, games 1–2 use the selected opening, games 3–4 use the next opening, games 5–6 use the following opening, and so on. The setup field updates as each game begins to show the opening number assigned to that pair. When paired repetition is disabled, games advance through PGN openings individually.
+- **Polyglot BIN books:** The setup can select a Polyglot `.bin` opening book. The runner applies book moves from the selected book when configured; PGN opening selection is used when no BIN book is selected.
+- **Opening length:** PGN opening plies can be set to `0` for the full main line or a positive number to cap the number of half-moves applied.
+- **Mirror board:** The mirror view provides navigation through the positions recorded during the current game, clickable move notation, board flipping, clocks, engine names, and analysis display. Tapping a move is intended to review that position; pause the active tournament if prompted before navigating. Move-list tapping has been adjusted to reduce scroll-container touch interception.
+- **Tournament setup screen:** The separate **Open Game Viewer (PGN / Analysis)** entry has been removed from the tournament setup screen. This does not remove the tournament's own PGN recording or move-list display.
+- **Build workflow:** `.github/workflows/android-apk.yml` is configured for manual execution only (`workflow_dispatch`). Start it from GitHub **Actions → Build DroidFish CET Tournament APK → Run workflow**; pushes alone do not trigger this workflow.
+- **Other existing features retained:** Tournament formats and pairing, engine selection, time-control modes, PGN output and standings, automatic evaluation-based draw handling, timers, analysis arrows, and the existing tournament board controls remain part of the project. Their behavior should be confirmed on the target device after building.
+
+### Verification note
+
+Source changes and ZIP archive integrity checks are not substitutes for a successful Gradle build and on-device test. After installing a newly built APK, verify at least: (1) PGN opening progression across games 1–4 with paired repetition enabled, (2) tapping early, middle, and late moves on the mirror board, and (3) that the manual-only workflow builds and uploads the expected APK artifact.
