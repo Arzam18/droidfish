@@ -113,7 +113,6 @@ public final class TournamentActivity extends Activity {
     private String gameViewerEngineId = "";
     private int gameViewerSearchId = 50000;
     private final ArrayList<Move> gameViewerHints = new ArrayList<>();
-    private CheckBox disableScreenTimeoutCheck;
     private CheckBox drawRulesCheck;
     private EditText drawMoveRuleInput, drawRepetitionInput, drawMaximumInput, ruleStartMoveInput;
 
@@ -141,13 +140,6 @@ public final class TournamentActivity extends Activity {
         final String id, name;
         EngineChoice(String id, String name) { this.id = id; this.name = name; }
         @Override public String toString() { return name; }
-    }
-
-    private void applyTournamentKeepScreenOn() {
-        boolean keep = disableScreenTimeoutCheck != null && disableScreenTimeoutCheck.isChecked()
-                && runner != null && !runner.isFinished();
-        if (keep) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        else getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
     @Override public void onCreate(Bundle state) {
@@ -229,14 +221,6 @@ public final class TournamentActivity extends Activity {
         showTournamentArrowsCheck.setChecked(getPreferences(MODE_PRIVATE).getBoolean("tournamentThinkingArrows", true));
         showTournamentArrowsCheck.setOnCheckedChangeListener((button, checked) -> getPreferences(MODE_PRIVATE).edit().putBoolean("tournamentThinkingArrows", checked).apply());
         root.addView(showTournamentArrowsCheck, fullWidth());
-        disableScreenTimeoutCheck = new CheckBox(this);
-        disableScreenTimeoutCheck.setText("Disable Screen Timeout during tournament");
-        disableScreenTimeoutCheck.setChecked(getPreferences(MODE_PRIVATE).getBoolean("tournamentDisableScreenTimeout", false));
-        disableScreenTimeoutCheck.setOnCheckedChangeListener((button, checked) -> {
-            getPreferences(MODE_PRIVATE).edit().putBoolean("tournamentDisableScreenTimeout", checked).apply();
-            applyTournamentKeepScreenOn();
-        });
-        root.addView(disableScreenTimeoutCheck, fullWidth());
         autoWinEvalInput = field("Auto win evaluation threshold (pawns; 10 = ±10.00)", "10");
         root.addView(autoWinEvalInput, fullWidth());
         fastWinRuleCheck = new CheckBox(this);
@@ -335,7 +319,6 @@ public final class TournamentActivity extends Activity {
         frameParams.bottomMargin = dp(4);
         page.addView(boardFrame, frameParams);
         tournamentBoard = new TournamentChessBoard(this);
-        tournamentBoard.setDrawSquareLabels(android.preference.PreferenceManager.getDefaultSharedPreferences(this).getBoolean("drawSquareLabels", false));
         tournamentBoard.setClickable(false);
         tournamentBoard.setFocusable(false);
         tournamentBoard.highlightLastMove = true;
@@ -434,7 +417,7 @@ public final class TournamentActivity extends Activity {
             @Override protected void onMeasure(int w, int h) { int width=MeasureSpec.getSize(w); super.onMeasure(MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY)); }
         };
         LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(-1, -2); fp.topMargin=dp(4); fp.bottomMargin=dp(4); page.addView(frame, fp);
-        mirrorBoard = new TournamentChessBoard(this); mirrorBoard.setDrawSquareLabels(android.preference.PreferenceManager.getDefaultSharedPreferences(this).getBoolean("drawSquareLabels", false)); mirrorBoard.setClickable(false); mirrorBoard.setFocusable(false); mirrorBoard.highlightLastMove=true;
+        mirrorBoard = new TournamentChessBoard(this); mirrorBoard.setClickable(false); mirrorBoard.setFocusable(false); mirrorBoard.highlightLastMove=true;
         mirrorBoard.setPosition(new Position()); frame.addView(mirrorBoard, new FrameLayout.LayoutParams(-1,-1,android.view.Gravity.CENTER));
         mirrorWhiteClock = text("00:00.0"); mirrorWhiteClock.setTextSize(20);
         mirrorWhiteName = text("WHITE"); mirrorWhiteName.setTextSize(18); mirrorWhiteName.setGravity(android.view.Gravity.CENTER);
@@ -941,7 +924,6 @@ public final class TournamentActivity extends Activity {
         e.putString("setupOpeningStart", openingStartInput.getText().toString());
         e.putBoolean("setupRepeat", repeatOpeningCheck.isChecked());
         e.putBoolean("setupArrows", showTournamentArrowsCheck.isChecked());
-        e.putBoolean("tournamentDisableScreenTimeout", disableScreenTimeoutCheck != null && disableScreenTimeoutCheck.isChecked());
         e.putString("setupAutoWinEval", autoWinEvalInput.getText().toString());
         e.putBoolean("setupFastWin", fastWinRuleCheck.isChecked());
         e.putBoolean("setupDrawRules", drawRulesCheck != null && drawRulesCheck.isChecked());
@@ -963,7 +945,6 @@ public final class TournamentActivity extends Activity {
         limitInput.setText(p.getString("setupLimit", limitInput.getText().toString())); openingPliesInput.setText(p.getString("setupPlies", openingPliesInput.getText().toString()));
         openingStartInput.setText(p.getString("setupOpeningStart", openingStartInput.getText().toString())); repeatOpeningCheck.setChecked(p.getBoolean("setupRepeat", false));
         showTournamentArrowsCheck.setChecked(p.getBoolean("setupArrows", true));
-        if (disableScreenTimeoutCheck != null) disableScreenTimeoutCheck.setChecked(p.getBoolean("tournamentDisableScreenTimeout", false));
         autoWinEvalInput.setText(p.getString("setupAutoWinEval", "10"));
         fastWinRuleCheck.setChecked(p.getBoolean("setupFastWin", true));
         if (drawRulesCheck != null) drawRulesCheck.setChecked(p.getBoolean("setupDrawRules", true));
@@ -1436,7 +1417,14 @@ public final class TournamentActivity extends Activity {
                 catch (Exception e) { autoSaveError = e; }
                 final Exception savedError = autoSaveError;
                 runOnUiThread(() -> {
-                    String result = "Game " + (pairing.index + 1) + " finished: " + outcome;
+                    String resultText;
+                    switch (outcome) {
+                        case WHITE_WIN: resultText = "WHITE WINS"; break;
+                        case BLACK_WIN: resultText = "BLACK WINS"; break;
+                        case DRAW: resultText = "DRAW"; break;
+                        default: resultText = "GAME FINISHED"; break;
+                    }
+                    String result = "Game " + pairing.round + "." + pairing.gameNumber + " · " + resultText;
                     statusText.setText(result);
                     moveStatusText.setText(result);
                     standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
@@ -1472,7 +1460,6 @@ public final class TournamentActivity extends Activity {
         try { maximumMoves = Integer.parseInt(drawMaximumInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
         try { ruleStartMove = Integer.parseInt(ruleStartMoveInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
         runner.configureDrawRules(drawRulesCheck.isChecked(), moveRule, repetitionRule, maximumMoves, ruleStartMove);
-        applyTournamentKeepScreenOn();
         saveSetup();
         runner.start();
     }
