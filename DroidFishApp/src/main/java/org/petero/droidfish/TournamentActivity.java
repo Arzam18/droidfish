@@ -80,6 +80,7 @@ public final class TournamentActivity extends Activity {
     private String lastWhiteAnalysis = "Eval: —", lastBlackAnalysis = "Eval: —";
     private long lastWhiteTimeMs, lastBlackTimeMs;
     private CheckBox showTournamentArrowsCheck;
+    private CheckBox disableScreenTimeoutCheck;
     private Position latestPosition = new Position();
     private float touchDownX, touchDownY;
     private Button previousMoveButton, nextMoveButton;
@@ -152,6 +153,15 @@ public final class TournamentActivity extends Activity {
         uiHandler.post(clockRefresh);
     }
 
+    private void applyTournamentKeepScreenOn() {
+        boolean enabled = getPreferences(MODE_PRIVATE).getBoolean("tournamentDisableScreenTimeout", false);
+        if (enabled && runner != null) {
+            getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+    }
+
     private void buildUi() {
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -221,6 +231,14 @@ public final class TournamentActivity extends Activity {
         showTournamentArrowsCheck.setChecked(getPreferences(MODE_PRIVATE).getBoolean("tournamentThinkingArrows", true));
         showTournamentArrowsCheck.setOnCheckedChangeListener((button, checked) -> getPreferences(MODE_PRIVATE).edit().putBoolean("tournamentThinkingArrows", checked).apply());
         root.addView(showTournamentArrowsCheck, fullWidth());
+        disableScreenTimeoutCheck = new CheckBox(this);
+        disableScreenTimeoutCheck.setText("Disable Screen Timeout during tournament");
+        disableScreenTimeoutCheck.setChecked(getPreferences(MODE_PRIVATE).getBoolean("tournamentDisableScreenTimeout", false));
+        disableScreenTimeoutCheck.setOnCheckedChangeListener((button, checked) -> {
+            getPreferences(MODE_PRIVATE).edit().putBoolean("tournamentDisableScreenTimeout", checked).apply();
+            applyTournamentKeepScreenOn();
+        });
+        root.addView(disableScreenTimeoutCheck, fullWidth());
         autoWinEvalInput = field("Auto win evaluation threshold (pawns; 10 = ±10.00)", "10");
         root.addView(autoWinEvalInput, fullWidth());
         fastWinRuleCheck = new CheckBox(this);
@@ -924,6 +942,7 @@ public final class TournamentActivity extends Activity {
         e.putString("setupOpeningStart", openingStartInput.getText().toString());
         e.putBoolean("setupRepeat", repeatOpeningCheck.isChecked());
         e.putBoolean("setupArrows", showTournamentArrowsCheck.isChecked());
+        e.putBoolean("tournamentDisableScreenTimeout", disableScreenTimeoutCheck != null && disableScreenTimeoutCheck.isChecked());
         e.putString("setupAutoWinEval", autoWinEvalInput.getText().toString());
         e.putBoolean("setupFastWin", fastWinRuleCheck.isChecked());
         e.putBoolean("setupDrawRules", drawRulesCheck != null && drawRulesCheck.isChecked());
@@ -945,6 +964,7 @@ public final class TournamentActivity extends Activity {
         limitInput.setText(p.getString("setupLimit", limitInput.getText().toString())); openingPliesInput.setText(p.getString("setupPlies", openingPliesInput.getText().toString()));
         openingStartInput.setText(p.getString("setupOpeningStart", openingStartInput.getText().toString())); repeatOpeningCheck.setChecked(p.getBoolean("setupRepeat", false));
         showTournamentArrowsCheck.setChecked(p.getBoolean("setupArrows", true));
+        if (disableScreenTimeoutCheck != null) disableScreenTimeoutCheck.setChecked(p.getBoolean("tournamentDisableScreenTimeout", false));
         autoWinEvalInput.setText(p.getString("setupAutoWinEval", "10"));
         fastWinRuleCheck.setChecked(p.getBoolean("setupFastWin", true));
         if (drawRulesCheck != null) drawRulesCheck.setChecked(p.getBoolean("setupDrawRules", true));
@@ -1437,13 +1457,15 @@ public final class TournamentActivity extends Activity {
                     statusText.setText("Tournament complete");
                     moveStatusText.setText("TOURNAMENT COMPLETE");
                     standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
-                    runner = null; startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(runner != null);
+                    runner = null; applyTournamentKeepScreenOn(); startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(runner != null);
                 });
             }
             @Override public void onError(String message, Throwable error) {
                 runOnUiThread(() -> {
                     statusText.setText("Tournament error: " + message + (error == null ? "" : " (" + error.getMessage() + ")"));
                     if (runner != null) { runner.stop(); runner = null; }
+        applyTournamentKeepScreenOn();
+                    applyTournamentKeepScreenOn();
                     startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(runner != null);
                 });
             }
@@ -1462,6 +1484,7 @@ public final class TournamentActivity extends Activity {
         runner.configureDrawRules(drawRulesCheck.isChecked(), moveRule, repetitionRule, maximumMoves, ruleStartMove);
         saveSetup();
         runner.start();
+        applyTournamentKeepScreenOn();
     }
 
     private int countFullMoves(String pgn) {
