@@ -572,9 +572,22 @@ public final class TournamentActivity extends Activity {
             }, sanStart, matcher.end(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
         mirrorMovesText.setText(styled);
-        mirrorMovesText.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
+        mirrorMovesText.setMovementMethod(new android.text.method.LinkMovementMethod() {
+            @Override public boolean onTouchEvent(android.widget.TextView widget, android.text.Spannable buffer,
+                                                  android.view.MotionEvent event) {
+                boolean hasLinks = buffer.getSpans(0, buffer.length(), android.text.style.ClickableSpan.class).length > 0;
+                if (hasLinks && widget.getParent() != null && event.getAction() == android.view.MotionEvent.ACTION_DOWN)
+                    widget.getParent().requestDisallowInterceptTouchEvent(true);
+                boolean handled = super.onTouchEvent(widget, buffer, event);
+                if (event.getAction() == android.view.MotionEvent.ACTION_UP || event.getAction() == android.view.MotionEvent.ACTION_CANCEL) {
+                    if (widget.getParent() != null) widget.getParent().requestDisallowInterceptTouchEvent(false);
+                }
+                return handled;
+            }
+        });
         mirrorMovesText.setLinksClickable(true);
-        mirrorMovesText.setFocusable(false);
+        mirrorMovesText.setFocusable(true);
+        mirrorMovesText.setTextIsSelectable(false);
         mirrorMovesText.setHighlightColor(android.graphics.Color.TRANSPARENT);
     }
 
@@ -1436,7 +1449,12 @@ public final class TournamentActivity extends Activity {
                     mirrorTcLabel = String.format(java.util.Locale.US, "%s+%s", baseLabel, incrementLabel);
                     if (mirrorHeaderText != null) mirrorHeaderText.setText(mirrorHeaderLabel());
                     statusText.setText("Game " + currentGameNumber + "/" + currentGameTotal + " " + tournament.title());
-                    if (openingStartInput != null && tournament.repeatOpening()) openingStartInput.setText(String.valueOf(tournament.openingStartIndex() + Math.max(0, (pairing.gameNumber - 1) / 2)));
+                    if (openingStartInput != null && tournament.repeatOpening()) {
+                        // Paired color-reversal games use one PGN opening per pair:
+                        // games 1-2 use start, games 3-4 use start+1, etc.
+                        int openingNumber = tournament.openingStartIndex() + Math.max(0, pairing.index / 2);
+                        openingStartInput.setText(String.valueOf(openingNumber));
+                    }
                     currentPgnMoves = "";
                     mirrorPositions.clear(); mirrorPly = -1; mirrorNavigationAllowed = false;
                     mirrorPositions.add(new Position(latestPosition));
