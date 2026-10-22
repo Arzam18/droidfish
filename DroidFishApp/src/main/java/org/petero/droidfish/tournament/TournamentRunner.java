@@ -360,7 +360,10 @@ public final class TournamentRunner {
         if (!tournament.openingBinPath().trim().isEmpty()) {
             applyBinOpening(tournament.openingBinPath());
         } else if (!openingPgn.trim().isEmpty()) {
-            int openingIndex = (openingStartIndex - 1) + (repeatOpening ? Math.max(0, (pairing.gameNumber - 1) / 2) : pairing.index);
+            // When paired color-reversal is enabled, keep the same opening for two
+            // consecutive games, then advance to the next PGN game for the next pair.
+            int openingIndex = (openingStartIndex - 1) + (repeatOpening
+                    ? Math.max(0, pairing.index / 2) : pairing.index);
             String selectedOpening = PgnOpeningBook.gameAt(openingPgn, openingIndex);
             currentOpeningName = PgnOpeningBook.tagValue(selectedOpening, "Opening");
             if (currentOpeningName.isEmpty()) currentOpeningName = PgnOpeningBook.tagValue(selectedOpening, "ECO");
