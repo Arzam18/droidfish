@@ -500,14 +500,14 @@ public final class TournamentRunner {
             String eval = "n/a", depth = "n/a", nodes = "n/a", nps = "n/a", wdl = "";
             if (analysis != null) {
                 java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                        "Eval:\s*(.*?)\s+Depth:\s*(.*?)\s+Nodes:\s*(.*?)\s+NPS:\s*(\S+)")
+                        "Eval:\\s*(.*?)\\s+Depth:\\s*(.*?)\\s+Nodes:\\s*(.*?)\\s+NPS:\\s*(\\S+)")
                         .matcher(analysis.replace('\n', ' '));
                 if (m.find()) {
                     eval = m.group(1).trim(); depth = m.group(2).trim();
                     nodes = m.group(3).trim(); nps = m.group(4).trim();
                 }
                 java.util.regex.Matcher w = java.util.regex.Pattern.compile(
-                        "W:\s*(\d+)%\s+D:\s*(\d+)%\s+L:\s*(\d+)%").matcher(analysis);
+                        "W:\\s*(\\d+)%\\s+D:\\s*(\\d+)%\\s+L:\\s*(\\d+)%").matcher(analysis);
                 if (w.find()) wdl = " W:" + w.group(1) + "% D:" + w.group(2) + "% L:" + w.group(3) + "%";
             }
             long remaining = clock == null ? 0 : clock.remainingMs(whiteMoved);
