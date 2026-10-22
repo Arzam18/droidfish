@@ -1340,7 +1340,8 @@ public final class TournamentActivity extends Activity {
                     mirrorPositions.clear(); mirrorPly = -1; mirrorNavigationAllowed = false;
                     mirrorPositions.add(new Position(latestPosition));
                     whiteHintMove = null; blackHintMove = null;
-                    if (tournamentBoard != null) tournamentBoard.setMoveHints(null);
+                    if (tournamentBoard != null) { tournamentBoard.setMoveHints(null); tournamentBoard.setSelection(-1); }
+                    if (mirrorBoard != null) mirrorBoard.setSelection(-1);
                     moveStatusText.setText("PGN: —");
                     if (openingText != null) openingText.setText("Opening: Starting position");
                     if (whiteMoveTimeText != null) whiteMoveTimeText.setText("—");
@@ -1353,6 +1354,13 @@ public final class TournamentActivity extends Activity {
             @Override public void onPositionChanged(Position position, boolean whiteToMove,
                                                     long whiteTimeMs, long blackTimeMs,
                                                     String whiteName, String blackName, String pgnMoves) {
+                onPositionChanged(position, whiteToMove, whiteTimeMs, blackTimeMs, whiteName, blackName, pgnMoves, null);
+            }
+            @Override public void onPositionChanged(Position position, boolean whiteToMove,
+                                                    long whiteTimeMs, long blackTimeMs,
+                                                    String whiteName, String blackName, String pgnMoves,
+                                                    org.petero.droidfish.gamelogic.Move lastMove) {
+                final org.petero.droidfish.gamelogic.Move moveToHighlight = lastMove;
                 runOnUiThread(() -> {
                     latestPosition = new Position(position);
                     whiteHintMove = null;
@@ -1363,7 +1371,14 @@ public final class TournamentActivity extends Activity {
                     currentPgnMoves = pgnMoves == null ? "" : pgnMoves;
                     if (mirrorPositions.isEmpty() || !samePosition(mirrorPositions.get(mirrorPositions.size()-1), position)) mirrorPositions.add(new Position(position));
                     if (isMirrorShowing() && mirrorPly < 0) syncMirrorFromLive();
-                    if (tournamentBoard != null && !isMirrorShowing()) tournamentBoard.setPosition(position);
+                    if (tournamentBoard != null && !isMirrorShowing()) {
+                        tournamentBoard.setPosition(position);
+                        tournamentBoard.setSelection(tournamentBoard.highlightLastMove && moveToHighlight != null ? moveToHighlight.to : -1);
+                    }
+                    if (mirrorBoard != null && isMirrorShowing()) {
+                        mirrorBoard.setPosition(position);
+                        mirrorBoard.setSelection(mirrorBoard.highlightLastMove && moveToHighlight != null ? moveToHighlight.to : -1);
+                    }
                     whiteClockText.setText(formatClock(whiteTimeMs));
                     blackClockText.setText(formatClock(blackTimeMs));
                     whiteClockText.setAlpha(whiteToMove ? 1.0f : 0.72f);
@@ -1447,8 +1462,11 @@ public final class TournamentActivity extends Activity {
                         case DRAW: resultText = "DRAW"; break;
                         default: resultText = "GAME FINISHED"; break;
                     }
-                    String reasonText = reason == null || reason.trim().isEmpty() ? "game result" : reason.trim();
-                    String result = "Game " + pairing.round + "." + pairing.gameNumber + " · " + resultText + " · " + reasonText;
+                    String reasonText = reason == null || reason.trim().isEmpty() ? "Game result" : reason.trim();
+                    if (!reasonText.isEmpty()) reasonText = Character.toUpperCase(reasonText.charAt(0)) + reasonText.substring(1);
+                    int progress = pairing.index + 1;
+                    int total = tournament.pairings().size();
+                    String result = "Game " + progress + "/" + total + " " + resultText + ": " + reasonText;
                     statusText.setText(result);
                     moveStatusText.setText(result);
                     // The normal game-start and position callbacks update these labels
