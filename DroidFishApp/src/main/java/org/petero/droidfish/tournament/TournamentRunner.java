@@ -4,6 +4,8 @@ import android.util.Pair;
 import org.petero.droidfish.EngineOptions;
 import org.petero.droidfish.PGNOptions;
 import org.petero.droidfish.book.BookOptions;
+import org.petero.droidfish.book.TournamentBinBook;
+import org.petero.droidfish.gamelogic.TextIO;
 import org.petero.droidfish.engine.DroidComputerPlayer;
 import org.petero.droidfish.gamelogic.Game;
 import org.petero.droidfish.gamelogic.GameTree;
@@ -87,11 +89,21 @@ public final class TournamentRunner {
     private int drawRepetitionLimit = 3;
     private int drawMaximumFullMoves = 160;
     private int ruleStartFullMove = 1;
+    private double evalDrawScore = 0.12;
+    private int evalDrawCondition = 6;
+    private int evalDrawConsecutive = 0;
+    private int evalDrawLastFullMove = -1;
 
     /** Configure tournament-only automatic draw adjudication before start(). */
     public synchronized void configureDrawRules(boolean enabled, int moveRule, int repetitionCount, int maximumFullMoves) {
         configureDrawRules(enabled, moveRule, repetitionCount, maximumFullMoves, 1);
     }
+    public synchronized void configureEvaluationDrawRule(double scorePawns, int conditionFullMoves) {
+        if (game != null || pairing != null) throw new IllegalStateException("Draw rules must be configured before starting the tournament");
+        evalDrawScore = Double.isFinite(scorePawns) && scorePawns >= 0 ? Math.min(100.0, scorePawns) : 0.12;
+        evalDrawCondition = Math.max(1, Math.min(10000, conditionFullMoves));
+    }
+
     public synchronized void configureDrawRules(boolean enabled, int moveRule, int repetitionCount, int maximumFullMoves, int startFullMove) {
         if (game != null || pairing != null) throw new IllegalStateException("Draw rules must be configured before starting the tournament");
         drawRulesEnabled = enabled;
@@ -176,7 +188,7 @@ public final class TournamentRunner {
         // A PGN opening book is authoritative for tournament starts. Do not let
         // DroidFish's own Polyglot/CTG/ECO/internal book replace the selected line.
         BookOptions tournamentBookOptions = new BookOptions(this.bookOptions);
-        if (!this.openingPgn.trim().isEmpty()) {
+        if (!this.openingPgn.trim().isEmpty() || !tournament.openingBinPath().trim().isEmpty()) {
             tournamentBookOptions.filename = "";
             tournamentBookOptions.maxLength = 0;
             tournamentBookOptions.preferMainLines = false;
@@ -299,11 +311,30 @@ public final class TournamentRunner {
         reviewPly = -1;
     }
 
+    private void applyBinOpening(String path) {
+        currentOpeningName = "Polyglot BIN opening";
+        game.tree.setTournamentOpening(currentOpeningName);
+        TournamentBinBook binBook = new TournamentBinBook(path);
+        int limit = openingPlies <= 0 ? 256 : openingPlies;
+        for (int ply = 0; ply < limit; ply++) {
+            Move move = binBook.choose(game);
+            if (move == null) break;
+            String san = TextIO.moveToString(game.currPos(), move, false, false);
+            Pair<Boolean, Move> result = game.processString(san);
+            if (result == null || !Boolean.TRUE.equals(result.first) || result.second == null) break;
+            listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove, 0, 0,
+                    whiteEngine.displayName, blackEngine.displayName, currentPgnMoves(), game.getLastMove());
+            try { Thread.sleep(250); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            if (game.getGameState() != Game.GameState.ALIVE) break;
+        }
+    }
+
     private void startNextGame() {
         if (stopped || finished || paused) return;
         pairing = tournament.current();
         latestWhiteEvalPawns = Double.NaN;
         latestBlackEvalPawns = Double.NaN;
+        evalDrawConsecutive = 0; evalDrawLastFullMove = -1;
         if (pairing == null) {
             finished = true;
             whitePlayer.shutdownEngine();
@@ -326,7 +357,9 @@ public final class TournamentRunner {
                 eventType, (baseTimeMs / 1000) + "+" + String.format(java.util.Locale.US, "%g", incrementMs / 1000.0));
         clock = new CetClock(baseTimeMs, incrementMs);
         game.tree.setTournamentOpening(currentOpeningName);
-        if (!openingPgn.trim().isEmpty()) {
+        if (!tournament.openingBinPath().trim().isEmpty()) {
+            applyBinOpening(tournament.openingBinPath());
+        } else if (!openingPgn.trim().isEmpty()) {
             int openingIndex = (openingStartIndex - 1) + (repeatOpening ? Math.max(0, (pairing.gameNumber - 1) / 2) : pairing.index);
             String selectedOpening = PgnOpeningBook.gameAt(openingPgn, openingIndex);
             currentOpeningName = PgnOpeningBook.tagValue(selectedOpening, "Opening");
@@ -665,6 +698,7 @@ public final class TournamentRunner {
                     double evalPawns = whitePerspectiveScore / 100.0;
                     if (white) latestWhiteEvalPawns = evalPawns; else latestBlackEvalPawns = evalPawns;
                     checkFastWinRule();
+                    checkEvaluationDrawRule();
                 }
                 String scoreText = pv.isMate ? (whitePerspectiveScore >= 0 ? "+M" : "-M") + Math.abs(whitePerspectiveScore) :
                         String.format(java.util.Locale.US, "%+.2f", whitePerspectiveScore / 100.0);
@@ -686,6 +720,27 @@ public final class TournamentRunner {
                 publishAnalysis();
             }
         }
+        private void checkEvaluationDrawRule() {
+            if (!drawRulesEnabled || stopped || finished || paused || game == null || pairing == null) return;
+            double w = latestWhiteEvalPawns, b = latestBlackEvalPawns;
+            if (!Double.isFinite(w) || !Double.isFinite(b)) return;
+            int fullMove = game.currPos().fullMoveCounter;
+            if (fullMove < ruleStartFullMove || fullMove == evalDrawLastFullMove) return;
+            // Count one completed full move only when both independent engine evaluations are in range.
+            if (Math.abs(w) <= evalDrawScore && Math.abs(b) <= evalDrawScore) evalDrawConsecutive++;
+            else evalDrawConsecutive = 0;
+            evalDrawLastFullMove = fullMove;
+            if (evalDrawConsecutive < evalDrawCondition) return;
+            synchronized (TournamentRunner.this) {
+                if (stopped || finished || paused || game == null || pairing == null) return;
+                turnGeneration++; if (clock != null) clock.pause();
+                whitePlayer.stopSearch(); blackPlayer.stopSearch(); humanAdjudication = false;
+                game.adjudicateTournament("1/2-1/2");
+                finishCurrentGame(TournamentManager.Outcome.DRAW, String.format(java.util.Locale.US,
+                        "evaluation draw: both engines within ±%.2f for %d consecutive full moves", evalDrawScore, evalDrawConsecutive));
+            }
+        }
+
         private void checkFastWinRule() {
             if (!fastWinEnabled || stopped || finished || paused || game == null || pairing == null) return;
             if (game.currPos().fullMoveCounter < ruleStartFullMove) return;

@@ -57,6 +57,7 @@ public final class TournamentManager {
     private TimeMode timeMode = TimeMode.CLOCK;
     private int limitValue = 30;
     private String openingPgn = "";
+    private String openingBinPath = "";
     private int openingPlies;
     private int openingStartIndex = 1;
     private boolean repeatOpening;
@@ -119,6 +120,7 @@ public final class TournamentManager {
         baseTimeMs = root.optLong("baseTimeMs", 30000);
         incrementMs = root.optLong("incrementMs", 500);
         openingPgn = root.optString("openingPgn", "");
+        openingBinPath = root.optString("openingBinPath", "");
         openingPlies = root.optInt("openingPlies", 0);
         repeatOpening = root.optBoolean("repeatOpening", false);
         openingStartIndex = Math.max(1, root.optInt("openingStartIndex", 1));
@@ -223,6 +225,8 @@ public final class TournamentManager {
     public synchronized TimeMode timeMode() { return timeMode; }
     public synchronized int limitValue() { return limitValue; }
     public synchronized String openingPgn() { return openingPgn; }
+    public synchronized String openingBinPath() { return openingBinPath; }
+    public synchronized void setOpeningBinPath(String path) { openingBinPath = path == null ? "" : path; }
     public synchronized int openingPlies() { return openingPlies; }
     public synchronized int openingStartIndex() { return openingStartIndex; }
     public synchronized boolean repeatOpening() { return repeatOpening; }
@@ -270,7 +274,7 @@ public final class TournamentManager {
         JSONObject root = new JSONObject(); root.put("title", title); root.put("format", format.name()); root.put("gamesPerPair", gamesPerPair);
         root.put("baseTimeMs", baseTimeMs); root.put("incrementMs", incrementMs);
         root.put("timeMode", timeMode.name()); root.put("limitValue", limitValue);
-        root.put("openingPgn", openingPgn); root.put("openingPlies", openingPlies); root.put("openingStartIndex", openingStartIndex); root.put("repeatOpening", repeatOpening);
+        root.put("openingPgn", openingPgn); root.put("openingBinPath", openingBinPath); root.put("openingPlies", openingPlies); root.put("openingStartIndex", openingStartIndex); root.put("repeatOpening", repeatOpening);
         JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); ea.put(o); } root.put("engines", ea);
         JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); pa.put(o); } root.put("pairings", pa);
         try (FileOutputStream out = context.openFileOutput(fileName, Context.MODE_PRIVATE)) { out.write(root.toString().getBytes(Charset.forName("UTF-8"))); }
