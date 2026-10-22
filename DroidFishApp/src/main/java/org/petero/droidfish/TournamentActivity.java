@@ -1430,6 +1430,9 @@ public final class TournamentActivity extends Activity {
                 });
             }
             @Override public void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn) {
+                onGameFinished(pairing, outcome, pgn, "adjudication");
+            }
+            @Override public void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn, String reason) {
                 // Persist the cumulative PGN immediately on the callback thread, not only in a
                 // queued UI update: the Activity may be backgrounded or destroyed right now.
                 Exception autoSaveError = null;
@@ -1444,7 +1447,8 @@ public final class TournamentActivity extends Activity {
                         case DRAW: resultText = "DRAW"; break;
                         default: resultText = "GAME FINISHED"; break;
                     }
-                    String result = "Game " + pairing.round + "." + pairing.gameNumber + " · " + resultText;
+                    String reasonText = reason == null || reason.trim().isEmpty() ? "game result" : reason.trim();
+                    String result = "Game " + pairing.round + "." + pairing.gameNumber + " · " + resultText + " · " + reasonText;
                     statusText.setText(result);
                     moveStatusText.setText(result);
                     standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
