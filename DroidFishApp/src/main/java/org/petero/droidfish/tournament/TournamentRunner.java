@@ -538,9 +538,9 @@ public final class TournamentRunner {
 
     private void notifyPosition() {
         if (game == null || pairing == null || whiteEngine == null || blackEngine == null) return;
-        // Require fresh evaluations from both engines for every position before fast adjudication.
-        latestWhiteEvalPawns = Double.NaN;
-        latestBlackEvalPawns = Double.NaN;
+        // Keep each engine's most recent score across moves. Only the side to move is
+        // searching at a time, so clearing both scores here would make agreement
+        // impossible: the inactive engine cannot produce a fresh score for this ply.
         CetClock activeClock = clock;
         long whiteMs = activeClock == null || tournament.timeMode() != TournamentManager.TimeMode.CLOCK ? 0 : activeClock.remainingMs(true);
         long blackMs = activeClock == null || tournament.timeMode() != TournamentManager.TimeMode.CLOCK ? 0 : activeClock.remainingMs(false);
@@ -688,6 +688,8 @@ public final class TournamentRunner {
             double blackEval = latestBlackEvalPawns;
             if (Double.isNaN(whiteEval) || Double.isNaN(blackEval)) return;
             String result = null;
+            // The evaluations are converted to White's perspective above. Both engines
+            // must independently reach the configured threshold or exceed it (>= N).
             if (whiteEval >= autoWinThreshold && blackEval >= autoWinThreshold) result = "1-0";
             else if (whiteEval <= -autoWinThreshold && blackEval <= -autoWinThreshold) result = "0-1";
             if (result == null) return;
@@ -700,7 +702,10 @@ public final class TournamentRunner {
                 humanAdjudication = false;
                 game.adjudicateTournament(result);
                 TournamentManager.Outcome outcome = "1-0".equals(result) ? TournamentManager.Outcome.WHITE_WIN : TournamentManager.Outcome.BLACK_WIN;
-                finishCurrentGame(outcome, "10-evaluation fast-win rule");
+                finishCurrentGame(outcome, String.format(java.util.Locale.US,
+                        "both engines agree at %+.2f or better (threshold %+.2f)",
+                        "1-0".equals(result) ? Math.min(whiteEval, blackEval) : Math.max(whiteEval, blackEval),
+                        "1-0".equals(result) ? autoWinThreshold : -autoWinThreshold));
             }
         }
         private String compactCount(long value) {
