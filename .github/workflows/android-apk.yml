@@ -2,18 +2,6 @@ name: Build DroidFish CET Tournament APK
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'DroidFishApp/**'
-      - 'CuckooChessEngine/**'
-      - 'CuckooChess/**'
-      - 'CuckooChessApp/**'
-      - 'EngineServer/**'
-      - 'build.gradle'
-      - 'settings.gradle'
-      - 'gradle/**'
-      - 'gradlew'
-      - '.github/workflows/android-apk.yml'
 
 permissions:
   contents: read
