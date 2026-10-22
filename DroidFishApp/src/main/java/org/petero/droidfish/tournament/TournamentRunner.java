@@ -157,6 +157,8 @@ public final class TournamentRunner {
         this.autoWinThreshold = autoWinThreshold > 0.0 && !Double.isInfinite(autoWinThreshold) && !Double.isNaN(autoWinThreshold) ? autoWinThreshold : 10.0;
         this.fastWinEnabled = fastWinEnabled;
         pgnOptions = new PGNOptions();
+        // Tournament move comments are part of the exported record, not optional UI comments.
+        pgnOptions.exp.comments = true;
         whitePlayer = new DroidComputerPlayer(new EngineListener(true));
         blackPlayer = new DroidComputerPlayer(new EngineListener(false));
         whitePlayer.setEngineOptions(this.engineOptions);
@@ -492,36 +494,28 @@ public final class TournamentRunner {
     private void addMoveAnalysisComment(boolean whiteMoved, long moveMs) {
         try {
             android.util.Pair<java.util.List<GameTree.Node>, Integer> list = game.tree.getMoveList();
-            if (list.first.isEmpty()) return;
+            if (list == null || list.first == null || list.first.isEmpty()) return;
             GameTree.Node node = list.first.get(list.first.size() - 1);
             String analysis = whiteMoved ? latestWhiteAnalysis : latestBlackAnalysis;
-            String eval = "---", depth = "---", nodes = "---", nps = "---", wdl = "", pv = "";
-            String[] lines = (analysis == null ? "" : analysis).split("\\r?\\n");
-            if (lines.length > 0) {
+            String eval = "n/a", depth = "n/a", nodes = "n/a", nps = "n/a", wdl = "";
+            if (analysis != null) {
                 java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                        "Eval:\\s*(.*?)\\s+Depth:\\s*(.*?)\\s+Nodes:\\s*(.*?)\\s+NPS:\\s*(\\S+)")
-                        .matcher(lines[0]);
+                        "Eval:\s*(.*?)\s+Depth:\s*(.*?)\s+Nodes:\s*(.*?)\s+NPS:\s*(\S+)")
+                        .matcher(analysis.replace('\n', ' '));
                 if (m.find()) {
                     eval = m.group(1).trim(); depth = m.group(2).trim();
                     nodes = m.group(3).trim(); nps = m.group(4).trim();
                 }
-            }
-            for (int i = 1; i < lines.length; i++) {
-                String line = lines[i].trim();
-                if (line.startsWith("W:") && wdl.isEmpty()) wdl = line;
-                else if (!line.isEmpty() && !line.startsWith("Book:")) {
-                    if (!pv.isEmpty()) pv += " | ";
-                    pv += line;
-                }
+                java.util.regex.Matcher w = java.util.regex.Pattern.compile(
+                        "W:\s*(\d+)%\s+D:\s*(\d+)%\s+L:\s*(\d+)%").matcher(analysis);
+                if (w.find()) wdl = " W:" + w.group(1) + "% D:" + w.group(2) + "% L:" + w.group(3) + "%";
             }
             long remaining = clock == null ? 0 : clock.remainingMs(whiteMoved);
-            StringBuilder comment = new StringBuilder("Eval:").append(eval)
-                    .append(" Depth:").append(depth).append(" Nodes:").append(nodes)
-                    .append(" NPS:").append(nps).append(" Clock:").append(clockText(remaining))
-                    .append(" Time:").append(clockText(moveMs));
-            if (!wdl.isEmpty()) comment.append(" ").append(wdl);
-            if (!pv.isEmpty()) comment.append(" PV:").append(pv);
-            node.setPostComment(comment.toString());
+            String comment = "Eval: " + eval + " Depth: " + depth + " Nodes: " + nodes
+                    + " NPS: " + nps + " Clock: " + clockText(remaining)
+                    + " Time: " + clockText(moveMs) + wdl;
+            // Do not include the engine's PV/variation in the PGN comment.
+            node.setPostComment(comment);
         } catch (RuntimeException ignored) { }
     }
 
@@ -586,7 +580,7 @@ public final class TournamentRunner {
         pairing = null;
         listener.onGameFinished(completed, outcome, pgn);
         // Leave the result visible long enough to be noticed before advancing the schedule.
-        try { Thread.sleep(1000); }
+        try { Thread.sleep(500); }
         catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         if (!stopped && !finished && !paused) startNextGame();
     }
