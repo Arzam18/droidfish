@@ -1,4 +1,4 @@
-name: Build DroidFish CET Tournament APK
+name: Build DroidFishTournament
 
 on:
   workflow_dispatch:
