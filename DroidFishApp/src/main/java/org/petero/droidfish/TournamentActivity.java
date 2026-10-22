@@ -1451,6 +1451,11 @@ public final class TournamentActivity extends Activity {
                     String result = "Game " + pairing.round + "." + pairing.gameNumber + " · " + resultText + " · " + reasonText;
                     statusText.setText(result);
                     moveStatusText.setText(result);
+                    // The normal game-start and position callbacks update these labels
+                    // immediately after the 500 ms inter-game pause. Announce the result
+                    // independently so it is actually visible to the user.
+                    android.widget.Toast.makeText(TournamentActivity.this, result,
+                            android.widget.Toast.LENGTH_LONG).show();
                     standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
                     if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
                     if (savedError != null) statusText.setText(result + " · PGN auto-save failed: " + savedError.getMessage());
