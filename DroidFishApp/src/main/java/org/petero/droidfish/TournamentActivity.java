@@ -129,6 +129,10 @@ public final class TournamentActivity extends Activity {
     private EditText eventTimerMinutesInput, heatPauseMinutesInput, heatPlayMinutesInput;
     private long eventStartElapsedNs = 0L;
     private long eventAccumulatedMs = 0L;
+    // Tournament-wide elapsed time is separate from Timer 1 session time.
+    private long tournamentElapsedAccumulatedMs = 0L;
+    private long tournamentElapsedStartNs = 0L;
+    private long lastTournamentElapsedSaveNs = 0L;
     private long eventLastResumeNs = 0L;
     private boolean eventTimerHomeTriggered = false;
     private boolean heatCycleEnabled = false;
@@ -842,6 +846,8 @@ public final class TournamentActivity extends Activity {
                         // Activity underneath it so the current game and engine state survive.
                         if (runner != null && !runner.isPaused()) {
                             runner.pause();
+                            freezeTournamentElapsedClock();
+                            freezeEventElapsedClock();
                             autoPaused = true;
                             if (playPauseButton != null) playPauseButton.setText("P");
                             if (moveStatusText != null) moveStatusText.setText("PAUSED · Return to tournament to continue");
@@ -860,7 +866,7 @@ public final class TournamentActivity extends Activity {
 
     private void showStandingsDialog() {
         try {
-            TournamentManager tournament = TournamentManager.restore(this);
+            TournamentManager tournament = activeTournamentManager != null ? activeTournamentManager : TournamentManager.restore(this);
             final String standings = formatStandings(tournament.standings(), tournament.engines());
             new AlertDialog.Builder(this).setTitle("Standings " + completedGameCount(tournament) + "/" + tournament.pairings().size())
                     .setMessage(standings)
@@ -893,7 +899,7 @@ public final class TournamentActivity extends Activity {
 
     private void showScheduleDialog() {
         try {
-            TournamentManager tournament = TournamentManager.restore(this);
+            TournamentManager tournament = activeTournamentManager != null ? activeTournamentManager : TournamentManager.restore(this);
             List<TournamentManager.Engine> engines = tournament.engines();
             StringBuilder out = new StringBuilder();
             for (TournamentManager.Pairing pairing : tournament.pairings()) {
@@ -1060,7 +1066,7 @@ public final class TournamentActivity extends Activity {
     private String mirrorHeaderLabel() {
         return "Game " + (currentGameNumber == 0 ? "—" : currentGameNumber) + "/" +
                 (currentGameTotal == 0 ? "—" : currentGameTotal) +
-                "  TC " + mirrorTcLabel + "  T " + formatElapsedSeconds(currentEventElapsedMs());
+                "  TC " + mirrorTcLabel + "  T " + formatElapsedSeconds(currentTournamentElapsedMs());
     }
 
     private String formatElapsedTenths(long ms) {
@@ -1078,6 +1084,31 @@ public final class TournamentActivity extends Activity {
     private long currentEventElapsedMs() {
         if (eventStartElapsedNs == 0L) return eventAccumulatedMs;
         return eventAccumulatedMs + Math.max(0L, (System.nanoTime() - eventStartElapsedNs) / 1_000_000L);
+    }
+
+    private long currentTournamentElapsedMs() {
+        if (tournamentElapsedStartNs == 0L) return tournamentElapsedAccumulatedMs;
+        return tournamentElapsedAccumulatedMs + Math.max(0L, (System.nanoTime() - tournamentElapsedStartNs) / 1_000_000L);
+    }
+
+    private void freezeTournamentElapsedClock() {
+        if (tournamentElapsedStartNs != 0L) {
+            tournamentElapsedAccumulatedMs = currentTournamentElapsedMs();
+            tournamentElapsedStartNs = 0L;
+        }
+        persistTournamentElapsedTime();
+    }
+
+    private void resumeTournamentElapsedClock() {
+        if (tournamentElapsedStartNs == 0L) tournamentElapsedStartNs = System.nanoTime();
+    }
+
+    private void persistTournamentElapsedTime() {
+        TournamentManager t = activeTournamentManager;
+        if (t == null) return;
+        t.setTournamentElapsedMs(currentTournamentElapsedMs());
+        try { t.save(); } catch (Exception ignored) { }
+        lastTournamentElapsedSaveNs = System.nanoTime();
     }
 
     private void restoreAdvancedTimerSettings() {
@@ -1143,6 +1174,8 @@ public final class TournamentActivity extends Activity {
         if (r == null || r.isFinished() || r.isStopped()) return;
         long now = System.nanoTime();
         if (!r.isPaused()) {
+            resumeTournamentElapsedClock();
+            if (lastTournamentElapsedSaveNs == 0L || now - lastTournamentElapsedSaveNs >= 5_000_000_000L) persistTournamentElapsedTime();
             if (eventLastResumeNs == 0L) resumeEventElapsedClock();
             if (heatCycleEnabled && !heatCooling && heatLastResumeNs != 0L) {
                 heatPlayAccumulatedMs += Math.max(0L, (now - heatLastResumeNs) / 1_000_000L);
@@ -1152,6 +1185,7 @@ public final class TournamentActivity extends Activity {
                     heatCooling = true;
                     heatPhaseStartNs = now;
                     heatLastResumeNs = 0L;
+                    freezeTournamentElapsedClock();
                     freezeEventElapsedClock();
                     if (playPauseButton != null) playPauseButton.setText("Play");
                     if (moveStatusText != null) moveStatusText.setText("AUTO PAUSE · Cooling interval");
@@ -1163,6 +1197,7 @@ public final class TournamentActivity extends Activity {
                 heatPhaseStartNs = 0L;
                 heatPlayAccumulatedMs = 0L;
                 heatLastResumeNs = now;
+                resumeTournamentElapsedClock();
                 resumeEventElapsedClock();
                 r.resume();
                 if (playPauseButton != null) playPauseButton.setText("P");
@@ -1174,6 +1209,7 @@ public final class TournamentActivity extends Activity {
         try { eventMinutes = Integer.parseInt(eventTimerMinutesInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
         if (eventMinutes > 0 && !eventTimerHomeTriggered && currentEventElapsedMs() >= eventMinutes * 60_000L) {
             eventTimerHomeTriggered = true;
+            freezeTournamentElapsedClock();
             freezeEventElapsedClock();
             heatCycleEnabled = false;
             if (!r.isPaused()) r.pause();
@@ -1418,6 +1454,9 @@ public final class TournamentActivity extends Activity {
 
     private void launchTournament(final TournamentManager tournament) {
         activeTournamentManager = tournament;
+        tournamentElapsedAccumulatedMs = tournament.tournamentElapsedMs();
+        tournamentElapsedStartNs = System.nanoTime();
+        lastTournamentElapsedSaveNs = tournamentElapsedStartNs;
         double autoWinThreshold = 10.0;
         try { autoWinThreshold = Double.parseDouble(autoWinEvalInput.getText().toString().trim()); }
         catch (RuntimeException ignored) { autoWinThreshold = 10.0; }
@@ -1600,6 +1639,7 @@ public final class TournamentActivity extends Activity {
                 });
             }
             @Override public void onTournamentFinished() {
+                freezeTournamentElapsedClock();
                 runOnUiThread(() -> {
                     statusText.setText("Tournament complete");
                     moveStatusText.setText("TOURNAMENT COMPLETE");
@@ -1656,6 +1696,7 @@ public final class TournamentActivity extends Activity {
             TournamentManager activeTournament = activeTournamentManager;
             if (activeTournament == null) activeTournament = TournamentManager.restore(this);
             oldRunner.pause();
+            freezeTournamentElapsedClock();
             activeTournament.save();
             saveTournamentPgnAutomatically(activeTournament);
             oldRunner.stop();
@@ -1737,6 +1778,7 @@ public final class TournamentActivity extends Activity {
             return;
         }
         if (runner.isPaused()) {
+            resumeTournamentElapsedClock();
             // Timer 1 is a repeating play-session limit: each manual Play starts a fresh interval.
             eventAccumulatedMs = 0L;
             eventStartElapsedNs = System.nanoTime();
@@ -1752,6 +1794,7 @@ public final class TournamentActivity extends Activity {
             moveStatusText.setText("Resuming tournament…");
         } else {
             runner.pause();
+            freezeTournamentElapsedClock();
             freezeEventElapsedClock();
             heatLastResumeNs = 0L;
             // A manual pause cancels the automatic cooling wait; the next Play starts a fresh cycle.
@@ -1871,6 +1914,7 @@ public final class TournamentActivity extends Activity {
         saveSetup();
         if (runner != null && !runner.isPaused()) {
             runner.pause();
+            freezeTournamentElapsedClock();
             freezeEventElapsedClock();
             heatLastResumeNs = 0L;
             autoPaused = true;
@@ -1891,6 +1935,7 @@ public final class TournamentActivity extends Activity {
         uiHandler.removeCallbacks(clockRefresh);
         if (runner != null) {
             runner.pause();
+            freezeTournamentElapsedClock();
             runner = null;
         }
         super.onDestroy();
