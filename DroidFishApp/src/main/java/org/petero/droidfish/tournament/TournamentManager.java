@@ -61,6 +61,7 @@ public final class TournamentManager {
     private int openingPlies;
     private int openingStartIndex = 1;
     private boolean repeatOpening;
+    private long tournamentElapsedMs;
     private final List<Engine> engines = new ArrayList<>();
     private final List<Pairing> pairings = new ArrayList<>();
 
@@ -123,6 +124,7 @@ public final class TournamentManager {
         openingBinPath = root.optString("openingBinPath", "");
         openingPlies = root.optInt("openingPlies", 0);
         repeatOpening = root.optBoolean("repeatOpening", false);
+        tournamentElapsedMs = Math.max(0L, root.optLong("tournamentElapsedMs", 0L));
         openingStartIndex = Math.max(1, root.optInt("openingStartIndex", 1));
         timeMode = TimeMode.valueOf(root.optString("timeMode", "CLOCK")); limitValue = root.optInt("limitValue", 30);
         JSONArray ea = root.getJSONArray("engines");
@@ -230,6 +232,9 @@ public final class TournamentManager {
     public synchronized int openingPlies() { return openingPlies; }
     public synchronized int openingStartIndex() { return openingStartIndex; }
     public synchronized boolean repeatOpening() { return repeatOpening; }
+    /** Total active-play duration accumulated across pauses and app restarts. */
+    public synchronized long tournamentElapsedMs() { return tournamentElapsedMs; }
+    public synchronized void setTournamentElapsedMs(long elapsedMs) { tournamentElapsedMs = Math.max(tournamentElapsedMs, Math.max(0L, elapsedMs)); }
     public synchronized List<Pairing> pairings() { return Collections.unmodifiableList(new ArrayList<>(pairings)); }
     public synchronized Pairing current() { for (Pairing p : pairings) if (!p.isComplete()) return p; return null; }
     public synchronized boolean isComplete() { return current() == null; }
@@ -274,7 +279,7 @@ public final class TournamentManager {
         JSONObject root = new JSONObject(); root.put("title", title); root.put("format", format.name()); root.put("gamesPerPair", gamesPerPair);
         root.put("baseTimeMs", baseTimeMs); root.put("incrementMs", incrementMs);
         root.put("timeMode", timeMode.name()); root.put("limitValue", limitValue);
-        root.put("openingPgn", openingPgn); root.put("openingBinPath", openingBinPath); root.put("openingPlies", openingPlies); root.put("openingStartIndex", openingStartIndex); root.put("repeatOpening", repeatOpening);
+        root.put("openingPgn", openingPgn); root.put("openingBinPath", openingBinPath); root.put("openingPlies", openingPlies); root.put("openingStartIndex", openingStartIndex); root.put("repeatOpening", repeatOpening); root.put("tournamentElapsedMs", tournamentElapsedMs);
         JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); ea.put(o); } root.put("engines", ea);
         JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); pa.put(o); } root.put("pairings", pa);
         try (FileOutputStream out = context.openFileOutput(fileName, Context.MODE_PRIVATE)) { out.write(root.toString().getBytes(Charset.forName("UTF-8"))); }

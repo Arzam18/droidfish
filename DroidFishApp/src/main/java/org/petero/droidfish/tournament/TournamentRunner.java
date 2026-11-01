@@ -353,7 +353,7 @@ public final class TournamentRunner {
         latestWhiteAnalysis = "WHITE analysis waiting…"; latestBlackAnalysis = "BLACK analysis waiting…";
         currentOpeningName = "Starting position";
         String eventType = tournament.format().name().toLowerCase(java.util.Locale.US).replace('_', ' ');
-        game.tree.setTournamentMetadata(tournament.title(), "DroidFish", pairing.round + "." + gameNumberInRound(pairing),
+        game.tree.setTournamentMetadata(tournament.title(), "DroidFish", pgnRoundNumber(pairing) + "." + gameNumberInRound(pairing),
                 eventType, (baseTimeMs / 1000) + "+" + String.format(java.util.Locale.US, "%g", incrementMs / 1000.0));
         clock = new CetClock(baseTimeMs, incrementMs);
         game.tree.setTournamentOpening(currentOpeningName);
@@ -406,13 +406,26 @@ public final class TournamentRunner {
         requestMove(game.currPos().whiteMove);
     }
 
-    /** PGN Round uses the sequential game number within a round (1.1 ... 1.N). */
-    private String gameNumberInRound(TournamentManager.Pairing target) {
-        int gameInRound = 0;
-        for (TournamentManager.Pairing p : tournament.pairings()) {
-            if (p.round == target.round && p.index <= target.index) gameInRound++;
+    /**
+     * PGN round metadata treats one complete round-robin cycle as a round.
+     * For example, 6 engines with 2 games per pairing produce 30 games
+     * (1.1 through 1.30); 12 engines produce 132 (1.1 through 1.132).
+     */
+    private int gamesPerPgnRound() {
+        if (tournament.format() == TournamentManager.Format.ROUND_ROBIN) {
+            int n = tournament.engines().size();
+            return Math.max(1, (n * (n - 1) / 2) * tournament.gamesPerPair());
         }
-        return Integer.toString(Math.max(1, gameInRound));
+        return Math.max(1, tournament.pairings().size());
+    }
+
+    private int pgnRoundNumber(TournamentManager.Pairing target) {
+        return Math.max(1, target.index / gamesPerPgnRound() + 1);
+    }
+
+    /** Sequential game number inside the complete tournament round. */
+    private String gameNumberInRound(TournamentManager.Pairing target) {
+        return Integer.toString(target.index % gamesPerPgnRound() + 1);
     }
 
     private TournamentManager.Engine findEngine(String id) {
