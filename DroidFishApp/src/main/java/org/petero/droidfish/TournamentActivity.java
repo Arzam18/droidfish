@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.preference.PreferenceManager;
 import android.net.Uri;
 import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
@@ -1452,6 +1454,54 @@ public final class TournamentActivity extends Activity {
         chooseSavedTournament();
     }
 
+    /**
+     * Tournament engines must be launched with the same process environment that
+     * DroidFish uses on its main board. Keep these preference keys/defaults aligned
+     * with DroidFish.readPrefs() so engines which rely on their working directory,
+     * hash configuration, or tablebase settings behave consistently in both places.
+     */
+    private EngineOptions createTournamentEngineOptions() {
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
+        EngineOptions options = new EngineOptions();
+        options.hashMB = readIntPreference(prefs, "hashMB", 16);
+        File externalDir = Environment.getExternalStorageDirectory();
+        String separator = File.separator;
+        options.unSafeHash = new File(externalDir, ENGINE_DIR + separator + ".unsafehash").exists();
+        options.hints = prefs.getBoolean("tbHints", false);
+        options.hintsEdit = prefs.getBoolean("tbHintsEdit", false);
+        options.rootProbe = prefs.getBoolean("tbRootProbe", true);
+        options.engineProbe = prefs.getBoolean("tbEngineProbe", true);
+
+        String gtbPath = prefs.getString("gtbPath", "").trim();
+        if (gtbPath.isEmpty())
+            gtbPath = new File(externalDir, "DroidFish/gtb").getAbsolutePath();
+        options.gtbPath = gtbPath;
+        options.gtbPathNet = prefs.getString("gtbPathNet", "").trim();
+
+        String rtbPath = prefs.getString("rtbPath", "").trim();
+        if (rtbPath.isEmpty())
+            rtbPath = new File(externalDir, "DroidFish/rtb").getAbsolutePath();
+        options.rtbPath = rtbPath;
+        options.rtbPathNet = prefs.getString("rtbPathNet", "").trim();
+
+        File workDir = new File(externalDir, "DroidFish/uci/logs");
+        if (!workDir.exists()) workDir.mkdirs();
+        options.workDir = workDir.getAbsolutePath();
+        // Network engines read their host/port from their own .NETE descriptor.
+        // No currently selected main-board engine should leak its identity into a
+        // tournament containing different engine files.
+        options.networkID = "";
+        return options;
+    }
+
+    private int readIntPreference(SharedPreferences prefs, String key, int defaultValue) {
+        try {
+            return Integer.parseInt(prefs.getString(key, Integer.toString(defaultValue)).trim());
+        } catch (RuntimeException ignored) {
+            return defaultValue;
+        }
+    }
+
     private void launchTournament(final TournamentManager tournament) {
         activeTournamentManager = tournament;
         tournamentElapsedAccumulatedMs = tournament.tournamentElapsedMs();
@@ -1656,7 +1706,7 @@ public final class TournamentActivity extends Activity {
                     startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(runner != null);
                 });
             }
-        }, new EngineOptions(), new BookOptions(), tournament.baseTimeMs(), tournament.incrementMs(),
+        }, createTournamentEngineOptions(), new BookOptions(), tournament.baseTimeMs(), tournament.incrementMs(),
                 tournament.openingPgn(), tournament.openingPlies(), tournament.repeatOpening(), tournament.openingStartIndex(),
                 configuredAutoWinThreshold, fastWinEnabled);
         startButton.setEnabled(false); resumeButton.setEnabled(false); stopButton.setEnabled(true);
