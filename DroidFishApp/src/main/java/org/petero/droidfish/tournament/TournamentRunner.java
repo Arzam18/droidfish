@@ -853,7 +853,12 @@ public final class TournamentRunner {
             worker.start();
         }
         @Override public void notifyEngineName(String engineName) { }
-        @Override public void reportEngineError(String errMsg) { listener.onError(errMsg, null); }
+        @Override public void reportEngineError(String errMsg) {
+            TournamentManager.Engine engine = white ? whiteEngine : blackEngine;
+            String side = white ? "White" : "Black";
+            String engineName = engine == null ? "unknown engine" : engine.displayName;
+            listener.onError(side + " engine '" + engineName + "': " + errMsg, null);
+        }
         @Override public void notifyEngineInitialized() {
             // UCI option discovery clears pending options, so apply the tournament baseline
             // after each newly loaded engine has reported its supported options.
