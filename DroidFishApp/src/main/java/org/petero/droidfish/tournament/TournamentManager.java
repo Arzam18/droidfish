@@ -402,6 +402,76 @@ public final class TournamentManager {
     }
 
     public synchronized List<Engine> engines() { return Collections.unmodifiableList(new ArrayList<>(engines)); }
+
+    /** Number of tournament pairings with a recorded result. */
+    public synchronized int completedGamesCount() {
+        int count = 0;
+        for (Pairing pairing : pairings) if (pairing.isComplete()) count++;
+        return count;
+    }
+
+    /** Number of completed tournament games involving an engine. */
+    public synchronized int completedGamesForEngine(String engineId) {
+        int count = 0;
+        for (Pairing pairing : pairings) {
+            if (pairing.isComplete() && (engineId.equals(pairing.whiteEngineId) || engineId.equals(pairing.blackEngineId))) count++;
+        }
+        return count;
+    }
+
+    /** True when the interrupted/active pairing currently references this engine. */
+    public synchronized boolean isEngineInActivePairing(String engineId) {
+        if (activePairingIndex < 0 || activePairingIndex >= pairings.size()) return false;
+        Pairing pairing = pairings.get(activePairingIndex);
+        return engineId.equals(pairing.whiteEngineId) || engineId.equals(pairing.blackEngineId);
+    }
+
+    /**
+     * Rename an engine, and optionally point it at a replacement installed executable.
+     * A display-name-only correction is safe after games have been played and updates
+     * historical PGN player tags. Changing the executable identity is restricted to
+     * engines with no completed games and no currently active/interrupted pairing.
+     * All remaining scheduled references are changed atomically in the saved JSON.
+     */
+    public synchronized void updateTournamentEngine(int engineIndex, String newId, String newDisplayName)
+            throws IOException, JSONException {
+        if (engineIndex < 0 || engineIndex >= engines.size()) throw new IllegalArgumentException("Unknown tournament engine");
+        if (newId == null || newId.trim().isEmpty()) throw new IllegalArgumentException("Choose a valid installed engine");
+        if (newDisplayName == null || newDisplayName.trim().isEmpty()) throw new IllegalArgumentException("Engine display name cannot be empty");
+        newId = newId.trim();
+        newDisplayName = newDisplayName.trim();
+        Engine old = engines.get(engineIndex);
+        boolean executableChanged = !old.id.equals(newId);
+        boolean nameChanged = !old.displayName.equals(newDisplayName);
+
+        if (executableChanged) {
+            for (Engine other : engines) {
+                if (!other.id.equals(old.id) && other.id.equals(newId))
+                    throw new IllegalArgumentException("That executable is already assigned to another tournament engine");
+            }
+            if (completedGamesForEngine(old.id) > 0)
+                throw new IllegalStateException("This engine already has completed games. You can correct its display name, but cannot replace its executable identity without mixing historical results.");
+            if (isEngineInActivePairing(old.id))
+                throw new IllegalStateException("This engine is part of the active or interrupted game. Resume or finish that game before changing its executable.");
+        }
+
+        if (nameChanged) {
+            for (Pairing pairing : pairings) {
+                if (pairing.pgn == null || pairing.pgn.trim().isEmpty()) continue;
+                if (old.id.equals(pairing.whiteEngineId)) pairing.pgn = replacePgnTag(pairing.pgn, "White", newDisplayName);
+                if (old.id.equals(pairing.blackEngineId)) pairing.pgn = replacePgnTag(pairing.pgn, "Black", newDisplayName);
+            }
+        }
+        if (executableChanged) {
+            for (Pairing pairing : pairings) {
+                if (old.id.equals(pairing.whiteEngineId)) pairing.whiteEngineId = newId;
+                if (old.id.equals(pairing.blackEngineId)) pairing.blackEngineId = newId;
+            }
+        }
+        engines.set(engineIndex, new Engine(newId, newDisplayName));
+        save();
+    }
+
     public synchronized String title() { return title; }
     public synchronized Format format() { return format; }
     public synchronized int gamesPerPair() { return gamesPerPair; }
