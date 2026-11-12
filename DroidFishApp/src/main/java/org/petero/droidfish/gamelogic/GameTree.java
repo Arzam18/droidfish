@@ -88,6 +88,11 @@ public class GameTree {
         updateListener();
     }
 
+    /** Reuse the original scheduled-game date when a completed game is replayed. */
+    public final void setTournamentDate(String dateValue) {
+        if (dateValue != null && dateValue.matches("\\d{4}\\.\\d{2}\\.\\d{2}")) date = dateValue;
+    }
+
     /** Set the opening name for tournament PGN metadata. */
     public final void setTournamentOpening(String openingName) {
         if (openingName != null && !openingName.trim().isEmpty()) setTagPair("Opening", openingName.trim());
