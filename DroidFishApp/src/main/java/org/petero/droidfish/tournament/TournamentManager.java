@@ -20,7 +20,7 @@ import java.util.List;
 public final class TournamentManager {
     public enum Format { ROUND_ROBIN, MATCH, GAUNTLET }
     public enum Outcome { WHITE_WIN, DRAW, BLACK_WIN, UNFINISHED }
-    public enum TimeMode { CLOCK, MOVE_TIME, DEPTH, NODES }
+    public enum TimeMode { CLOCK, MOVE_TIME, DEPTH, NODES, MOVE_PERIOD }
 
     public static final class Engine {
         public final String id;

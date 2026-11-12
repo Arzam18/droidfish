@@ -248,8 +248,15 @@ public final class TournamentRunner {
     public synchronized boolean isPaused() { return paused; }
     public boolean isFinished() { return finished; }
     public boolean isStopped() { return stopped; }
+    private boolean usesClock() {
+        TournamentManager.TimeMode mode = tournament.timeMode();
+        return mode == TournamentManager.TimeMode.CLOCK || mode == TournamentManager.TimeMode.MOVE_PERIOD;
+    }
+
     public synchronized long remainingMs(boolean white) {
-        CetClock c=clock; if(c==null || tournament.timeMode()!=TournamentManager.TimeMode.CLOCK) return -1; return c.remainingMs(white);
+        CetClock c = clock;
+        if (c == null || !usesClock()) return -1;
+        return c.remainingMs(white);
     }
     public synchronized boolean whiteToMove() { return game != null && game.currPos().whiteMove; }
     public synchronized long activeMoveTimeMs() {
@@ -345,7 +352,10 @@ public final class TournamentRunner {
         whiteEngine = findEngine(pairing.whiteEngineId);
         blackEngine = findEngine(pairing.blackEngineId);
         TimeControlData tc = new TimeControlData();
-        tc.setTimeControl((int)baseTimeMs, 0, (int)incrementMs);
+        if (tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD)
+            tc.setTimeControl((int)baseTimeMs, tournament.limitValue(), (int)baseTimeMs);
+        else
+            tc.setTimeControl((int)baseTimeMs, 0, (int)incrementMs);
         game = new Game(new EmptyPgnReceiver(), tc);
         game.tree.setPlayerNames(whiteEngine.displayName, blackEngine.displayName);
         positionHistory.clear(); whiteAnalysisHistory.clear(); blackAnalysisHistory.clear(); moveTimeHistory.clear();
@@ -353,9 +363,14 @@ public final class TournamentRunner {
         latestWhiteAnalysis = "WHITE analysis waiting…"; latestBlackAnalysis = "BLACK analysis waiting…";
         currentOpeningName = "Starting position";
         String eventType = tournament.format().name().toLowerCase(java.util.Locale.US).replace('_', ' ');
+        String pgnTimeControl = tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD
+                ? tournament.limitValue() + "/" + (baseTimeMs / 1000)
+                : (baseTimeMs / 1000) + "+" + String.format(java.util.Locale.US, "%g", incrementMs / 1000.0);
         game.tree.setTournamentMetadata(tournament.title(), "DroidFish", pgnRoundNumber(pairing) + "." + gameNumberInRound(pairing),
-                eventType, (baseTimeMs / 1000) + "+" + String.format(java.util.Locale.US, "%g", incrementMs / 1000.0));
-        clock = new CetClock(baseTimeMs, incrementMs);
+                eventType, pgnTimeControl);
+        clock = tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD
+                ? new CetClock(baseTimeMs, baseTimeMs, tournament.limitValue())
+                : new CetClock(baseTimeMs, incrementMs);
         game.tree.setTournamentOpening(currentOpeningName);
         if (!tournament.openingBinPath().trim().isEmpty()) {
             applyBinOpening(tournament.openingBinPath());
@@ -390,6 +405,14 @@ public final class TournamentRunner {
         if (game.getGameState() != Game.GameState.ALIVE) {
             finishCurrentGame(resultForState(game.getGameState()));
             return;
+        }
+        if (tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD) {
+            // Opening PGN/BIN plies are already present on the board before the engines
+            // start. Count those completed moves toward each side's first time control.
+            Position openingPosition = game.currPos();
+            int completedBlackMoves = Math.max(0, openingPosition.fullMoveCounter - 1);
+            int completedWhiteMoves = completedBlackMoves + (openingPosition.whiteMove ? 0 : 1);
+            clock.setMovesPlayed(completedWhiteMoves, completedBlackMoves);
         }
         recordPosition(0);
         listener.onMoveTime(false, 0, currentOpeningName);
@@ -435,7 +458,7 @@ public final class TournamentRunner {
 
     private synchronized void requestMove(boolean whiteToMove) {
         if (stopped || finished || paused || game == null || game.getGameState() != Game.GameState.ALIVE) return;
-        if (tournament.timeMode() == TournamentManager.TimeMode.CLOCK && clock.isExpired()) {
+        if (usesClock() && clock.isExpired()) {
             game.markTimeout(whiteToMove);
             finishCurrentGame(resultForState(game.getGameState()));
             return;
@@ -460,10 +483,21 @@ public final class TournamentRunner {
             activeBlackId = id;
             player = blackPlayer;
         }
-        DroidComputerPlayer.SearchRequest request = DroidComputerPlayer.SearchRequest.cetSearchRequest(
-                id, System.currentTimeMillis(), history.first, history.second,
-                new Position(game.currPos()), game.haveDrawOffer(), wTime, bTime, inc, inc,
-                whiteToMove ? whiteEngine.id : blackEngine.id);
+        DroidComputerPlayer.SearchRequest request;
+        if (tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD) {
+            // Let UCI engines know how many of their moves remain before the next
+            // replenishment (for example: go wtime ... btime ... movestogo 40).
+            request = DroidComputerPlayer.SearchRequest.searchRequest(
+                    id, System.currentTimeMillis(), history.first, history.second,
+                    new Position(game.currPos()), game.haveDrawOffer(), wTime, bTime, 0, 0,
+                    clock.movesToNextPeriod(whiteToMove), false, null,
+                    whiteToMove ? whiteEngine.id : blackEngine.id, Integer.MAX_VALUE);
+        } else {
+            request = DroidComputerPlayer.SearchRequest.cetSearchRequest(
+                    id, System.currentTimeMillis(), history.first, history.second,
+                    new Position(game.currPos()), game.haveDrawOffer(), wTime, bTime, inc, inc,
+                    whiteToMove ? whiteEngine.id : blackEngine.id);
+        }
         switch (tournament.timeMode()) {
             case MOVE_TIME: request.tournamentGoCommand = "go movetime " + Math.max(1, tournament.limitValue()); break;
             case DEPTH: request.tournamentGoCommand = "go depth " + Math.max(1, tournament.limitValue()); break;
@@ -471,7 +505,7 @@ public final class TournamentRunner {
             case CLOCK: default: break;
         }
         player.queueSearchRequest(request);
-        if (tournament.timeMode() == TournamentManager.TimeMode.CLOCK) startClockWatchdog(whiteToMove, turnToken);
+        if (usesClock()) startClockWatchdog(whiteToMove, turnToken);
     }
 
     /** Adjudicate flag fall even if an engine hangs and never emits bestmove. */
@@ -482,7 +516,7 @@ public final class TournamentRunner {
                     if (stopped || finished || paused || turnToken != turnGeneration || game == null ||
                             game.getGameState() != Game.GameState.ALIVE || game.currPos().whiteMove != whiteToMove)
                         return;
-                    if (tournament.timeMode() == TournamentManager.TimeMode.CLOCK && clock.isExpired()) {
+                    if (usesClock() && clock.isExpired()) {
                         game.markTimeout(whiteToMove);
                         // A non-responsive engine may never answer stop; kill it so the next
                         // pairing can start a clean process instead of inheriting a stuck search.
@@ -520,7 +554,7 @@ public final class TournamentRunner {
             finishCurrentGame(resultForState(game.getGameState()));
             return;
         }
-        lastMoveTimeMs = tournament.timeMode() == TournamentManager.TimeMode.CLOCK ? clock.lastTurnElapsedMs() : Math.max(0, (System.nanoTime() - currentTurnStartedNs) / 1_000_000L);
+        lastMoveTimeMs = usesClock() ? clock.lastTurnElapsedMs() : Math.max(0, (System.nanoTime() - currentTurnStartedNs) / 1_000_000L);
         addMoveAnalysisComment(whiteEngineSide, lastMoveTimeMs);
         recordPosition(lastMoveTimeMs);
         listener.onMoveTime(!game.currPos().whiteMove, lastMoveTimeMs, currentOpeningName);
@@ -596,8 +630,8 @@ public final class TournamentRunner {
         // searching at a time, so clearing both scores here would make agreement
         // impossible: the inactive engine cannot produce a fresh score for this ply.
         CetClock activeClock = clock;
-        long whiteMs = activeClock == null || tournament.timeMode() != TournamentManager.TimeMode.CLOCK ? 0 : activeClock.remainingMs(true);
-        long blackMs = activeClock == null || tournament.timeMode() != TournamentManager.TimeMode.CLOCK ? 0 : activeClock.remainingMs(false);
+        long whiteMs = activeClock == null || !usesClock() ? 0 : activeClock.remainingMs(true);
+        long blackMs = activeClock == null || !usesClock() ? 0 : activeClock.remainingMs(false);
         listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove,
                 whiteMs, blackMs, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves(), game.getLastMove());
     }
@@ -837,7 +871,7 @@ public final class TournamentRunner {
             int activeId = white ? activeWhiteId : activeBlackId;
             CetClock activeClock = clock;
             boolean acceptedAtArrival = !stopped && !finished && !paused && id == activeId && activeClock != null &&
-                    (tournament.timeMode() != TournamentManager.TimeMode.CLOCK || activeClock.acceptMove(white, arrivalNs));
+                    (!usesClock() || activeClock.acceptMove(white, arrivalNs));
             // DroidComputerPlayer invokes listeners before it returns its state to IDLE.
             // Defer board/result handling so old-search cleanup cannot overwrite a new search.
             DroidComputerPlayer player = white ? whitePlayer : blackPlayer;

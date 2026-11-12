@@ -4,21 +4,38 @@ package org.petero.droidfish.tournament;
 public final class CetClock {
     private final long[] remaining = new long[2]; // 0 white, 1 black
     private final long incrementMs;
+    private final int movesPerPeriod;
+    private final long periodMs;
+    private final int[] movesPlayed = new int[2];
     private int activeSide = -1;
     private long turnStartedNs;
     private boolean running;
     private long lastTurnElapsedMs;
 
     public CetClock(long baseMs, long incrementMs) {
-        this(baseMs, baseMs, incrementMs);
+        this(baseMs, baseMs, incrementMs, 0, 0);
+    }
+
+    /** Repeating move-period control: each side receives periodMs after every movesPerPeriod moves. */
+    public CetClock(long baseMs, long periodMs, int movesPerPeriod) {
+        this(baseMs, baseMs, 0, movesPerPeriod, periodMs);
     }
 
     public CetClock(long whiteBaseMs, long blackBaseMs, long incrementMs) {
-        if (whiteBaseMs < 0 || blackBaseMs < 0 || incrementMs < 0)
+        this(whiteBaseMs, blackBaseMs, incrementMs, 0, 0);
+    }
+
+    private CetClock(long whiteBaseMs, long blackBaseMs, long incrementMs,
+                     int movesPerPeriod, long periodMs) {
+        if (whiteBaseMs < 0 || blackBaseMs < 0 || incrementMs < 0 || movesPerPeriod < 0 || periodMs < 0)
             throw new IllegalArgumentException("Clock values must be non-negative");
+        if ((movesPerPeriod == 0) != (periodMs == 0))
+            throw new IllegalArgumentException("Move-period count and time must both be positive");
         remaining[0] = whiteBaseMs;
         remaining[1] = blackBaseMs;
         this.incrementMs = incrementMs;
+        this.movesPerPeriod = movesPerPeriod;
+        this.periodMs = periodMs;
     }
 
     public synchronized void startTurn(boolean whiteToMove) {
@@ -37,7 +54,33 @@ public final class CetClock {
 
     public synchronized boolean isRunning() { return running; }
 
+    /** Seed the move counters from a pre-played opening position before clocks start. */
+    public synchronized void setMovesPlayed(int whiteMoves, int blackMoves) {
+        if (running || movesPerPeriod <= 0) return;
+        movesPlayed[0] = Math.max(0, whiteMoves);
+        movesPlayed[1] = Math.max(0, blackMoves);
+        // If a tournament starts from a pre-played opening, account for any time
+        // controls already crossed by that position without charging thinking time.
+        for (int side = 0; side < 2; side++) {
+            long completedPeriods = movesPlayed[side] / movesPerPeriod;
+            if (completedPeriods > 0) {
+                long bonus = completedPeriods > Long.MAX_VALUE / periodMs
+                        ? Long.MAX_VALUE : completedPeriods * periodMs;
+                remaining[side] = remaining[side] > Long.MAX_VALUE - bonus
+                        ? Long.MAX_VALUE : remaining[side] + bonus;
+            }
+        }
+    }
+
     public long incrementMs() { return incrementMs; }
+
+    /** UCI movestogo value for the selected side in a repeating move-period control. */
+    public synchronized int movesToNextPeriod(boolean white) {
+        if (movesPerPeriod <= 0) return 0;
+        int played = movesPlayed[white ? 0 : 1];
+        int remainder = played % movesPerPeriod;
+        return remainder == 0 ? movesPerPeriod : movesPerPeriod - remainder;
+    }
 
     /** Duration spent thinking on the most recently completed turn, in milliseconds. */
     public synchronized long lastTurnElapsedMs() { return lastTurnElapsedMs; }
@@ -55,7 +98,15 @@ public final class CetClock {
         remaining[activeSide] = Math.max(0, remaining[activeSide] - elapsed);
         running = false;
         if (remaining[activeSide] <= 0) return false;
-        remaining[activeSide] += incrementMs;
+        if (movesPerPeriod > 0) {
+            // Move counts are per side: 40/15 grants the next 15-minute block
+            // after that side completes move 40, 80, 120, and so on.
+            movesPlayed[activeSide]++;
+            if (movesPlayed[activeSide] % movesPerPeriod == 0)
+                remaining[activeSide] += periodMs;
+        } else {
+            remaining[activeSide] += incrementMs;
+        }
         return true;
     }
 
