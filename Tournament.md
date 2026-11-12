@@ -54,6 +54,29 @@ If timer controls are present in the Setup screen, check their current labels an
 - A **play/pause cooling cycle** is intended to alternate a period of active play with a cooling pause. The play interval counts active play time; the pause interval counts time while paused. The tournament chess clock must remain stopped during cooling pauses.
 - Timer controls must not change chess-clock values or erase tournament state. Android may delay background callbacks or restrict launching activities while backgrounded, so verify timing on the phone with short test intervals before relying on it.
 
+## Importing tournament JSON
+
+- The Setup screen provides **Import tournament JSON**. Select a saved DroidFish tournament JSON file with the Android document picker; the imported copy is validated and written to private app storage under a new `cet_tournament_*.json` name.
+- The selected source filename is not used as the internal save name. This prevents an imported event from overwriting a same-named private tournament and makes arbitrary `.json` filenames importable.
+- Imported events appear in **Resume saved tournament** and use the existing Continue / Load setup / Delete actions. The imported schedule, recorded results, PGNs, opening assignments, play queue, and anomaly review flags are retained when present in the JSON.
+- Import accepts this app's tournament JSON schema (including compatible older exports with optional newer fields omitted); it is not a general converter for unrelated tournament formats. Engine IDs in the file are preserved, so the referenced engine executables must exist and be resolvable on the device before games can continue. A tournament JSON does not package or transfer engine binaries.
+- Importing is blocked while a tournament runner is active. Keep a separate copy of the original source file as a backup.
+
+## Editing tournament engine names and executables
+
+- Open the Schedule dialog, choose **EDIT**, then **Edit tournament engine**.
+- Select the engine entry to correct its display name. The updated name is used in standings, schedule rows, and exported PGN player tags; existing results and moves are retained. PGN merge identity uses stable Event/Date/Round tags so correcting player names replaces the matching archived game instead of duplicating it.
+- To move an engine to a newer installed version, choose **Choose installed engine version** and select the replacement executable. The selected executable ID is applied to every unfinished scheduled pairing referencing that tournament engine.
+- Executable replacement is deliberately blocked after that engine has completed any game, or while it belongs to the active/interrupted pairing. A display-name-only correction remains available. This prevents historical results from being reassigned to a different engine version.
+- A replacement executable must already be installed and visible to DroidFish's engine discovery. The tournament editor changes the stored engine reference; it does not install or copy engine binaries.
+
+## Schedule and anomaly review
+
+- The schedule header displays completed games over total games (for example, `Schedule •36/4290`). The schedule uses 16sp rows, matching the standings body text, and a draggable Android FastScroller thumb on the right edge for jumping quickly through very large schedules.
+- Schedule rows are cached for the lifetime of the Activity and rebuilt only after a schedule, queue, replay, result, or game-completion change. Reopening an unchanged schedule reuses the cached rows.
+- Schedule entries use the same 16sp body text size as the standings list and a taller scroll region on phone displays.
+- The Anomalies dialog exposes White win, Black win, Draw, and Confirm actions directly on each flagged game. Result changes require a confirmation step; Confirm preserves the current result and marks the anomaly reviewed. An acted-on game is removed from the pending list and the remaining rows move up immediately.
+
 ## PGN, standings, and recovery
 
 - Allow games to finish or pause the tournament before force-closing the app.
