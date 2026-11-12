@@ -368,10 +368,47 @@ public final class TournamentManager {
     private String replacePgnResult(String pgn, Outcome outcome) {
         if (pgn == null || pgn.trim().isEmpty()) return pgn == null ? "" : pgn;
         String token = outcome == Outcome.WHITE_WIN ? "1-0" : outcome == Outcome.BLACK_WIN ? "0-1" : "1/2-1/2";
-        String updated = pgn.replaceFirst("(?m)^\\[Result \"[^\"]*\"\\]$", java.util.regex.Matcher.quoteReplacement("[Result \"" + token + "\"]"));
-        java.util.regex.Matcher tail = java.util.regex.Pattern.compile("(?s)(\\s)(1-0|0-1|1/2-1/2|\\*)\\s*$").matcher(updated);
-        if (tail.find()) updated = updated.substring(0, tail.start(2)) + token + updated.substring(tail.end(2));
+
+        // A manual readjudication changes the official result and its reason, but
+        // deliberately leaves the complete movetext (moves, comments, and NAGs) intact.
+        String updated = replacePgnTag(pgn, "Result", token);
+        updated = replacePgnTag(updated, "Termination", "adjudication");
+
+        // Replace only the final PGN game-termination marker, not any move/comment text.
+        java.util.regex.Matcher tail = java.util.regex.Pattern
+                .compile("(?s)(\\s)(1-0|0-1|1/2-1/2|\\*)(\\s*)$")
+                .matcher(updated);
+        if (tail.find()) {
+            updated = updated.substring(0, tail.start(2)) + token + updated.substring(tail.end(2));
+        } else {
+            // Tournament PGNs normally have a marker. If an older/incomplete PGN
+            // lacks one, append the official marker after its existing movetext.
+            int end = updated.length();
+            while (end > 0 && Character.isWhitespace(updated.charAt(end - 1))) end--;
+            String trailing = updated.substring(end);
+            updated = updated.substring(0, end) + (end > 0 ? " " : "") + token + trailing;
+        }
         return updated;
+    }
+
+    /** Replace one PGN tag, or insert it in the header without touching movetext. */
+    private String replacePgnTag(String pgn, String name, String value) {
+        String escaped = value.replace("\\", "\\\\").replace("\"", "\\\"");
+        String replacement = "[" + name + " \"" + escaped + "\"]";
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+                "(?m)^\\[" + java.util.regex.Pattern.quote(name) + "\\s+\"(?:\\\\.|[^\"])*\"\\][ \t]*\\r?$");
+        java.util.regex.Matcher matcher = pattern.matcher(pgn);
+        if (matcher.find()) {
+            return pgn.substring(0, matcher.start()) + replacement + pgn.substring(matcher.end());
+        }
+
+        // Insert before the blank line separating PGN tags from the movetext.
+        int separator = pgn.indexOf("\n\n");
+        if (separator >= 0) return pgn.substring(0, separator) + "\n" + replacement + pgn.substring(separator);
+        int crlfSeparator = pgn.indexOf("\r\n\r\n");
+        if (crlfSeparator >= 0) return pgn.substring(0, crlfSeparator) + "\r\n" + replacement + pgn.substring(crlfSeparator);
+        if (pgn.startsWith("[")) return pgn + (pgn.endsWith("\n") ? "" : "\n") + replacement;
+        return replacement + "\n\n" + pgn;
     }
 
     public synchronized List<Standing> standings() {
