@@ -40,6 +40,15 @@ public final class TournamentManager {
         public double whiteEvalPawns = Double.NaN, blackEvalPawns = Double.NaN;
         /** True after the operator has adjudicated or explicitly confirmed this anomaly. */
         public boolean anomalyReviewed;
+        /** A replay keeps the old official result until the replacement game finishes. */
+        public boolean replayPending;
+        /** Immutable opening assignment for this scheduled game, persisted for exact replay. */
+        public boolean openingAssigned;
+        public int openingIndex;
+        public String openingName = "";
+        public String openingSanLine = "";
+        /** Original PGN date is retained so replay replaces the same archived record. */
+        public String pgnDate = "";
         Pairing(int index, int round, int gameNumber, String white, String black, Outcome outcome, String pgn) {
             this.index = index; this.round = round; this.gameNumber = gameNumber;
             whiteEngineId = white; blackEngineId = black; this.outcome = outcome; this.pgn = pgn;
@@ -75,6 +84,10 @@ public final class TournamentManager {
     private static final double ANOMALY_EVAL_THRESHOLD_PAWNS = 1.50;
     private final List<Engine> engines = new ArrayList<>();
     private final List<Pairing> pairings = new ArrayList<>();
+    /** Game indices in operator-selected priority order. */
+    private final ArrayList<Integer> playQueue = new ArrayList<>();
+    /** Scheduled game interrupted by a pause/process death; it resumes before the priority queue. */
+    private int activePairingIndex = -1;
     private String externalSaveError = "";
 
     public TournamentManager(Context context, String title, Format format, List<Engine> engines, int gamesPerPair) {
@@ -126,6 +139,7 @@ public final class TournamentManager {
         this.openingStartIndex = Math.max(1, openingStartIndex);
         this.engines.addAll(engines);
         buildSchedule();
+        assignPgnOpeningsInMemory();
     }
 
     private TournamentManager(Context context, JSONObject root, String fileName) throws JSONException {
@@ -155,7 +169,27 @@ public final class TournamentManager {
             pairing.whiteEvalPawns = p.optDouble("whiteEvalPawns", Double.NaN);
             pairing.blackEvalPawns = p.optDouble("blackEvalPawns", Double.NaN);
             pairing.anomalyReviewed = p.optBoolean("anomalyReviewed", false);
+            pairing.replayPending = p.optBoolean("replayPending", false);
+            pairing.openingAssigned = p.optBoolean("openingAssigned", false);
+            pairing.openingIndex = p.optInt("openingIndex", 0);
+            pairing.openingName = p.optString("openingName", "");
+            pairing.openingSanLine = p.optString("openingSanLine", "");
+            pairing.pgnDate = p.optString("pgnDate", pgnTagValue(pairing.pgn, "Date"));
             pairings.add(pairing);
+        }
+        activePairingIndex = root.optInt("activePairingIndex", -1);
+        if (activePairingIndex < 0 || activePairingIndex >= pairings.size() ||
+                (pairings.get(activePairingIndex).isComplete() && !pairings.get(activePairingIndex).replayPending))
+            activePairingIndex = -1;
+        JSONArray queue = root.optJSONArray("playQueue");
+        if (queue != null) {
+            for (int i = 0; i < queue.length(); i++) {
+                int index = queue.optInt(i, -1);
+                if (index >= 0 && index < pairings.size() && !playQueue.contains(index)) {
+                    Pairing queued = pairings.get(index);
+                    if (queued.replayPending || !queued.isComplete()) playQueue.add(index);
+                }
+            }
         }
     }
 
@@ -347,8 +381,170 @@ public final class TournamentManager {
     }
     public synchronized int anomalyRuleStartFullMove() { return anomalyRuleStartFullMove; }
     public synchronized List<Pairing> pairings() { return Collections.unmodifiableList(new ArrayList<>(pairings)); }
-    public synchronized Pairing current() { for (Pairing p : pairings) if (!p.isComplete()) return p; return null; }
+    /** Priority queue is returned in the exact order selected by the operator. */
+    public synchronized List<Integer> playQueue() { return Collections.unmodifiableList(new ArrayList<>(playQueue)); }
+    public synchronized boolean isQueued(int index) { return playQueue.contains(index); }
+    public synchronized int activePairingIndex() { return activePairingIndex; }
+    public synchronized void setActivePairing(int index) throws IOException, JSONException {
+        Pairing p = pairings.get(index);
+        if (p.isComplete() && !p.replayPending) throw new IllegalStateException("Only a pending game can become active");
+        activePairingIndex = index;
+        save();
+    }
+    public synchronized void setQueued(int index, boolean queued) throws IOException, JSONException {
+        Pairing p = pairings.get(index);
+        if (queued) {
+            if (p.isComplete() && !p.replayPending) throw new IllegalStateException("Only unfinished games can be queued; use Replay for completed games");
+            if (!playQueue.contains(index)) playQueue.add(index);
+        } else {
+            playQueue.remove(Integer.valueOf(index));
+        }
+        save();
+    }
+    /** Queue a replacement play at the head while keeping the old result recoverable until replacement finishes. */
+    public synchronized void requestReplay(int index) throws IOException, JSONException {
+        Pairing p = pairings.get(index);
+        if (!p.isComplete()) throw new IllegalStateException("Only completed games can be replayed");
+        if (p.replayPending) throw new IllegalStateException("This game is already waiting to be replayed");
+        p.replayPending = true;
+        playQueue.remove(Integer.valueOf(index));
+        playQueue.add(0, index);
+        save();
+    }
+    public synchronized Pairing current() {
+        if (activePairingIndex >= 0 && activePairingIndex < pairings.size()) {
+            Pairing active = pairings.get(activePairingIndex);
+            if (active.replayPending || !active.isComplete()) return active;
+        }
+        for (Integer index : playQueue) {
+            Pairing p = pairings.get(index);
+            if (p.replayPending || !p.isComplete()) return p;
+        }
+        for (Pairing p : pairings) if (p.replayPending || !p.isComplete()) return p;
+        return null;
+    }
     public synchronized boolean isComplete() { return current() == null; }
+
+    /** Initialize stable assignments for every PGN opening (or empty assignments when no book is selected). */
+    public synchronized void prepareOpeningAssignments() throws IOException, JSONException {
+        boolean changed = false;
+        for (Pairing p : pairings) {
+            if (p.openingAssigned) continue;
+            if (!openingPgn.trim().isEmpty()) {
+                assignPgnOpening(p);
+                changed = true;
+            } else if (openingBinPath.trim().isEmpty()) {
+                p.openingAssigned = true;
+                p.openingName = "Starting position";
+                changed = true;
+            } else if (p.isComplete() && p.pgn != null && !p.pgn.trim().isEmpty()) {
+                // Migrate old BIN-book games: book plies precede the first per-move Eval comment.
+                String prefix = p.pgn;
+                int evalComment = prefix.indexOf("{Eval:");
+                if (evalComment >= 0) prefix = prefix.substring(0, evalComment);
+                List<String> inferred = PgnOpeningBook.mainLineSan(prefix);
+                if (openingPlies > 0 && inferred.size() > openingPlies)
+                    inferred = new ArrayList<>(inferred.subList(0, openingPlies));
+                p.openingSanLine = joinSan(inferred);
+                p.openingName = "Polyglot BIN opening";
+                p.openingAssigned = true;
+                changed = true;
+            } else if (repeatOpening) {
+                int partnerIndex = (p.index / 2) * 2;
+                int otherIndex = partnerIndex == p.index ? partnerIndex + 1 : partnerIndex;
+                if (otherIndex >= 0 && otherIndex < pairings.size()) {
+                    Pairing partner = pairings.get(otherIndex);
+                    if (partner.openingAssigned) {
+                        p.openingSanLine = partner.openingSanLine;
+                        p.openingName = partner.openingName;
+                        p.openingIndex = partner.openingIndex;
+                        p.openingAssigned = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if (changed) save();
+    }
+
+    private void assignPgnOpeningsInMemory() {
+        if (openingPgn.trim().isEmpty()) return;
+        for (Pairing p : pairings) if (!p.openingAssigned) assignPgnOpening(p);
+    }
+
+    private void assignPgnOpening(Pairing p) {
+        int zeroBased = Math.max(0, openingStartIndex - 1) + (repeatOpening ? Math.max(0, p.index / 2) : p.index);
+        String selected = PgnOpeningBook.gameAt(openingPgn, zeroBased);
+        List<String> moves = PgnOpeningBook.mainLineSan(selected);
+        if (openingPlies > 0 && moves.size() > openingPlies)
+            moves = new ArrayList<>(moves.subList(0, openingPlies));
+        p.openingSanLine = joinSan(moves);
+        p.openingName = PgnOpeningBook.tagValue(selected, "Opening");
+        if (p.openingName.isEmpty()) p.openingName = PgnOpeningBook.tagValue(selected, "ECO");
+        if (p.openingName.isEmpty()) p.openingName = "PGN opening " + (zeroBased + 1);
+        p.openingIndex = zeroBased + 1;
+        p.openingAssigned = true;
+    }
+
+    private static String joinSan(List<String> moves) {
+        StringBuilder line = new StringBuilder();
+        for (String move : moves) { if (line.length() > 0) line.append(' '); line.append(move); }
+        return line.toString();
+    }
+
+    /** Store the actual BIN line chosen the first time a pairing runs; never redraw it on replay. */
+    public synchronized void setPairingOpeningIfMissing(int index, List<String> sanMoves, String name) throws IOException, JSONException {
+        Pairing p = pairings.get(index);
+        if (p.openingAssigned) return;
+        String line = joinSan(sanMoves == null ? Collections.emptyList() : sanMoves);
+        String label = name == null || name.trim().isEmpty() ? "Starting position" : name.trim();
+        // The repeat-opening option pairs adjacent color-reversal games. Whichever
+        // one is played first establishes the same immutable BIN line for both.
+        int first = repeatOpening ? (index / 2) * 2 : index;
+        int lastExclusive = repeatOpening ? Math.min(pairings.size(), first + 2) : index + 1;
+        if (repeatOpening) {
+            for (int target = first; target < lastExclusive; target++) {
+                Pairing partner = pairings.get(target);
+                if (partner.openingAssigned) {
+                    line = partner.openingSanLine;
+                    label = partner.openingName;
+                    break;
+                }
+            }
+        }
+        for (int target = first; target < lastExclusive; target++) {
+            Pairing paired = pairings.get(target);
+            if (!paired.openingAssigned) {
+                paired.openingSanLine = line;
+                paired.openingName = label;
+                paired.openingIndex = 0;
+                paired.openingAssigned = true;
+            }
+        }
+        save();
+    }
+
+    /** Original PGN date is reused when a scheduled game is replayed, replacing the same record. */
+    public synchronized String ensurePairingPgnDate(int index) throws IOException, JSONException {
+        Pairing p = pairings.get(index);
+        if (p.pgnDate == null || !p.pgnDate.matches("\\d{4}\\.\\d{2}\\.\\d{2}")) {
+            p.pgnDate = pgnTagValue(p.pgn, "Date");
+            if (!p.pgnDate.matches("\\d{4}\\.\\d{2}\\.\\d{2}")) {
+                java.util.Calendar now = java.util.Calendar.getInstance();
+                p.pgnDate = String.format(java.util.Locale.US, "%04d.%02d.%02d", now.get(java.util.Calendar.YEAR),
+                        now.get(java.util.Calendar.MONTH) + 1, now.get(java.util.Calendar.DAY_OF_MONTH));
+            }
+            save();
+        }
+        return p.pgnDate;
+    }
+
+    private String pgnTagValue(String pgn, String name) {
+        if (pgn == null) return "";
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "(?m)^\\[" + java.util.regex.Pattern.quote(name) + "\\s+\"((?:\\\\.|[^\"])*?)\"\\]").matcher(pgn);
+        return m.find() ? m.group(1).replace("\\\\\"", "\"").replace("\\\\\\\\", "\\\\") : "";
+    }
     /** All completed game PGNs in schedule order, separated for concatenated-PGN readers. */
     public synchronized String exportPgn() {
         StringBuilder out = new StringBuilder();
@@ -367,24 +563,29 @@ public final class TournamentManager {
                                           double whiteEvalPawns, double blackEvalPawns) throws IOException, JSONException {
         if (outcome == null || outcome == Outcome.UNFINISHED) throw new IllegalArgumentException("A final result is required");
         Pairing p = pairings.get(index);
-        if (p.isComplete()) throw new IllegalStateException("Pairing already has a result");
+        if (p.isComplete() && !p.replayPending) throw new IllegalStateException("Pairing already has a result");
         p.outcome = outcome; p.pgn = pgn == null ? "" : pgn;
         p.whiteEvalPawns = Double.isFinite(whiteEvalPawns) ? whiteEvalPawns : Double.NaN;
         p.blackEvalPawns = Double.isFinite(blackEvalPawns) ? blackEvalPawns : Double.NaN;
+        p.replayPending = false;
+        p.anomalyReviewed = false;
+        playQueue.remove(Integer.valueOf(index));
+        if (activePairingIndex == index) activePairingIndex = -1;
+        if (p.pgnDate == null || p.pgnDate.isEmpty()) p.pgnDate = pgnTagValue(p.pgn, "Date");
         save();
     }
 
     /** Unreviewed games that ended because one side ran out of time. */
     public synchronized List<Pairing> pendingTimeLosses() {
         ArrayList<Pairing> result = new ArrayList<>();
-        for (Pairing p : pairings) if (p.isComplete() && !p.anomalyReviewed && isTimeForfeit(p.pgn)) result.add(p);
+        for (Pairing p : pairings) if (p.isComplete() && !p.replayPending && !p.anomalyReviewed && isTimeForfeit(p.pgn)) result.add(p);
         return result;
     }
 
     /** Unreviewed drawn games whose rule/evaluation/move-count context merits manual review. */
     public synchronized List<Pairing> pendingDrawAnomalies() {
         ArrayList<Pairing> result = new ArrayList<>();
-        for (Pairing p : pairings) if (p.isComplete() && p.outcome == Outcome.DRAW && !p.anomalyReviewed && drawAnomalyReason(p) != null) result.add(p);
+        for (Pairing p : pairings) if (p.isComplete() && !p.replayPending && p.outcome == Outcome.DRAW && !p.anomalyReviewed && drawAnomalyReason(p) != null) result.add(p);
         return result;
     }
 
@@ -398,7 +599,7 @@ public final class TournamentManager {
     /** Mark a flagged game as reviewed without changing its result or PGN. */
     public synchronized void markAnomalyReviewed(int index) throws IOException, JSONException {
         Pairing p = pairings.get(index);
-        if (!p.isComplete()) throw new IllegalStateException("An unfinished game cannot be confirmed");
+        if (!p.isComplete() || p.replayPending) throw new IllegalStateException("An unfinished or queued-replay game cannot be confirmed");
         p.anomalyReviewed = true;
         save();
     }
@@ -485,7 +686,7 @@ public final class TournamentManager {
     /** Change the participants of an unfinished scheduled game without touching recorded games. */
     public synchronized void updatePairingEngines(int index, String whiteId, String blackId) throws IOException, JSONException {
         Pairing p = pairings.get(index);
-        if (p.isComplete()) throw new IllegalStateException("Completed games cannot be rescheduled");
+        if (p.isComplete() || p.replayPending) throw new IllegalStateException("Completed or queued-replay games cannot be rescheduled");
         if (whiteId == null || blackId == null || whiteId.equals(blackId))
             throw new IllegalArgumentException("Choose two different engines");
         requireEngine(whiteId); requireEngine(blackId);
@@ -497,7 +698,7 @@ public final class TournamentManager {
     public synchronized void updatePairingResult(int index, Outcome outcome) throws IOException, JSONException {
         if (outcome == null || outcome == Outcome.UNFINISHED) throw new IllegalArgumentException("Choose a final result");
         Pairing p = pairings.get(index);
-        if (!p.isComplete()) throw new IllegalStateException("An unfinished game has no result to correct");
+        if (!p.isComplete() || p.replayPending) throw new IllegalStateException("An unfinished or queued-replay game cannot have its result corrected");
         p.outcome = outcome;
         p.pgn = replacePgnResult(p.pgn, outcome);
         p.anomalyReviewed = true;
@@ -584,7 +785,9 @@ public final class TournamentManager {
         root.put("anomalyRuleSettingsSaved", anomalyRuleSettingsSaved); root.put("anomalyRulesEnabled", anomalyRulesEnabled);
         root.put("anomalyRuleStartFullMove", anomalyRuleStartFullMove); root.put("anomalyMaximumFullMoves", anomalyMaximumFullMoves);
         JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); ea.put(o); } root.put("engines", ea);
-        JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); o.put("whiteEvalPawns", Double.isFinite(p.whiteEvalPawns) ? p.whiteEvalPawns : JSONObject.NULL); o.put("blackEvalPawns", Double.isFinite(p.blackEvalPawns) ? p.blackEvalPawns : JSONObject.NULL); o.put("anomalyReviewed", p.anomalyReviewed); pa.put(o); } root.put("pairings", pa);
+        JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); o.put("whiteEvalPawns", Double.isFinite(p.whiteEvalPawns) ? p.whiteEvalPawns : JSONObject.NULL); o.put("blackEvalPawns", Double.isFinite(p.blackEvalPawns) ? p.blackEvalPawns : JSONObject.NULL); o.put("anomalyReviewed", p.anomalyReviewed); o.put("replayPending", p.replayPending); o.put("openingAssigned", p.openingAssigned); o.put("openingIndex", p.openingIndex); o.put("openingName", p.openingName); o.put("openingSanLine", p.openingSanLine); o.put("pgnDate", p.pgnDate); pa.put(o); } root.put("pairings", pa);
+        JSONArray queue = new JSONArray(); for (Integer index : playQueue) queue.put(index); root.put("playQueue", queue);
+        root.put("activePairingIndex", activePairingIndex);
         byte[] bytes = root.toString().getBytes(Charset.forName("UTF-8"));
         // The private copy remains the authoritative recovery copy and is always written first.
         try (FileOutputStream out = context.openFileOutput(fileName, Context.MODE_PRIVATE)) {

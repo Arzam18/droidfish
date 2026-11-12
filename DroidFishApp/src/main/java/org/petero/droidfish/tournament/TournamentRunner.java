@@ -318,22 +318,40 @@ public final class TournamentRunner {
         reviewPly = -1;
     }
 
-    private void applyBinOpening(String path) {
-        currentOpeningName = "Polyglot BIN opening";
-        game.tree.setTournamentOpening(currentOpeningName);
+    /** Select a BIN line on a throwaway position so it can be persisted before replaying it. */
+    private ArrayList<String> selectBinOpeningLine(String path) {
+        ArrayList<String> selected = new ArrayList<>();
+        Game probe = new Game(new EmptyPgnReceiver(), new TimeControlData());
         TournamentBinBook binBook = new TournamentBinBook(path);
         int limit = openingPlies <= 0 ? 256 : openingPlies;
         for (int ply = 0; ply < limit; ply++) {
-            Move move = binBook.choose(game);
+            Move move = binBook.choose(probe);
             if (move == null) break;
-            String san = TextIO.moveToString(game.currPos(), move, false, false);
+            String san = TextIO.moveToString(probe.currPos(), move, false, false);
+            Pair<Boolean, Move> result = probe.processString(san);
+            if (result == null || !Boolean.TRUE.equals(result.first) || result.second == null) break;
+            selected.add(san);
+            if (probe.getGameState() != Game.GameState.ALIVE) break;
+        }
+        return selected;
+    }
+
+    /** Apply the exact stored SAN line for this pairing and publish each opening ply. */
+    private int applyAssignedOpening(String sanLine) {
+        if (sanLine == null || sanLine.trim().isEmpty()) return 0;
+        int applied = 0;
+        int delayMs = currentOpeningName.toLowerCase(java.util.Locale.US).contains("polyglot") ? 250 : 500;
+        for (String san : sanLine.trim().split("\\s+")) {
             Pair<Boolean, Move> result = game.processString(san);
             if (result == null || !Boolean.TRUE.equals(result.first) || result.second == null) break;
+            applied++;
             listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove, 0, 0,
                     whiteEngine.displayName, blackEngine.displayName, currentPgnMoves(), game.getLastMove());
-            try { Thread.sleep(250); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            try { Thread.sleep(delayMs); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
             if (game.getGameState() != Game.GameState.ALIVE) break;
         }
+        return applied;
     }
 
     private void startNextGame() {
@@ -347,6 +365,13 @@ public final class TournamentRunner {
             whitePlayer.shutdownEngine();
             blackPlayer.shutdownEngine();
             listener.onTournamentFinished();
+            return;
+        }
+        try {
+            tournament.setActivePairing(pairing.index);
+        } catch (IOException | JSONException activeSaveError) {
+            listener.onError("Could not save active scheduled game", activeSaveError);
+            stop();
             return;
         }
         whiteEngine = findEngine(pairing.whiteEngineId);
@@ -368,39 +393,45 @@ public final class TournamentRunner {
                 : (baseTimeMs / 1000) + "+" + String.format(java.util.Locale.US, "%g", incrementMs / 1000.0);
         game.tree.setTournamentMetadata(tournament.title(), "DroidFish", pgnRoundNumber(pairing) + "." + gameNumberInRound(pairing),
                 eventType, pgnTimeControl);
+        try {
+            game.tree.setTournamentDate(tournament.ensurePairingPgnDate(pairing.index));
+        } catch (IOException | JSONException dateError) {
+            listener.onError("Could not save scheduled game date", dateError);
+            stop();
+            return;
+        }
         clock = tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD
                 ? new CetClock(baseTimeMs, baseTimeMs, tournament.limitValue())
                 : new CetClock(baseTimeMs, incrementMs);
-        game.tree.setTournamentOpening(currentOpeningName);
-        if (!tournament.openingBinPath().trim().isEmpty()) {
-            applyBinOpening(tournament.openingBinPath());
-        } else if (!openingPgn.trim().isEmpty()) {
-            // When paired color-reversal is enabled, keep the same opening for two
-            // consecutive games, then advance to the next PGN game for the next pair.
-            int openingIndex = (openingStartIndex - 1) + (repeatOpening
-                    ? Math.max(0, pairing.index / 2) : pairing.index);
-            String selectedOpening = PgnOpeningBook.gameAt(openingPgn, openingIndex);
-            currentOpeningName = PgnOpeningBook.tagValue(selectedOpening, "Opening");
-            if (currentOpeningName.isEmpty()) currentOpeningName = PgnOpeningBook.tagValue(selectedOpening, "ECO");
-            if (currentOpeningName.isEmpty()) currentOpeningName = "PGN opening " + (openingIndex + 1);
-            game.tree.setTournamentOpening(currentOpeningName);
-            int appliedPlies = PgnOpeningBook.applyMainLine(selectedOpening, openingPlies, san -> {
-                Pair<Boolean, Move> result = game.processString(san);
-                boolean applied = result != null && Boolean.TRUE.equals(result.first) && result.second != null;
-                if (applied) {
-                    // Publish each individual ply and allow the UI to render it before
-                    // applying the next opening move. Engines are started only after this loop.
-                    listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove,
-                            0, 0, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves(), game.getLastMove());
-                    try { Thread.sleep(500); }
-                    catch (InterruptedException e) { Thread.currentThread().interrupt(); return false; }
+
+        // Every pairing owns a persisted opening assignment. PGN assignments are
+        // prepared with the tournament; BIN lines are drawn once on first use and
+        // persisted before engines begin. Replay therefore cannot consume a new
+        // opening number or make a different random Polyglot selection.
+        try {
+            if (!pairing.openingAssigned) {
+                if (!tournament.openingBinPath().trim().isEmpty()) {
+                    ArrayList<String> selectedLine = selectBinOpeningLine(tournament.openingBinPath());
+                    tournament.setPairingOpeningIfMissing(pairing.index, selectedLine, "Polyglot BIN opening");
+                } else {
+                    tournament.prepareOpeningAssignments();
                 }
-                return applied;
-            });
-            if (appliedPlies == 0) {
-                listener.onError("Selected PGN opening " + (openingIndex + 1) +
-                        " contains no legal moves from the starting position. Check that the PGN has a valid main line.", null);
             }
+        } catch (IOException | JSONException openingSaveError) {
+            listener.onError("Could not save scheduled opening assignment", openingSaveError);
+            stop();
+            return;
+        }
+        pairing = tournament.pairings().get(pairing.index);
+        currentOpeningName = pairing.openingName == null || pairing.openingName.trim().isEmpty()
+                ? "Starting position" : pairing.openingName;
+        game.tree.setTournamentOpening(currentOpeningName);
+        int appliedPlies = applyAssignedOpening(pairing.openingSanLine);
+        if (appliedPlies == 0 && pairing.openingSanLine != null && !pairing.openingSanLine.trim().isEmpty()) {
+            listener.onError("The saved opening assignment for Game " + (pairing.index + 1) +
+                    " contains no legal moves from the starting position.", null);
+            stop();
+            return;
         }
         if (game.getGameState() != Game.GameState.ALIVE) {
             finishCurrentGame(resultForState(game.getGameState()));
