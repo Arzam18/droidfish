@@ -36,6 +36,10 @@ public final class TournamentManager {
         public String whiteEngineId, blackEngineId;
         public Outcome outcome;
         public String pgn;
+        /** Last independent engine evaluations in White's perspective, when available. */
+        public double whiteEvalPawns = Double.NaN, blackEvalPawns = Double.NaN;
+        /** True after the operator has adjudicated or explicitly confirmed this anomaly. */
+        public boolean anomalyReviewed;
         Pairing(int index, int round, int gameNumber, String white, String black, Outcome outcome, String pgn) {
             this.index = index; this.round = round; this.gameNumber = gameNumber;
             whiteEngineId = white; blackEngineId = black; this.outcome = outcome; this.pgn = pgn;
@@ -64,6 +68,11 @@ public final class TournamentManager {
     private int openingStartIndex = 1;
     private boolean repeatOpening;
     private long tournamentElapsedMs;
+    private boolean anomalyRuleSettingsSaved;
+    private boolean anomalyRulesEnabled;
+    private int anomalyRuleStartFullMove = 1;
+    private int anomalyMaximumFullMoves = 160;
+    private static final double ANOMALY_EVAL_THRESHOLD_PAWNS = 1.50;
     private final List<Engine> engines = new ArrayList<>();
     private final List<Pairing> pairings = new ArrayList<>();
     private String externalSaveError = "";
@@ -131,14 +140,22 @@ public final class TournamentManager {
         repeatOpening = root.optBoolean("repeatOpening", false);
         tournamentElapsedMs = Math.max(0L, root.optLong("tournamentElapsedMs", 0L));
         openingStartIndex = Math.max(1, root.optInt("openingStartIndex", 1));
+        anomalyRuleSettingsSaved = root.optBoolean("anomalyRuleSettingsSaved", false);
+        anomalyRulesEnabled = root.optBoolean("anomalyRulesEnabled", true);
+        anomalyRuleStartFullMove = Math.max(1, root.optInt("anomalyRuleStartFullMove", 1));
+        anomalyMaximumFullMoves = Math.max(1, root.optInt("anomalyMaximumFullMoves", 160));
         timeMode = TimeMode.valueOf(root.optString("timeMode", "CLOCK")); limitValue = root.optInt("limitValue", 30);
         JSONArray ea = root.getJSONArray("engines");
         for (int i = 0; i < ea.length(); i++) { JSONObject e = ea.getJSONObject(i); engines.add(new Engine(e.getString("id"), e.optString("name"))); }
         JSONArray pa = root.getJSONArray("pairings");
         for (int i = 0; i < pa.length(); i++) {
             JSONObject p = pa.getJSONObject(i);
-            pairings.add(new Pairing(p.getInt("index"), p.getInt("round"), p.getInt("gameNumber"),
-                    p.getString("white"), p.getString("black"), Outcome.valueOf(p.optString("outcome", "UNFINISHED")), p.optString("pgn", "")));
+            Pairing pairing = new Pairing(p.getInt("index"), p.getInt("round"), p.getInt("gameNumber"),
+                    p.getString("white"), p.getString("black"), Outcome.valueOf(p.optString("outcome", "UNFINISHED")), p.optString("pgn", ""));
+            pairing.whiteEvalPawns = p.optDouble("whiteEvalPawns", Double.NaN);
+            pairing.blackEvalPawns = p.optDouble("blackEvalPawns", Double.NaN);
+            pairing.anomalyReviewed = p.optBoolean("anomalyReviewed", false);
+            pairings.add(pairing);
         }
     }
 
@@ -318,6 +335,17 @@ public final class TournamentManager {
     /** Total active-play duration accumulated across pauses and app restarts. */
     public synchronized long tournamentElapsedMs() { return tournamentElapsedMs; }
     public synchronized void setTournamentElapsedMs(long elapsedMs) { tournamentElapsedMs = Math.max(tournamentElapsedMs, Math.max(0L, elapsedMs)); }
+    public synchronized boolean hasAnomalyRuleSettings() { return anomalyRuleSettingsSaved; }
+    /** Save the automatic-rule start move once per tournament; older JSON receives setup defaults on resume. */
+    public synchronized void setAnomalyRuleSettingsIfMissing(boolean enabled, int startFullMove, int maximumFullMoves) throws IOException, JSONException {
+        if (anomalyRuleSettingsSaved) return;
+        anomalyRulesEnabled = enabled;
+        anomalyRuleStartFullMove = Math.max(1, Math.min(10000, startFullMove));
+        anomalyMaximumFullMoves = Math.max(1, Math.min(10000, maximumFullMoves));
+        anomalyRuleSettingsSaved = true;
+        save();
+    }
+    public synchronized int anomalyRuleStartFullMove() { return anomalyRuleStartFullMove; }
     public synchronized List<Pairing> pairings() { return Collections.unmodifiableList(new ArrayList<>(pairings)); }
     public synchronized Pairing current() { for (Pairing p : pairings) if (!p.isComplete()) return p; return null; }
     public synchronized boolean isComplete() { return current() == null; }
@@ -333,10 +361,125 @@ public final class TournamentManager {
         return out.toString();
     }
     public synchronized void recordResult(int index, Outcome outcome, String pgn) throws IOException, JSONException {
+        recordResult(index, outcome, pgn, Double.NaN, Double.NaN);
+    }
+    public synchronized void recordResult(int index, Outcome outcome, String pgn,
+                                          double whiteEvalPawns, double blackEvalPawns) throws IOException, JSONException {
         if (outcome == null || outcome == Outcome.UNFINISHED) throw new IllegalArgumentException("A final result is required");
         Pairing p = pairings.get(index);
         if (p.isComplete()) throw new IllegalStateException("Pairing already has a result");
-        p.outcome = outcome; p.pgn = pgn == null ? "" : pgn; save();
+        p.outcome = outcome; p.pgn = pgn == null ? "" : pgn;
+        p.whiteEvalPawns = Double.isFinite(whiteEvalPawns) ? whiteEvalPawns : Double.NaN;
+        p.blackEvalPawns = Double.isFinite(blackEvalPawns) ? blackEvalPawns : Double.NaN;
+        save();
+    }
+
+    /** Unreviewed games that ended because one side ran out of time. */
+    public synchronized List<Pairing> pendingTimeLosses() {
+        ArrayList<Pairing> result = new ArrayList<>();
+        for (Pairing p : pairings) if (p.isComplete() && !p.anomalyReviewed && isTimeForfeit(p.pgn)) result.add(p);
+        return result;
+    }
+
+    /** Unreviewed drawn games whose rule/evaluation/move-count context merits manual review. */
+    public synchronized List<Pairing> pendingDrawAnomalies() {
+        ArrayList<Pairing> result = new ArrayList<>();
+        for (Pairing p : pairings) if (p.isComplete() && p.outcome == Outcome.DRAW && !p.anomalyReviewed && drawAnomalyReason(p) != null) result.add(p);
+        return result;
+    }
+
+    public synchronized String anomalyReason(Pairing p) {
+        if (p == null || !p.isComplete()) return "";
+        if (isTimeForfeit(p.pgn)) return "Loss on time";
+        String reason = drawAnomalyReason(p);
+        return reason == null ? "" : reason;
+    }
+
+    /** Mark a flagged game as reviewed without changing its result or PGN. */
+    public synchronized void markAnomalyReviewed(int index) throws IOException, JSONException {
+        Pairing p = pairings.get(index);
+        if (!p.isComplete()) throw new IllegalStateException("An unfinished game cannot be confirmed");
+        p.anomalyReviewed = true;
+        save();
+    }
+
+    private boolean isTimeForfeit(String pgn) {
+        String termination = pgnTag(pgn, "Termination").toLowerCase(java.util.Locale.US);
+        return termination.contains("time forfeit") || termination.contains("timeout") || termination.contains("lost on time");
+    }
+
+    private String drawAnomalyReason(Pairing p) {
+        if (p == null || p.outcome != Outcome.DRAW) return null;
+        String termination = pgnTag(p.pgn, "Termination").toLowerCase(java.util.Locale.US);
+        int fullMoves = pgnFullMoveCount(p.pgn);
+        boolean beforeRuleStart = anomalyRulesEnabled && anomalyRuleSettingsSaved &&
+                p.pgn != null && !p.pgn.trim().isEmpty() && fullMoves < anomalyRuleStartFullMove;
+        boolean fiftyMoveDraw = termination.contains("50-move rule") || termination.contains("fifty-move");
+        boolean maximumMoveDraw = termination.contains("maximum-move rule") || termination.contains("move limit") ||
+                (termination.isEmpty() && anomalyRulesEnabled && fullMoves >= anomalyMaximumFullMoves && anomalyMaximumFullMoves > 0);
+        double whiteEval = p.whiteEvalPawns, blackEval = p.blackEvalPawns;
+        if (!Double.isFinite(whiteEval) || !Double.isFinite(blackEval)) {
+            double[] fromPgn = readFinalEngineEvals(p.pgn);
+            if (!Double.isFinite(whiteEval)) whiteEval = fromPgn[0];
+            if (!Double.isFinite(blackEval)) blackEval = fromPgn[1];
+        }
+        boolean hasEval = Double.isFinite(whiteEval) || Double.isFinite(blackEval);
+        boolean hasBoth = Double.isFinite(whiteEval) && Double.isFinite(blackEval);
+        double strongest = Math.max(Double.isFinite(whiteEval) ? Math.abs(whiteEval) : 0.0,
+                Double.isFinite(blackEval) ? Math.abs(blackEval) : 0.0);
+        boolean evalDisagreement = strongest >= ANOMALY_EVAL_THRESHOLD_PAWNS ||
+                (hasBoth && Math.abs(whiteEval - blackEval) >= 1.0);
+
+        if (beforeRuleStart) return "Draw before automatic rules begin (configured start: full move " + anomalyRuleStartFullMove + ")" + evalSummary(whiteEval, blackEval);
+        if (fiftyMoveDraw && (evalDisagreement || !hasEval))
+            return "50-move-rule draw" + (evalDisagreement ? " despite engine evaluation" : " · engine evaluation unavailable") + evalSummary(whiteEval, blackEval);
+        if (maximumMoveDraw && (evalDisagreement || !hasEval))
+            return "Maximum-move-limit draw" + (evalDisagreement ? " despite engine evaluation" : " · engine evaluation unavailable") + evalSummary(whiteEval, blackEval);
+        if (evalDisagreement) return "Draw despite engine evaluation" + evalSummary(whiteEval, blackEval);
+        return null;
+    }
+
+    private String evalSummary(double whiteEval, double blackEval) {
+        if (!Double.isFinite(whiteEval) && !Double.isFinite(blackEval)) return "";
+        String white = Double.isFinite(whiteEval) ? String.format(java.util.Locale.US, "%+.2f", whiteEval) : "n/a";
+        String black = Double.isFinite(blackEval) ? String.format(java.util.Locale.US, "%+.2f", blackEval) : "n/a";
+        return " (White engine " + white + ", Black engine " + black + ")";
+    }
+
+    private String pgnTag(String pgn, String name) {
+        if (pgn == null) return "";
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?m)^\\[" + java.util.regex.Pattern.quote(name) + "\\s+\"((?:\\\\.|[^\"])*)\"\\]").matcher(pgn);
+        return matcher.find() ? matcher.group(1) : "";
+    }
+
+    private int pgnFullMoveCount(String pgn) {
+        if (pgn == null) return 0;
+        String movetext = pgn.replaceAll("(?m)^\\[[^\\r\\n]*\\][\\r\\n]*", " ")
+                .replaceAll("\\{[^}]*\\}", " ");
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?:^|\\s)(\\d+)\\.{1,3}").matcher(movetext);
+        int max = 0;
+        while (matcher.find()) try { max = Math.max(max, Integer.parseInt(matcher.group(1))); } catch (NumberFormatException ignored) { }
+        return max;
+    }
+
+    private double[] readFinalEngineEvals(String pgn) {
+        double white = Double.NaN, black = Double.NaN;
+        if (pgn == null) return new double[]{white, black};
+        java.util.regex.Matcher comments = java.util.regex.Pattern.compile("\\{([^}]*)\\}").matcher(pgn);
+        int ply = 0;
+        while (comments.find()) {
+            int commentPly = ply++;
+            java.util.regex.Matcher eval = java.util.regex.Pattern.compile("Eval:\\s*([+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)|[+-]M\\d+)").matcher(comments.group(1));
+            if (!eval.find()) continue;
+            String value = eval.group(1);
+            double parsed;
+            try {
+                if (value.toUpperCase(java.util.Locale.US).contains("M")) parsed = value.startsWith("-") ? -99.0 : 99.0;
+                else parsed = Double.parseDouble(value);
+            } catch (NumberFormatException ignored) { continue; }
+            if ((commentPly & 1) == 0) white = parsed; else black = parsed;
+        }
+        return new double[]{white, black};
     }
 
     /** Change the participants of an unfinished scheduled game without touching recorded games. */
@@ -357,6 +500,7 @@ public final class TournamentManager {
         if (!p.isComplete()) throw new IllegalStateException("An unfinished game has no result to correct");
         p.outcome = outcome;
         p.pgn = replacePgnResult(p.pgn, outcome);
+        p.anomalyReviewed = true;
         save();
     }
 
@@ -437,8 +581,10 @@ public final class TournamentManager {
         root.put("baseTimeMs", baseTimeMs); root.put("incrementMs", incrementMs);
         root.put("timeMode", timeMode.name()); root.put("limitValue", limitValue);
         root.put("openingPgn", openingPgn); root.put("openingBinPath", openingBinPath); root.put("openingPlies", openingPlies); root.put("openingStartIndex", openingStartIndex); root.put("repeatOpening", repeatOpening); root.put("tournamentElapsedMs", tournamentElapsedMs);
+        root.put("anomalyRuleSettingsSaved", anomalyRuleSettingsSaved); root.put("anomalyRulesEnabled", anomalyRulesEnabled);
+        root.put("anomalyRuleStartFullMove", anomalyRuleStartFullMove); root.put("anomalyMaximumFullMoves", anomalyMaximumFullMoves);
         JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); ea.put(o); } root.put("engines", ea);
-        JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); pa.put(o); } root.put("pairings", pa);
+        JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); o.put("whiteEvalPawns", Double.isFinite(p.whiteEvalPawns) ? p.whiteEvalPawns : JSONObject.NULL); o.put("blackEvalPawns", Double.isFinite(p.blackEvalPawns) ? p.blackEvalPawns : JSONObject.NULL); o.put("anomalyReviewed", p.anomalyReviewed); pa.put(o); } root.put("pairings", pa);
         byte[] bytes = root.toString().getBytes(Charset.forName("UTF-8"));
         // The private copy remains the authoritative recovery copy and is always written first.
         try (FileOutputStream out = context.openFileOutput(fileName, Context.MODE_PRIVATE)) {

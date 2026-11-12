@@ -683,7 +683,7 @@ public final class TournamentRunner {
         humanAdjudication = false;
         String pgn = game.tree.toPGN(pgnOptions);
         try {
-            tournament.recordResult(pairing.index, outcome, pgn);
+            tournament.recordResult(pairing.index, outcome, pgn, latestWhiteEvalPawns, latestBlackEvalPawns);
         } catch (IOException | JSONException e) {
             listener.onError("Could not save tournament result", e);
             stop();
