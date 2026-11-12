@@ -197,20 +197,41 @@ public final class TournamentActivity extends Activity {
         root.addView(text("Time control mode"), fullWidth());
         timeModeSpinner = new Spinner(this);
         timeModeSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
-                new String[]{"Time Clock: Time + Increment", "Time per move", "Depth per move", "Nodes per move"}));
+                new String[]{"Time Clock: Time + Increment", "Time per move", "Depth per move", "Nodes per move", "Move/Minute (e.g. 40/15)"}));
         root.addView(timeModeSpinner, fullWidth());
+        TextView movePeriodMinutesLabel = text("Minutes per period");
+        movePeriodMinutesLabel.setVisibility(View.GONE);
+        root.addView(movePeriodMinutesLabel, fullWidth());
         baseInput = field("Base time per side (minutes; 0.5 = 30 seconds)", "0.5"); root.addView(baseInput, fullWidth());
         incrementInput = field("Increment per move (seconds; 0.5 = half a second)", "0.5"); root.addView(incrementInput, fullWidth());
+        TextView movePeriodMovesLabel = text("Moves per period");
+        movePeriodMovesLabel.setVisibility(View.GONE);
+        root.addView(movePeriodMovesLabel, fullWidth());
         limitInput = field("Time per move (seconds), depth, or nodes", "2"); root.addView(limitInput, fullWidth());
         timeModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 boolean clockMode = position == 0;
-                baseInput.setVisibility(clockMode ? View.VISIBLE : View.GONE);
+                boolean movePeriodMode = position == 4;
+                baseInput.setVisibility(clockMode || movePeriodMode ? View.VISIBLE : View.GONE);
                 incrementInput.setVisibility(clockMode ? View.VISIBLE : View.GONE);
                 limitInput.setVisibility(clockMode ? View.GONE : View.VISIBLE);
-                if (position == 1) limitInput.setHint("Time per move in seconds (e.g. 2 or 5)");
-                else if (position == 2) { limitInput.setHint("Depth per move (e.g. 20)"); if ("2".equals(limitInput.getText().toString())) limitInput.setText("20"); }
-                else if (position == 3) { limitInput.setHint("Nodes per move (e.g. 100000)"); if ("20".equals(limitInput.getText().toString())) limitInput.setText("100000"); }
+                movePeriodMinutesLabel.setVisibility(movePeriodMode ? View.VISIBLE : View.GONE);
+                movePeriodMovesLabel.setVisibility(movePeriodMode ? View.VISIBLE : View.GONE);
+                if (clockMode) {
+                    baseInput.setHint("Base time per side (minutes; 0.5 = 30 seconds)");
+                    incrementInput.setHint("Increment per move (seconds; 0.5 = half a second)");
+                } else if (position == 1) {
+                    limitInput.setHint("Time per move in seconds (e.g. 2 or 5)");
+                } else if (position == 2) {
+                    limitInput.setHint("Depth per move (e.g. 20)");
+                    if ("2".equals(limitInput.getText().toString())) limitInput.setText("20");
+                } else if (position == 3) {
+                    limitInput.setHint("Nodes per move (e.g. 100000)");
+                    if ("20".equals(limitInput.getText().toString())) limitInput.setText("100000");
+                } else if (movePeriodMode) {
+                    baseInput.setHint("Time awarded each period in minutes (e.g. 15)");
+                    limitInput.setHint("Moves in each period (e.g. 40)");
+                }
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
         });
@@ -977,8 +998,11 @@ public final class TournamentActivity extends Activity {
                     default: result = "*"; break;
                 }
                 int endedAtMoves = countFullMoves(pairing.pgn);
-                out.append(pairing.index + 1).append('.').append(white).append("  -  ").append(black)
-                   .append("  (").append(result).append(") ").append(endedAtMoves).append(" moves").append('\n');
+                // Use the same readable two-line layout as the scheduled-game chooser:
+                // engine pairing and result on the first line, move count underneath.
+                out.append(pairing.index + 1).append('.').append(white).append(" - ").append(black)
+                   .append(" (").append(result).append(")").append('\n')
+                   .append(endedAtMoves).append(" moves").append("\n\n");
             }
             if (out.length() == 0) out.append("No scheduled games.");
             TextView text = text(out.toString());
@@ -1389,18 +1413,22 @@ public final class TournamentActivity extends Activity {
         try {
             int games = positiveInt(gamesInput, "games per pairing", 1);
             int timeModeIndex = timeModeSpinner.getSelectedItemPosition();
-            double baseMinutes = timeModeIndex == 0 ? positiveDouble(baseInput, "base time in minutes", 0.01) : 0.5;
+            boolean movePeriodMode = timeModeIndex == 4;
+            double baseMinutes = (timeModeIndex == 0 || movePeriodMode)
+                    ? positiveDouble(baseInput, movePeriodMode ? "minutes per move period" : "base time in minutes", 0.01)
+                    : 0.5;
             long baseMillis = Math.round(baseMinutes * 60_000.0);
             int increment = timeModeIndex == 0 ? (int)Math.round(nonNegativeDouble(incrementInput, "increment") * 1000.0) : 0;
             int limitValue = timeModeIndex == 1 ? (int)Math.min(Integer.MAX_VALUE / 1000L, Math.round(positiveDouble(limitInput, "seconds per move", 1) * 1000.0)) :
                     (timeModeIndex == 2 ? positiveInt(limitInput, "depth per move", 1) :
-                    (timeModeIndex == 3 ? positiveInt(limitInput, "nodes per move", 1) : 30));
+                    (timeModeIndex == 3 ? positiveInt(limitInput, "nodes per move", 1) :
+                    (movePeriodMode ? positiveInt(limitInput, "moves per time period", 1) : 30)));
             int openingPlies = nonNegativeInt(openingPliesInput, "opening plies");
             int openingStart = positiveInt(openingStartInput, "starting PGN opening number", 1);
             // A selected PGN is applied in full by default (0); positive values cap half-moves.
             if (openingPlies > 0 && selectedOpeningPgn.trim().isEmpty() && selectedOpeningBinPath.trim().isEmpty())
                 throw new IllegalArgumentException("Select a PGN opening file before setting a custom opening-ply limit");
-            if (baseMillis > Integer.MAX_VALUE * 1000L) throw new IllegalArgumentException("Base time is too large");
+            if (baseMillis > Integer.MAX_VALUE) throw new IllegalArgumentException("Base time is too large");
             TournamentManager.Format format = TournamentManager.Format.values()[formatSpinner.getSelectedItemPosition()];
             if (format == TournamentManager.Format.MATCH && selectedEngines.size() != 2)
                 throw new IllegalArgumentException("Match format requires exactly two engines");
@@ -1678,7 +1706,15 @@ public final class TournamentActivity extends Activity {
                     } else {
                         baseLabel = String.format(java.util.Locale.US, "0:%02d", baseSeconds);
                     }
-                    mirrorTcLabel = String.format(java.util.Locale.US, "%s+%s", baseLabel, incrementLabel);
+                    if (tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD) {
+                        double periodMinutes = tournament.baseTimeMs() / 60000.0;
+                        String periodLabel = periodMinutes == Math.rint(periodMinutes)
+                                ? String.format(java.util.Locale.US, "%.0f", periodMinutes)
+                                : String.format(java.util.Locale.US, "%.2f", periodMinutes);
+                        mirrorTcLabel = tournament.limitValue() + "/" + periodLabel;
+                    } else {
+                        mirrorTcLabel = String.format(java.util.Locale.US, "%s+%s", baseLabel, incrementLabel);
+                    }
                     if (mirrorHeaderText != null) mirrorHeaderText.setText(mirrorHeaderLabel());
                     statusText.setText("Game " + currentGameNumber + "/" + currentGameTotal + " " + tournament.title());
                     if (openingStartInput != null && tournament.repeatOpening()) {
