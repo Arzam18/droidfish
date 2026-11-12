@@ -10,6 +10,7 @@ import android.net.Uri;
 import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
 import android.app.AlertDialog;
+import android.app.ProgressDialog;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -96,6 +97,7 @@ public final class TournamentActivity extends Activity {
     private Button cachedScheduleAnomaliesButton, cachedScheduleQueueButton;
     private boolean cachedScheduleDirty = true;
     private AlertDialog cachedAnomalyDialog;
+    private volatile boolean tournamentLoadInProgress;
     private TournamentManager cachedAnomalyTournament;
     private TextView cachedAnomalySummary;
     private LinearLayout cachedAnomalyRows;
@@ -1489,7 +1491,12 @@ public final class TournamentActivity extends Activity {
         if (ruleStartMoveInput != null) e.putString("setupRuleStartMove", ruleStartMoveInput.getText().toString());
         if (drawRepetitionInput != null) e.putString("setupDrawRep", drawRepetitionInput.getText().toString());
         if (drawMaximumInput != null) e.putString("setupDrawMax", drawMaximumInput.getText().toString());
-        e.putString("setupOpeningPgn", selectedOpeningPgn);
+        // Keep small setup books in preferences, but do not place multi-megabyte PGNs
+        // inside the SharedPreferences XML. Saved tournaments store their own PGN copy.
+        if (selectedOpeningPgn != null && selectedOpeningPgn.length() <= 256 * 1024)
+            e.putString("setupOpeningPgn", selectedOpeningPgn);
+        else
+            e.remove("setupOpeningPgn");
         e.putString("setupOpeningName", selectedOpeningFileName);
         e.putString("setupOpeningBinPath", selectedOpeningBinPath);
         if (evalDrawScoreInput != null) e.putString("setupEvalDrawScore", evalDrawScoreInput.getText().toString());
@@ -1731,10 +1738,6 @@ public final class TournamentActivity extends Activity {
                     engines, games, baseMillis, increment, selectedOpeningPgn, openingPlies,
                     repeatOpeningCheck.isChecked(), TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart);
             tournament.setOpeningBinPath(selectedOpeningBinPath);
-            tournament.prepareOpeningAssignments();
-            tournament.save();
-            if (!tournament.externalSaveError().isEmpty())
-                Toast.makeText(this, tournament.externalSaveError(), Toast.LENGTH_LONG).show();
             launchTournament(tournament);
         } catch (Exception e) {
             TournamentRunner failedRunner = runner;
@@ -1837,7 +1840,7 @@ public final class TournamentActivity extends Activity {
                     String mirrorWarning = imported.externalSaveError().isEmpty() ? "" : "\n" + imported.externalSaveError();
                     Toast.makeText(this, "Imported " + sourceName + " · " + imported.pairings().size() +
                             " scheduled games" + mirrorWarning, Toast.LENGTH_LONG).show();
-                    showSavedTournamentActions(imported.savedFileName());
+                    showSavedTournamentActions(imported.savedFileName(), imported);
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> new AlertDialog.Builder(this).setTitle("Tournament import failed")
@@ -1857,28 +1860,95 @@ public final class TournamentActivity extends Activity {
         return "Selected file";
     }
 
+    private static final class SavedTournamentEntry {
+        final String fileName;
+        final String label;
+        final boolean readable;
+        SavedTournamentEntry(String fileName, String label, boolean readable) {
+            this.fileName = fileName;
+            this.label = label;
+            this.readable = readable;
+        }
+    }
+
     private void chooseSavedTournament() {
         if (runner != null) { Toast.makeText(this, "A tournament is already running", Toast.LENGTH_SHORT).show(); return; }
-        List<String> files = TournamentManager.savedTournamentFiles(this);
+        if (tournamentLoadInProgress) { Toast.makeText(this, "Tournament data is still loading", Toast.LENGTH_SHORT).show(); return; }
+        final List<String> files = TournamentManager.savedTournamentFiles(this);
         if (files.isEmpty()) { Toast.makeText(this, "No saved tournaments", Toast.LENGTH_SHORT).show(); return; }
-        ArrayList<String> labels = new ArrayList<>();
-        for (String file : files) {
-            try {
-                TournamentManager t = TournamentManager.restore(this, file);
-                int completed = 0;
-                for (TournamentManager.Pairing pairing : t.pairings()) if (pairing.isComplete()) completed++;
-                labels.add(t.title() + " · " + completed + "/" + t.pairings().size() + " games · " + (t.isComplete() ? "Completed" : "Unfinished"));
-            } catch (Exception e) { labels.add(file + " · Cannot read"); }
-        }
-        new AlertDialog.Builder(this).setTitle("Saved tournaments")
-            .setItems(labels.toArray(new String[0]), (dialog, which) -> showSavedTournamentActions(files.get(which)))
-            .setNegativeButton("Cancel", null).show();
+
+        // A tournament JSON can contain several megabytes of opening PGN and
+        // thousands of pairings. Never parse saved files on the UI thread, and
+        // retain only menu labels here rather than every full tournament in RAM.
+        tournamentLoadInProgress = true;
+        final ProgressDialog progressDialog = new ProgressDialog(this);
+        progressDialog.setMessage("Reading saved tournaments…");
+        progressDialog.setIndeterminate(true);
+        progressDialog.setCancelable(false);
+        progressDialog.show();
+        new Thread(() -> {
+            final ArrayList<SavedTournamentEntry> entries = new ArrayList<>();
+            for (String file : files) {
+                try {
+                    TournamentManager t = TournamentManager.restore(this, file);
+                    int completed = 0;
+                    for (TournamentManager.Pairing pairing : t.pairings()) if (pairing.isComplete()) completed++;
+                    String label = t.title() + " · " + completed + "/" + t.pairings().size() +
+                            " games · " + (t.isComplete() ? "Completed" : "Unfinished");
+                    entries.add(new SavedTournamentEntry(file, label, true));
+                } catch (Exception e) {
+                    entries.add(new SavedTournamentEntry(file, file + " · Cannot read: " + e.getMessage(), false));
+                }
+            }
+            runOnUiThread(() -> {
+                progressDialog.dismiss();
+                tournamentLoadInProgress = false;
+                if (isFinishing()) return;
+                String[] labels = new String[entries.size()];
+                for (int i = 0; i < entries.size(); i++) labels[i] = entries.get(i).label;
+                new AlertDialog.Builder(this).setTitle("Saved tournaments")
+                    .setItems(labels, (dialog, which) -> {
+                        SavedTournamentEntry entry = entries.get(which);
+                        if (!entry.readable) {
+                            Toast.makeText(this, "This saved tournament could not be read", Toast.LENGTH_LONG).show();
+                        } else {
+                            showSavedTournamentActions(entry.fileName);
+                        }
+                    })
+                    .setNegativeButton("Cancel", null).show();
+            });
+        }, "tournament-saved-list-loader").start();
     }
 
     private void showSavedTournamentActions(String fileName) {
-        final TournamentManager saved;
-        try { saved = TournamentManager.restore(this, fileName); }
-        catch (Exception e) { Toast.makeText(this, "Could not open saved tournament: " + e.getMessage(), Toast.LENGTH_LONG).show(); return; }
+        if (tournamentLoadInProgress) return;
+        tournamentLoadInProgress = true;
+        final ProgressDialog progressDialog = new ProgressDialog(this);
+        progressDialog.setMessage("Loading selected tournament…");
+        progressDialog.setIndeterminate(true);
+        progressDialog.setCancelable(false);
+        progressDialog.show();
+        new Thread(() -> {
+            TournamentManager saved = null;
+            Exception failure = null;
+            try { saved = TournamentManager.restore(this, fileName); }
+            catch (Exception error) { failure = error; }
+            final TournamentManager loaded = saved;
+            final Exception loadError = failure;
+            runOnUiThread(() -> {
+                progressDialog.dismiss();
+                tournamentLoadInProgress = false;
+                if (isFinishing()) return;
+                if (loadError != null) {
+                    Toast.makeText(this, "Could not open saved tournament: " + loadError.getMessage(), Toast.LENGTH_LONG).show();
+                } else {
+                    showSavedTournamentActions(fileName, loaded);
+                }
+            });
+        }, "tournament-selected-loader").start();
+    }
+
+    private void showSavedTournamentActions(String fileName, TournamentManager saved) {
         String[] actions = saved.isComplete() ? new String[]{"Load setup / review", "Delete tournament"} : new String[]{"Continue tournament", "Delete tournament"};
         new AlertDialog.Builder(this).setTitle(saved.title()).setItems(actions, (dialog, which) -> {
             if (which == 0) {
@@ -1912,7 +1982,8 @@ public final class TournamentActivity extends Activity {
         if (openingFileText != null) openingFileText.setText(selectedOpeningFileName);
         openingStartInput.setText(String.valueOf(tournament.openingStartIndex()));
         repeatOpeningCheck.setChecked(tournament.repeatOpening());
-        saveSetup();
+        // The authoritative opening book is already stored in this tournament's JSON.
+        // Do not duplicate a potentially multi-megabyte PGN into SharedPreferences.
     }
 
     private void updateTurnNameLabels() {
@@ -2014,20 +2085,54 @@ public final class TournamentActivity extends Activity {
     }
 
     private void launchTournament(final TournamentManager tournament) {
-        try {
-            tournament.prepareOpeningAssignments();
-        } catch (Exception openingAssignmentError) {
-            Toast.makeText(this, "Could not prepare saved opening assignments: " + openingAssignmentError.getMessage(), Toast.LENGTH_LONG).show();
+        if (tournamentLoadInProgress) {
+            Toast.makeText(this, "Tournament preparation is already running", Toast.LENGTH_SHORT).show();
             return;
         }
-        activeTournamentManager = tournament;
+        tournamentLoadInProgress = true;
+        if (startButton != null) startButton.setEnabled(false);
+        if (resumeButton != null) resumeButton.setEnabled(false);
+        if (stopButton != null) stopButton.setEnabled(false);
+        Toast.makeText(this, "Preparing tournament schedule in background…", Toast.LENGTH_SHORT).show();
+
         int anomalyRuleStart = 1, anomalyMaximumMoves = 160;
         try { anomalyRuleStart = Integer.parseInt(ruleStartMoveInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
         try { anomalyMaximumMoves = Integer.parseInt(drawMaximumInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
-        boolean anomalyRulesEnabled = (fastWinRuleCheck != null && fastWinRuleCheck.isChecked()) ||
+        final int configuredRuleStart = anomalyRuleStart;
+        final int configuredMaximumMoves = anomalyMaximumMoves;
+        final boolean anomalyRulesEnabled = (fastWinRuleCheck != null && fastWinRuleCheck.isChecked()) ||
                 (drawRulesCheck != null && drawRulesCheck.isChecked());
-        try { tournament.setAnomalyRuleSettingsIfMissing(anomalyRulesEnabled, anomalyRuleStart, anomalyMaximumMoves); }
-        catch (Exception saveConfigError) { Toast.makeText(this, "Could not save anomaly detection settings: " + saveConfigError.getMessage(), Toast.LENGTH_LONG).show(); }
+        new Thread(() -> {
+            Exception failure = null;
+            try {
+                tournament.prepareOpeningAssignments();
+                // New tournaments with an unassigned BIN book are persisted by
+                // setAnomalyRuleSettingsIfMissing(); PGN/no-book preparation saves
+                // when it initializes assignments. Imported events are already saved.
+                tournament.setAnomalyRuleSettingsIfMissing(anomalyRulesEnabled, configuredRuleStart, configuredMaximumMoves);
+            } catch (Exception error) {
+                failure = error;
+            }
+            final Exception preparationError = failure;
+            runOnUiThread(() -> {
+                tournamentLoadInProgress = false;
+                if (isFinishing()) return;
+                if (preparationError != null) {
+                    if (startButton != null) startButton.setEnabled(true);
+                    if (resumeButton != null) resumeButton.setEnabled(true);
+                    if (stopButton != null) stopButton.setEnabled(false);
+                    Toast.makeText(this, "Could not prepare tournament: " + preparationError.getMessage(), Toast.LENGTH_LONG).show();
+                    return;
+                }
+                if (!tournament.externalSaveError().isEmpty())
+                    Toast.makeText(this, tournament.externalSaveError(), Toast.LENGTH_LONG).show();
+                launchPreparedTournament(tournament);
+            });
+        }, "tournament-opening-preparation").start();
+    }
+
+    private void launchPreparedTournament(final TournamentManager tournament) {
+        activeTournamentManager = tournament;
         tournamentElapsedAccumulatedMs = tournament.tournamentElapsedMs();
         tournamentElapsedStartNs = System.nanoTime();
         lastTournamentElapsedSaveNs = tournamentElapsedStartNs;
@@ -2261,7 +2366,6 @@ public final class TournamentActivity extends Activity {
         try { evalDrawScore = Double.parseDouble(evalDrawScoreInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
         try { evalDrawCondition = Integer.parseInt(evalDrawConditionInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
         runner.configureEvaluationDrawRule(evalDrawScore, evalDrawCondition);
-        saveSetup();
         runner.start();
         // Start both interval clocks with the runner, even when the timer settings
         // were configured before a tournament existed (the old code left the play
