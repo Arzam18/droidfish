@@ -998,32 +998,153 @@ public final class TournamentActivity extends Activity {
                     default: result = "*"; break;
                 }
                 int endedAtMoves = countFullMoves(pairing.pgn);
-                // Use the same readable two-line layout as the scheduled-game chooser:
-                // engine pairing and result on the first line, move count underneath.
                 out.append(pairing.index + 1).append('.').append(white).append(" - ").append(black)
                    .append(" (").append(result).append(")").append('\n')
                    .append(endedAtMoves).append(" moves").append("\n\n");
             }
             if (out.length() == 0) out.append("No scheduled games.");
-            TextView text = text(out.toString());
-            text.setTextIsSelectable(true);
-            text.setTextSize(14);
-            text.setPadding(dp(12), dp(8), dp(12), dp(8));
+            TextView scheduleText = text(out.toString());
+            scheduleText.setTextIsSelectable(true);
+            scheduleText.setTextSize(14);
+            scheduleText.setPadding(dp(12), dp(8), dp(12), dp(8));
             ScrollView scroll = new ScrollView(this);
             scroll.setFillViewport(false);
-            scroll.addView(text, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            new AlertDialog.Builder(this).setTitle("Schedule · " + tournament.pairings().size() + " games")
-                    .setView(scroll)
-                    .setNegativeButton("COPY", (dialog, which) -> {
+            scroll.addView(scheduleText, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            LinearLayout content = new LinearLayout(this);
+            content.setOrientation(LinearLayout.VERTICAL);
+            content.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(420)));
+            Button anomalies = new Button(this);
+            List<TournamentManager.Pairing> timeLosses = tournament.pendingTimeLosses();
+            List<TournamentManager.Pairing> drawAnomalies = tournament.pendingDrawAnomalies();
+            anomalies.setText("ANOMALIES · " + timeLosses.size() + " TIME LOSSES · " + drawAnomalies.size() + " DRAWS");
+            content.addView(anomalies, fullWidth());
+            AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Schedule · " + tournament.pairings().size() + " games")
+                    .setView(content)
+                    .setNegativeButton("COPY", (d, which) -> {
                         ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
                         if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Tournament schedule", out.toString()));
                         Toast.makeText(this, "Schedule copied", Toast.LENGTH_SHORT).show();
                     })
-                    .setNeutralButton("EDIT", (dialog, which) -> showScheduleEditor(tournament))
-                    .setPositiveButton("CLOSE", null).show();
+                    .setNeutralButton("EDIT", (d, which) -> showScheduleEditor(tournament))
+                    .setPositiveButton("CLOSE", null).create();
+            anomalies.setOnClickListener(v -> { dialog.dismiss(); showAnomaliesDialog(tournament); });
+            dialog.show();
         } catch (Exception e) {
             Toast.makeText(this, "Could not load tournament schedule: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
+    }
+
+    /** Lists unreviewed time forfeits and drawn games with suspicious rule/evaluation context. */
+    private void showAnomaliesDialog(TournamentManager tournament) {
+        try {
+            List<TournamentManager.Pairing> timeLosses = tournament.pendingTimeLosses();
+            List<TournamentManager.Pairing> drawAnomalies = tournament.pendingDrawAnomalies();
+            LinearLayout root = new LinearLayout(this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setPadding(dp(12), dp(8), dp(12), dp(4));
+            TextView summary = text(completedGameCount(tournament) + " completed games total\n" +
+                    timeLosses.size() + " losses on time\n" + drawAnomalies.size() + " anomalous draws");
+            summary.setTextSize(16);
+            summary.setPadding(dp(4), dp(4), dp(4), dp(12));
+            root.addView(summary, fullWidth());
+            LinearLayout rows = new LinearLayout(this);
+            rows.setOrientation(LinearLayout.VERTICAL);
+            final AlertDialog[] anomalyDialogRef = new AlertDialog[1];
+            if (timeLosses.isEmpty() && drawAnomalies.isEmpty()) {
+                TextView none = text("No pending anomalies. All flagged games have been adjudicated or confirmed.");
+                none.setPadding(dp(8), dp(16), dp(8), dp(16));
+                rows.addView(none, fullWidth());
+            } else {
+                if (!timeLosses.isEmpty()) {
+                    addAnomalySectionHeader(rows, "LOSSES ON TIME (" + timeLosses.size() + " games)");
+                    for (TournamentManager.Pairing pairing : timeLosses) addAnomalyGameRow(rows, tournament, pairing, anomalyDialogRef);
+                }
+                if (!drawAnomalies.isEmpty()) {
+                    addAnomalySectionHeader(rows, "DRAW (!) (" + drawAnomalies.size() + " games)");
+                    for (TournamentManager.Pairing pairing : drawAnomalies) addAnomalyGameRow(rows, tournament, pairing, anomalyDialogRef);
+                }
+            }
+            ScrollView scroll = new ScrollView(this);
+            scroll.addView(rows, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(430)));
+            anomalyDialogRef[0] = new AlertDialog.Builder(this).setTitle("Anomalies")
+                    .setView(root).setPositiveButton("CLOSE", null).create();
+            anomalyDialogRef[0].show();
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not load anomalies: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void addAnomalySectionHeader(LinearLayout parent, String title) {
+        TextView header = text(title);
+        header.setTypeface(null, android.graphics.Typeface.BOLD);
+        header.setTextSize(15);
+        header.setPadding(dp(8), dp(14), dp(8), dp(8));
+        parent.addView(header, fullWidth());
+    }
+
+    private void addAnomalyGameRow(LinearLayout parent, TournamentManager tournament, TournamentManager.Pairing pairing,
+                                   AlertDialog[] parentDialog) {
+        List<TournamentManager.Engine> engines = tournament.engines();
+        String white = engineDisplayName(engines, pairing.whiteEngineId);
+        String black = engineDisplayName(engines, pairing.blackEngineId);
+        TextView row = text((pairing.index + 1) + ". " + white + " - " + black + " (" + pairingResultLabel(pairing.outcome) + ")\n" +
+                tournament.anomalyReason(pairing) + " · tap to review");
+        row.setTextSize(15);
+        row.setPadding(dp(10), dp(10), dp(10), dp(10));
+        row.setFocusable(true);
+        row.setClickable(true);
+        row.setOnClickListener(v -> {
+            if (parentDialog[0] != null) parentDialog[0].dismiss();
+            showAnomalyAction(tournament, pairing.index);
+        });
+        parent.addView(row, fullWidth());
+        View divider = new View(this);
+        divider.setBackgroundColor(0xFF666666);
+        parent.addView(divider, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+    }
+
+    private void showAnomalyAction(TournamentManager tournament, int pairingIndex) {
+        TournamentManager.Pairing pairing = tournament.pairings().get(pairingIndex);
+        String white = engineDisplayName(tournament.engines(), pairing.whiteEngineId);
+        String black = engineDisplayName(tournament.engines(), pairing.blackEngineId);
+        String message = "Game " + (pairingIndex + 1) + "\n" + white + " - " + black +
+                "\nCurrent result: " + pairingResultLabel(pairing.outcome) + "\n\n" + tournament.anomalyReason(pairing) +
+                "\n\nChoose the official result, or Confirm if no correction is needed.";
+        String[] actions = {"White wins (1-0)", "Black wins (0-1)", "Draw (½-½)", "Confirm (no issue)"};
+        new AlertDialog.Builder(this).setTitle("Review anomaly")
+                .setMessage(message)
+                .setItems(actions, (dialog, which) -> {
+                    if (which == 3) {
+                        try {
+                            tournament.markAnomalyReviewed(pairingIndex);
+                            Toast.makeText(this, "Game confirmed; removed from anomaly list", Toast.LENGTH_SHORT).show();
+                            showAnomaliesDialog(tournament);
+                        } catch (Exception e) {
+                            Toast.makeText(this, "Could not confirm game: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                        }
+                        return;
+                    }
+                    TournamentManager.Outcome outcome = which == 0 ? TournamentManager.Outcome.WHITE_WIN :
+                            which == 1 ? TournamentManager.Outcome.BLACK_WIN : TournamentManager.Outcome.DRAW;
+                    new AlertDialog.Builder(this).setTitle("Confirm adjudication")
+                            .setMessage("Set Game " + (pairingIndex + 1) + " to " + pairingResultLabel(outcome) +
+                                    "? Standings, tournament JSON, and PGN result metadata will be updated. Moves and annotations will remain unchanged.")
+                            .setNegativeButton("CANCEL", (d, w) -> showAnomaliesDialog(tournament))
+                            .setPositiveButton("ADJUDICATE", (d, w) -> {
+                                try {
+                                    tournament.updatePairingResult(pairingIndex, outcome);
+                                    String warning = "";
+                                    try { saveTournamentPgnAutomatically(tournament); }
+                                    catch (Exception pgnError) { warning = " · PGN export update failed: " + pgnError.getMessage(); }
+                                    if (standingsText != null) standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
+                                    Toast.makeText(this, "Game adjudicated and removed from anomaly list" + warning, Toast.LENGTH_LONG).show();
+                                    showAnomaliesDialog(tournament);
+                                } catch (Exception e) {
+                                    Toast.makeText(this, "Could not adjudicate game: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                                }
+                            }).show();
+                }).setNegativeButton("CANCEL", (dialog, which) -> showAnomaliesDialog(tournament)).show();
     }
 
     /** Edit future pairings only; an in-flight runner owns its current pairing. */
@@ -1675,6 +1796,13 @@ public final class TournamentActivity extends Activity {
 
     private void launchTournament(final TournamentManager tournament) {
         activeTournamentManager = tournament;
+        int anomalyRuleStart = 1, anomalyMaximumMoves = 160;
+        try { anomalyRuleStart = Integer.parseInt(ruleStartMoveInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
+        try { anomalyMaximumMoves = Integer.parseInt(drawMaximumInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
+        boolean anomalyRulesEnabled = (fastWinRuleCheck != null && fastWinRuleCheck.isChecked()) ||
+                (drawRulesCheck != null && drawRulesCheck.isChecked());
+        try { tournament.setAnomalyRuleSettingsIfMissing(anomalyRulesEnabled, anomalyRuleStart, anomalyMaximumMoves); }
+        catch (Exception saveConfigError) { Toast.makeText(this, "Could not save anomaly detection settings: " + saveConfigError.getMessage(), Toast.LENGTH_LONG).show(); }
         tournamentElapsedAccumulatedMs = tournament.tournamentElapsedMs();
         tournamentElapsedStartNs = System.nanoTime();
         lastTournamentElapsedSaveNs = tournamentElapsedStartNs;
