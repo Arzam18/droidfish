@@ -119,18 +119,9 @@ public final class TournamentManager {
         if (gamesPerPair < 1) throw new IllegalArgumentException("Games per pairing must be positive");
         if (baseTimeMs < 1 || incrementMs < 0 || openingPlies < 0) throw new IllegalArgumentException("Invalid tournament settings");
         this.context = context.getApplicationContext();
-        // Millisecond timestamps can collide when a user creates tournaments rapidly.
-        // Choose a unique persistent filename so a new event never overwrites another.
-        String candidate;
-        long stamp = System.currentTimeMillis();
-        int suffix = 0;
-        do {
-            candidate = "cet_tournament_" + stamp + (suffix == 0 ? "" : "_" + suffix) + ".json";
-            suffix++;
-        } while (new File(this.context.getFilesDir(), candidate).exists() ||
-                externalTournamentFile(this.context, candidate).exists() ||
-                fileExists(appExternalTournamentFile(this.context, candidate)));
-        this.fileName = candidate;
+        // Every new tournament receives a unique internal filename so importing or
+        // creating an event can never overwrite another saved tournament.
+        this.fileName = newUniqueFileName(this.context);
         this.title = title == null ? "CET Tournament" : title; this.format = format; this.gamesPerPair = gamesPerPair;
         this.baseTimeMs = baseTimeMs; this.incrementMs = incrementMs;
         this.timeMode = timeMode == null ? TimeMode.CLOCK : timeMode; this.limitValue = Math.max(1, limitValue);
@@ -164,8 +155,8 @@ public final class TournamentManager {
         JSONArray pa = root.getJSONArray("pairings");
         for (int i = 0; i < pa.length(); i++) {
             JSONObject p = pa.getJSONObject(i);
-            Pairing pairing = new Pairing(p.getInt("index"), p.getInt("round"), p.getInt("gameNumber"),
-                    p.getString("white"), p.getString("black"), Outcome.valueOf(p.optString("outcome", "UNFINISHED")), p.optString("pgn", ""));
+            Pairing pairing = new Pairing(p.optInt("index", i), p.optInt("round", 1), p.optInt("gameNumber", i + 1),
+                    p.optString("white", ""), p.optString("black", ""), Outcome.valueOf(p.optString("outcome", "UNFINISHED")), p.optString("pgn", ""));
             pairing.whiteEvalPawns = p.optDouble("whiteEvalPawns", Double.NaN);
             pairing.blackEvalPawns = p.optDouble("blackEvalPawns", Double.NaN);
             pairing.anomalyReviewed = p.optBoolean("anomalyReviewed", false);
@@ -191,6 +182,62 @@ public final class TournamentManager {
                 }
             }
         }
+    }
+
+
+    /** Import a compatible tournament JSON document under a new private filename.
+     * The source filename is deliberately ignored: arbitrary .json names are accepted,
+     * and the imported event becomes visible in savedTournamentFiles().
+     */
+    public static TournamentManager importJson(Context context, String json) throws IOException, JSONException {
+        if (context == null) throw new IOException("Application context is unavailable");
+        if (json == null || json.trim().isEmpty()) throw new IOException("The selected JSON file is empty");
+        if (!json.isEmpty() && json.charAt(0) == '\uFEFF') json = json.substring(1);
+        JSONObject root = new JSONObject(json);
+        TournamentManager imported;
+        try {
+            imported = new TournamentManager(context, root, newUniqueFileName(context.getApplicationContext()));
+            imported.validateImportedTournament();
+        } catch (RuntimeException | JSONException invalid) {
+            throw new IOException("Unsupported or invalid tournament JSON: " + invalid.getMessage(), invalid);
+        }
+        imported.save();
+        return imported;
+    }
+
+    private void validateImportedTournament() throws IOException {
+        if (engines.size() < 2) throw new IOException("A tournament must contain at least two engines");
+        if (pairings.isEmpty()) throw new IOException("The tournament schedule is empty");
+        if (gamesPerPair < 1 || limitValue < 1) throw new IOException("Invalid tournament settings");
+        java.util.HashSet<String> engineIds = new java.util.HashSet<>();
+        for (Engine engine : engines) {
+            if (!engineIds.add(engine.id)) throw new IOException("Duplicate engine ID: " + engine.id);
+        }
+        java.util.HashSet<Integer> indices = new java.util.HashSet<>();
+        for (int i = 0; i < pairings.size(); i++) {
+            Pairing pairing = pairings.get(i);
+            if (pairing.index != i || !indices.add(pairing.index))
+                throw new IOException("Schedule game indexes are missing, duplicated, or out of order at game " + (i + 1));
+            if (pairing.whiteEngineId == null || pairing.blackEngineId == null ||
+                    !engineIds.contains(pairing.whiteEngineId) || !engineIds.contains(pairing.blackEngineId))
+                throw new IOException("Game " + (i + 1) + " refers to an engine not listed in the tournament");
+            if (pairing.whiteEngineId.equals(pairing.blackEngineId))
+                throw new IOException("Game " + (i + 1) + " has the same engine on both sides");
+            if (pairing.outcome == null) throw new IOException("Game " + (i + 1) + " has an invalid result");
+        }
+    }
+
+    private static String newUniqueFileName(Context context) {
+        long stamp = System.currentTimeMillis();
+        int suffix = 0;
+        String candidate;
+        do {
+            candidate = "cet_tournament_" + stamp + (suffix == 0 ? "" : "_" + suffix) + ".json";
+            suffix++;
+        } while (new File(context.getFilesDir(), candidate).exists() ||
+                externalTournamentFile(context, candidate).exists() ||
+                fileExists(appExternalTournamentFile(context, candidate)));
+        return candidate;
     }
 
     public static TournamentManager restore(Context context) throws IOException, JSONException {
