@@ -25,6 +25,7 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.ListView;
 import android.widget.FrameLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -93,7 +94,10 @@ public final class TournamentActivity extends Activity {
     private View setupView, playView;
     private AlertDialog cachedScheduleDialog;
     private TournamentManager cachedScheduleTournament;
-    private TextView cachedScheduleText;
+    private ListView cachedScheduleList;
+    private ArrayAdapter<String> cachedScheduleAdapter;
+    private final ArrayList<String> cachedScheduleRows = new ArrayList<>();
+    private String cachedScheduleContents = "";
     private Button cachedScheduleAnomaliesButton, cachedScheduleQueueButton;
     private boolean cachedScheduleDirty = true;
     private AlertDialog cachedAnomalyDialog;
@@ -1012,20 +1016,30 @@ public final class TournamentActivity extends Activity {
             cachedScheduleTournament = tournament;
             cachedScheduleDirty = true;
 
-            TextView scheduleText = text("");
-            cachedScheduleText = scheduleText;
-            scheduleText.setTextIsSelectable(true);
-            // Use the same 16sp body size as the Standings dialog.
-            scheduleText.setTextSize(16);
-            scheduleText.setPadding(dp(12), dp(8), dp(12), dp(8));
-            ScrollView scroll = new ScrollView(this);
-            scroll.setFillViewport(false);
-            scroll.addView(scheduleText, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            // One row per game makes the Android FastScroller useful even for multi-thousand-game events.
+            cachedScheduleRows.clear();
+            ListView scheduleList = new ListView(this);
+            cachedScheduleList = scheduleList;
+            scheduleList.setFastScrollEnabled(true);
+            scheduleList.setFastScrollAlwaysVisible(true);
+            scheduleList.setVerticalScrollBarEnabled(true);
+            scheduleList.setScrollBarStyle(View.SCROLLBARS_INSIDE_INSET);
+            cachedScheduleAdapter = new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, cachedScheduleRows) {
+                @Override public View getView(int position, View convertView, ViewGroup parent) {
+                    TextView row = (TextView) super.getView(position, convertView, parent);
+                    row.setTextSize(16);
+                    row.setPadding(dp(12), dp(9), dp(30), dp(9));
+                    row.setLineSpacing(dp(2), 1.0f);
+                    row.setTextIsSelectable(true);
+                    return row;
+                }
+            };
+            scheduleList.setAdapter(cachedScheduleAdapter);
             LinearLayout content = new LinearLayout(this);
             content.setOrientation(LinearLayout.VERTICAL);
             int screenHeight = getResources().getDisplayMetrics().heightPixels;
             int scheduleViewportHeight = Math.min(dp(660), Math.max(dp(440), (int)(screenHeight * 0.70f)));
-            content.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, scheduleViewportHeight));
+            content.addView(scheduleList, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, scheduleViewportHeight));
             Button anomalies = new Button(this);
             cachedScheduleAnomaliesButton = anomalies;
             content.addView(anomalies, fullWidth());
@@ -1039,15 +1053,15 @@ public final class TournamentActivity extends Activity {
             replayQueueRow.addView(queueGames, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
             replayQueueRow.addView(replayGame, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
             content.addView(replayQueueRow, fullWidth());
-            cachedScheduleDialog = new AlertDialog.Builder(this).setTitle("Schedule · " + tournament.pairings().size() + " games")
+            cachedScheduleDialog = new AlertDialog.Builder(this).setTitle(scheduleTitle(tournament))
                     .setView(content)
                     .setNegativeButton("COPY", (d, which) -> {
-                        String current = cachedScheduleText == null ? "" : cachedScheduleText.getText().toString();
+                        String current = cachedScheduleContents == null ? "" : cachedScheduleContents;
                         ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
                         if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Tournament schedule", current));
                         Toast.makeText(this, "Schedule copied", Toast.LENGTH_SHORT).show();
                     })
-                    .setNeutralButton("EDIT", (d, which) -> showScheduleEditor(tournament))
+                    .setNeutralButton("EDIT", (d, which) -> showScheduleEditMenu(tournament))
                     .setPositiveButton("CLOSE", null).create();
             anomalies.setOnClickListener(v -> { cachedScheduleDialog.dismiss(); showAnomaliesDialog(tournament); });
             queueGames.setOnClickListener(v -> { cachedScheduleDialog.dismiss(); showPlayQueueEditor(tournament); });
@@ -1059,13 +1073,18 @@ public final class TournamentActivity extends Activity {
         }
     }
 
-    /** Rebuild the large schedule text only after a tournament change, not on every open. */
+    /** Title includes completed/total progress; rows are cached until tournament state changes. */
+    private String scheduleTitle(TournamentManager tournament) {
+        return "Schedule •" + tournament.completedGamesCount() + "/" + tournament.pairings().size();
+    }
+
     private void refreshCachedSchedule(TournamentManager tournament) {
-        if (cachedScheduleText == null || cachedScheduleTournament != tournament) {
+        if (cachedScheduleList == null || cachedScheduleTournament != tournament || cachedScheduleAdapter == null) {
             cachedScheduleDirty = true;
             return;
         }
-        StringBuilder out = new StringBuilder(Math.max(256, tournament.pairings().size() * 48));
+        StringBuilder copy = new StringBuilder(Math.max(256, tournament.pairings().size() * 64));
+        cachedScheduleRows.clear();
         List<TournamentManager.Engine> engines = tournament.engines();
         List<Integer> priorityQueue = tournament.playQueue();
         for (TournamentManager.Pairing pairing : tournament.pairings()) {
@@ -1075,12 +1094,19 @@ public final class TournamentActivity extends Activity {
             int endedAtMoves = countFullMoves(pairing.pgn);
             int queuePosition = priorityQueue.indexOf(pairing.index) + 1;
             String state = pairing.replayPending ? " · replay queued" : (queuePosition > 0 ? " · priority #" + queuePosition : "");
-            out.append(pairing.index + 1).append('.').append(white).append(" - ").append(black)
-               .append(" (").append(result).append(")").append(state).append('\n')
-               .append(endedAtMoves).append(" moves").append("\n\n");
+            String row = (pairing.index + 1) + "." + white + " - " + black + " (" + result + ")" + state
+                    + "\n" + endedAtMoves + " moves";
+            cachedScheduleRows.add(row);
+            if (copy.length() > 0) copy.append("\n\n");
+            copy.append(row);
         }
-        if (out.length() == 0) out.append("No scheduled games.");
-        cachedScheduleText.setText(out.toString());
+        if (cachedScheduleRows.isEmpty()) {
+            cachedScheduleRows.add("No scheduled games.");
+            copy.append("No scheduled games.");
+        }
+        cachedScheduleContents = copy.toString();
+        cachedScheduleAdapter.notifyDataSetChanged();
+        if (cachedScheduleDialog != null) cachedScheduleDialog.setTitle(scheduleTitle(tournament));
         cachedScheduleDirty = false;
         List<TournamentManager.Pairing> timeLosses = tournament.pendingTimeLosses();
         List<TournamentManager.Pairing> drawAnomalies = tournament.pendingDrawAnomalies();
@@ -1313,6 +1339,134 @@ public final class TournamentActivity extends Activity {
         View divider = new View(this);
         divider.setBackgroundColor(0xFF666666);
         parent.addView(divider, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+    }
+
+    /** Offers both pairing edits and tournament-wide engine identity corrections. */
+    private void showScheduleEditMenu(TournamentManager tournament) {
+        new AlertDialog.Builder(this).setTitle("Edit tournament")
+                .setItems(new String[]{"Edit scheduled game / result", "Edit tournament engine"}, (dialog, which) -> {
+                    if (which == 0) showScheduleEditor(tournament);
+                    else showTournamentEnginePicker(tournament);
+                }).setNegativeButton("CANCEL", null).show();
+    }
+
+    private void showTournamentEnginePicker(TournamentManager tournament) {
+        List<TournamentManager.Engine> engines = tournament.engines();
+        if (engines.isEmpty()) {
+            Toast.makeText(this, "No tournament engines are available to edit", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String[] labels = new String[engines.size()];
+        for (int i = 0; i < engines.size(); i++) {
+            TournamentManager.Engine engine = engines.get(i);
+            labels[i] = engine.displayName + " · " + tournament.completedGamesForEngine(engine.id) + " completed";
+        }
+        new AlertDialog.Builder(this).setTitle("Choose tournament engine to edit")
+                .setItems(labels, (dialog, which) -> {
+                    if (which >= 0 && which < engines.size()) showTournamentEngineEditor(tournament, which);
+                }).setNegativeButton("CANCEL", null).show();
+    }
+
+    private void showTournamentEngineEditor(TournamentManager tournament, int engineIndex) {
+        List<TournamentManager.Engine> engines = tournament.engines();
+        if (engineIndex < 0 || engineIndex >= engines.size()) return;
+        TournamentManager.Engine engine = engines.get(engineIndex);
+        loadEngineChoices();
+        int completedGames = tournament.completedGamesForEngine(engine.id);
+        boolean activeEngine = tournament.isEngineInActivePairing(engine.id);
+        final String[] selectedExecutableId = {engine.id};
+
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(20), dp(8), dp(20), dp(8));
+        TextView nameLabel = text("Engine name shown in standings, schedule, and PGN");
+        form.addView(nameLabel, fullWidth());
+        EditText nameInput = new EditText(this);
+        nameInput.setSingleLine(true);
+        nameInput.setText(engine.displayName);
+        nameInput.setSelection(nameInput.getText().length());
+        form.addView(nameInput, fullWidth());
+
+        TextView executableLabel = text("Tournament executable");
+        executableLabel.setPadding(0, dp(12), 0, dp(4));
+        form.addView(executableLabel, fullWidth());
+        TextView executablePath = text(engine.id);
+        executablePath.setTextSize(12);
+        executablePath.setTextIsSelectable(true);
+        form.addView(executablePath, fullWidth());
+        Button chooseExecutable = new Button(this);
+        chooseExecutable.setText("Choose installed engine version");
+        form.addView(chooseExecutable, fullWidth());
+        boolean executableCanChange = completedGames == 0 && !activeEngine;
+        chooseExecutable.setEnabled(executableCanChange && !availableEngines.isEmpty());
+        chooseExecutable.setOnClickListener(v -> {
+            ArrayList<EngineChoice> choices = new ArrayList<>();
+            ArrayList<String> choiceLabels = new ArrayList<>();
+            for (EngineChoice choice : availableEngines) {
+                if (choice.id == null || choice.id.trim().isEmpty()) continue;
+                choices.add(choice);
+                choiceLabels.add(choice.name + "\n" + choice.id);
+            }
+            if (choices.isEmpty()) {
+                Toast.makeText(this, "No installed replacement engines were found", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            new AlertDialog.Builder(this).setTitle("Select replacement executable")
+                    .setItems(choiceLabels.toArray(new String[0]), (d, selected) -> {
+                        if (selected < 0 || selected >= choices.size()) return;
+                        EngineChoice choice = choices.get(selected);
+                        selectedExecutableId[0] = choice.id;
+                        executablePath.setText(choice.id);
+                        nameInput.setText(choice.name);
+                        nameInput.setSelection(nameInput.getText().length());
+                    }).setNegativeButton("CANCEL", null).show();
+        });
+
+        TextView note = text(executableCanChange
+                ? "You can correct the display name only, or select a newer installed executable. Replacing the executable updates every unfinished scheduled pairing for this engine."
+                : (completedGames > 0
+                    ? "This engine has completed games. Its display name can still be corrected, including saved PGN player tags, but its executable cannot be replaced to protect historical results."
+                    : "This engine is part of the active or interrupted game. Its display name can be corrected, but its executable cannot be changed until that game is resolved."));
+        note.setTextSize(13);
+        note.setPadding(0, dp(8), 0, dp(4));
+        form.addView(note, fullWidth());
+
+        new AlertDialog.Builder(this).setTitle("Edit " + engine.displayName)
+                .setView(form)
+                .setNegativeButton("CANCEL", null)
+                .setPositiveButton("SAVE", (dialog, which) -> {
+                    String newName = nameInput.getText().toString().trim();
+                    String newId = selectedExecutableId[0];
+                    if (newName.isEmpty()) {
+                        Toast.makeText(this, "Engine name cannot be empty", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    boolean executableChanged = !engine.id.equals(newId);
+                    Runnable applyUpdate = () -> {
+                        try {
+                            tournament.updateTournamentEngine(engineIndex, newId, newName);
+                            invalidateCachedSchedule(tournament);
+                            if (standingsText != null) standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
+                            String warning = "";
+                            try { saveTournamentPgnAutomatically(tournament); }
+                            catch (Exception pgnError) { warning = " · PGN export update failed: " + pgnError.getMessage(); }
+                            Toast.makeText(this, (executableChanged
+                                    ? "Tournament engine updated; all unfinished pairings now use " + newName
+                                    : "Tournament engine name corrected to " + newName) + warning, Toast.LENGTH_LONG).show();
+                            if (cachedScheduleDialog != null && cachedScheduleDialog.isShowing()) refreshCachedSchedule(tournament);
+                        } catch (Exception e) {
+                            Toast.makeText(this, "Could not update tournament engine: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                        }
+                    };
+                    if (executableChanged) {
+                        new AlertDialog.Builder(this).setTitle("Confirm engine replacement")
+                                .setMessage("Replace " + engine.displayName + " with " + newName + " for every unfinished scheduled game? Completed games and their recorded results will not be reassigned.")
+                                .setNegativeButton("CANCEL", null)
+                                .setPositiveButton("REPLACE", (confirm, action) -> applyUpdate.run()).show();
+                    } else {
+                        applyUpdate.run();
+                    }
+                }).show();
     }
 
     /** Edit future pairings only; an in-flight runner owns its current pairing. */
@@ -2571,16 +2725,14 @@ public final class TournamentActivity extends Activity {
         }
     }
 
-    /** Event/Round/players identify a game, so a corrected result replaces its old PGN copy. */
+    /** Event/Date/Round are stable across display-name corrections, so PGN merges replace rather than duplicate a game. */
     private String pgnGameIdentity(String game) {
         String event = pgnTagValue(game, "Event");
         String date = pgnTagValue(game, "Date");
         String round = pgnTagValue(game, "Round");
-        String white = pgnTagValue(game, "White");
-        String black = pgnTagValue(game, "Black");
-        if (event.isEmpty() && date.isEmpty() && round.isEmpty() && white.isEmpty() && black.isEmpty())
+        if (event.isEmpty() && date.isEmpty() && round.isEmpty())
             return game.replaceAll("\\s+", " ");
-        return event + "\u001f" + date + "\u001f" + round + "\u001f" + white + "\u001f" + black;
+        return event + "\u001f" + date + "\u001f" + round;
     }
 
     private String pgnTagValue(String pgn, String tag) {
