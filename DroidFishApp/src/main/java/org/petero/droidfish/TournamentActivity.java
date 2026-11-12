@@ -877,7 +877,8 @@ public final class TournamentActivity extends Activity {
                         if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Tournament standings", standings));
                         Toast.makeText(this, "Standings copied", Toast.LENGTH_SHORT).show();
                     })
-                    .setPositiveButton("OK", null).show();
+                    .setNeutralButton("EDIT RESULT", (dialog, which) -> showStandingsResultPicker(tournament))
+                    .setPositiveButton("CLOSE", null).show();
         } catch (Exception e) {
             final String standings = standingsText == null ? "No results yet" : standingsText.getText().toString();
             new AlertDialog.Builder(this).setTitle("Tournament standings")
@@ -887,7 +888,68 @@ public final class TournamentActivity extends Activity {
                         if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Tournament standings", standings));
                         Toast.makeText(this, "Standings copied", Toast.LENGTH_SHORT).show();
                     })
-                    .setPositiveButton("OK", null).show();
+                    .setPositiveButton("CLOSE", null).show();
+        }
+    }
+
+    /** Standings are derived from game results; correct a game result to update both records consistently. */
+    private void showStandingsResultPicker(TournamentManager tournament) {
+        List<TournamentManager.Pairing> pairings = tournament.pairings();
+        ArrayList<Integer> completed = new ArrayList<>();
+        ArrayList<String> labels = new ArrayList<>();
+        List<TournamentManager.Engine> engines = tournament.engines();
+        for (TournamentManager.Pairing pairing : pairings) if (pairing.isComplete()) {
+            completed.add(pairing.index);
+            labels.add("Game " + (pairing.index + 1) + ": " + engineDisplayName(engines, pairing.whiteEngineId) +
+                    " - " + engineDisplayName(engines, pairing.blackEngineId) + " (" + pairingResultLabel(pairing.outcome) + ")");
+        }
+        if (completed.isEmpty()) {
+            Toast.makeText(this, "No completed game results to edit", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle("Choose result to correct")
+                .setItems(labels.toArray(new String[0]), (dialog, which) ->
+                        showPairingResultEditor(tournament, completed.get(which)))
+                .setNegativeButton("CANCEL", null).show();
+    }
+
+    private void showPairingResultEditor(TournamentManager tournament, int pairingIndex) {
+        TournamentManager.Pairing pairing = tournament.pairings().get(pairingIndex);
+        String[] results = {"White wins (1-0)", "Draw (1/2-1/2)", "Black wins (0-1)"};
+        new AlertDialog.Builder(this).setTitle("Correct Game " + (pairingIndex + 1) + " result")
+                .setItems(results, (dialog, which) -> {
+                    TournamentManager.Outcome outcome = which == 0 ? TournamentManager.Outcome.WHITE_WIN :
+                            which == 1 ? TournamentManager.Outcome.DRAW : TournamentManager.Outcome.BLACK_WIN;
+                    if (outcome == pairing.outcome) {
+                        Toast.makeText(this, "Result is already " + pairingResultLabel(outcome), Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    new AlertDialog.Builder(this).setTitle("Confirm result correction")
+                            .setMessage("Change Game " + (pairingIndex + 1) + " from " + pairingResultLabel(pairing.outcome) +
+                                    " to " + pairingResultLabel(outcome) + "? Standings will be recalculated.")
+                            .setNegativeButton("CANCEL", null)
+                            .setPositiveButton("SAVE", (d, w) -> {
+                                try {
+                                    tournament.updatePairingResult(pairingIndex, outcome);
+                                    String pgnSaveWarning = "";
+                                    try { saveTournamentPgnAutomatically(tournament); }
+                                    catch (Exception pgnError) { pgnSaveWarning = " · PGN export update failed: " + pgnError.getMessage(); }
+                                    if (standingsText != null) standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
+                                    Toast.makeText(this, "Result corrected and tournament saved" + pgnSaveWarning, Toast.LENGTH_LONG).show();
+                                    showStandingsDialog();
+                                } catch (Exception e) {
+                                    Toast.makeText(this, "Could not correct result: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                                }
+                            }).show();
+                }).setNegativeButton("CANCEL", null).show();
+    }
+
+    private String pairingResultLabel(TournamentManager.Outcome outcome) {
+        switch (outcome) {
+            case WHITE_WIN: return "1-0";
+            case DRAW: return "½-½";
+            case BLACK_WIN: return "0-1";
+            default: return "*";
         }
     }
 
@@ -933,10 +995,89 @@ public final class TournamentActivity extends Activity {
                         if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Tournament schedule", out.toString()));
                         Toast.makeText(this, "Schedule copied", Toast.LENGTH_SHORT).show();
                     })
+                    .setNeutralButton("EDIT", (dialog, which) -> showScheduleEditor(tournament))
                     .setPositiveButton("CLOSE", null).show();
         } catch (Exception e) {
             Toast.makeText(this, "Could not load tournament schedule: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
+    }
+
+    /** Edit future pairings only; an in-flight runner owns its current pairing. */
+    private void showScheduleEditor(TournamentManager tournament) {
+        List<TournamentManager.Pairing> pairings = tournament.pairings();
+        int lockedIndex = -1;
+        if (runner != null) {
+            TournamentManager.Pairing current = tournament.current();
+            if (current != null) lockedIndex = current.index;
+        }
+        ArrayList<Integer> editable = new ArrayList<>();
+        ArrayList<String> labels = new ArrayList<>();
+        List<TournamentManager.Engine> engines = tournament.engines();
+        for (TournamentManager.Pairing pairing : pairings) {
+            String white = engineDisplayName(engines, pairing.whiteEngineId);
+            String black = engineDisplayName(engines, pairing.blackEngineId);
+            String label = "Game " + (pairing.index + 1) + ": " + white + " - " + black + " (" + pairingResultLabel(pairing.outcome) + ")";
+            if (pairing.isComplete()) {
+                editable.add(pairing.index); labels.add(label + " · correct result");
+            } else if (runner == null || pairing.index > lockedIndex) {
+                editable.add(pairing.index); labels.add(label + " · edit pairing");
+            }
+        }
+        if (editable.isEmpty()) {
+            Toast.makeText(this, runner == null ? "No games available to edit" : "No future pairings available to edit", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle("Choose a scheduled game")
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                    int index = editable.get(which);
+                    TournamentManager.Pairing pairing = tournament.pairings().get(index);
+                    if (pairing.isComplete()) showPairingResultEditor(tournament, index);
+                    else showPairingEnginesEditor(tournament, index);
+                }).setNegativeButton("CANCEL", null).show();
+    }
+
+    private void showPairingEnginesEditor(TournamentManager tournament, int pairingIndex) {
+        TournamentManager.Pairing pairing = tournament.pairings().get(pairingIndex);
+        List<TournamentManager.Engine> engines = tournament.engines();
+        ArrayList<String> names = new ArrayList<>();
+        int whiteSelection = 0, blackSelection = Math.min(1, engines.size() - 1);
+        for (int i = 0; i < engines.size(); i++) {
+            TournamentManager.Engine engine = engines.get(i);
+            names.add(engine.displayName);
+            if (engine.id.equals(pairing.whiteEngineId)) whiteSelection = i;
+            if (engine.id.equals(pairing.blackEngineId)) blackSelection = i;
+        }
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(20), dp(8), dp(20), dp(4));
+        TextView whiteLabel = text("White engine");
+        Spinner whiteSpinner = new Spinner(this);
+        whiteSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names));
+        whiteSpinner.setSelection(whiteSelection);
+        TextView blackLabel = text("Black engine");
+        Spinner blackSpinner = new Spinner(this);
+        blackSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names));
+        blackSpinner.setSelection(blackSelection);
+        form.addView(whiteLabel, fullWidth()); form.addView(whiteSpinner, fullWidth());
+        form.addView(blackLabel, fullWidth()); form.addView(blackSpinner, fullWidth());
+        new AlertDialog.Builder(this).setTitle("Edit Game " + (pairingIndex + 1))
+                .setView(form)
+                .setNegativeButton("CANCEL", null)
+                .setPositiveButton("SAVE", (dialog, which) -> {
+                    int wi = whiteSpinner.getSelectedItemPosition();
+                    int bi = blackSpinner.getSelectedItemPosition();
+                    if (wi == bi) {
+                        Toast.makeText(this, "Choose two different engines", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    try {
+                        tournament.updatePairingEngines(pairingIndex, engines.get(wi).id, engines.get(bi).id);
+                        Toast.makeText(this, "Schedule updated and tournament saved", Toast.LENGTH_LONG).show();
+                        showScheduleDialog();
+                    } catch (Exception e) {
+                        Toast.makeText(this, "Could not update schedule: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                    }
+                }).show();
     }
 
     private String engineDisplayName(List<TournamentManager.Engine> engines, String id) {
@@ -1273,6 +1414,8 @@ public final class TournamentActivity extends Activity {
                     repeatOpeningCheck.isChecked(), TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart);
             tournament.setOpeningBinPath(selectedOpeningBinPath);
             tournament.save();
+            if (!tournament.externalSaveError().isEmpty())
+                Toast.makeText(this, tournament.externalSaveError(), Toast.LENGTH_LONG).show();
             launchTournament(tournament);
         } catch (Exception e) {
             TournamentRunner failedRunner = runner;
@@ -1686,6 +1829,8 @@ public final class TournamentActivity extends Activity {
                     standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
                     if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
                     if (savedError != null) statusText.setText(result + " · PGN auto-save failed: " + savedError.getMessage());
+                    if (!tournament.externalSaveError().isEmpty())
+                        statusText.setText(statusText.getText() + " · JSON mirror: " + tournament.externalSaveError());
                 });
             }
             @Override public void onTournamentFinished() {
@@ -1915,8 +2060,25 @@ public final class TournamentActivity extends Activity {
         if (starts.isEmpty()) { games.putIfAbsent(pgn.replaceAll("\\s+", " "), pgn); return; }
         for (int i = 0; i < starts.size(); i++) {
             String game = pgn.substring(starts.get(i), i + 1 < starts.size() ? starts.get(i + 1) : pgn.length()).trim();
-            if (!game.isEmpty()) games.putIfAbsent(game.replaceAll("\\s+", " "), game);
+            if (!game.isEmpty()) games.put(pgnGameIdentity(game), game);
         }
+    }
+
+    /** Event/Round/players identify a game, so a corrected result replaces its old PGN copy. */
+    private String pgnGameIdentity(String game) {
+        String event = pgnTagValue(game, "Event");
+        String date = pgnTagValue(game, "Date");
+        String round = pgnTagValue(game, "Round");
+        String white = pgnTagValue(game, "White");
+        String black = pgnTagValue(game, "Black");
+        if (event.isEmpty() && date.isEmpty() && round.isEmpty() && white.isEmpty() && black.isEmpty())
+            return game.replaceAll("\\s+", " ");
+        return event + "\u001f" + date + "\u001f" + round + "\u001f" + white + "\u001f" + black;
+    }
+
+    private String pgnTagValue(String pgn, String tag) {
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?m)^\\[" + tag + " \"((?:\\\\.|[^\"])*)\"\\]$").matcher(pgn);
+        return matcher.find() ? matcher.group(1) : "";
     }
 
     private String readSmallText(File file) {
