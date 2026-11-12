@@ -51,16 +51,23 @@ public final class PgnOpeningBook {
         return matcher.find() ? matcher.group(1).trim() : "";
     }
 
-    /** Select one PGN game in order, cycling to the first opening when the list ends. */
-    public static String gameAt(String pgn, int index) {
-        if (pgn == null || pgn.trim().isEmpty()) return "";
+    /** Split a PGN collection exactly once before assigning openings to a large schedule. */
+    public static List<String> splitGames(String pgn) {
+        if (pgn == null || pgn.trim().isEmpty()) return Collections.emptyList();
         String[] games = pgn.split("(?m)(?=^\\[Event\\s)");
         List<String> nonEmpty = new ArrayList<>();
         for (String game : games) if (!game.trim().isEmpty()) nonEmpty.add(game.trim());
-        if (nonEmpty.isEmpty()) return pgn;
-        int selected = index % nonEmpty.size();
-        if (selected < 0) selected += nonEmpty.size();
-        return nonEmpty.get(selected);
+        if (nonEmpty.isEmpty()) nonEmpty.add(pgn.trim());
+        return nonEmpty;
+    }
+
+    /** Select one PGN game in order, cycling to the first opening when the list ends. */
+    public static String gameAt(String pgn, int index) {
+        List<String> games = splitGames(pgn);
+        if (games.isEmpty()) return "";
+        int selected = index % games.size();
+        if (selected < 0) selected += games.size();
+        return games.get(selected);
     }
 
     /** Callback used to apply a parsed SAN token to the active chess position. */

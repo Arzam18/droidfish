@@ -130,7 +130,9 @@ public final class TournamentManager {
         this.openingStartIndex = Math.max(1, openingStartIndex);
         this.engines.addAll(engines);
         buildSchedule();
-        assignPgnOpeningsInMemory();
+        // Opening assignment is deferred to prepareOpeningAssignments(), which is
+        // invoked by the activity on a worker thread. Avoid parsing a large PGN
+        // book while the setup screen is running on the Android UI thread.
     }
 
     private TournamentManager(Context context, JSONObject root, String fileName) throws JSONException {
@@ -475,10 +477,15 @@ public final class TournamentManager {
     /** Initialize stable assignments for every PGN opening (or empty assignments when no book is selected). */
     public synchronized void prepareOpeningAssignments() throws IOException, JSONException {
         boolean changed = false;
+        // Splitting this 3+ MB string separately for every scheduled game used to
+        // rescan the entire opening book thousands of times (O(games * book size)).
+        // Split once, then do O(1) indexed lookups for all pairings.
+        final List<String> pgnGames = openingPgn.trim().isEmpty()
+                ? Collections.emptyList() : PgnOpeningBook.splitGames(openingPgn);
         for (Pairing p : pairings) {
             if (p.openingAssigned) continue;
-            if (!openingPgn.trim().isEmpty()) {
-                assignPgnOpening(p);
+            if (!pgnGames.isEmpty()) {
+                assignPgnOpening(p, pgnGames);
                 changed = true;
             } else if (openingBinPath.trim().isEmpty()) {
                 p.openingAssigned = true;
@@ -516,12 +523,16 @@ public final class TournamentManager {
 
     private void assignPgnOpeningsInMemory() {
         if (openingPgn.trim().isEmpty()) return;
-        for (Pairing p : pairings) if (!p.openingAssigned) assignPgnOpening(p);
+        List<String> pgnGames = PgnOpeningBook.splitGames(openingPgn);
+        for (Pairing p : pairings) if (!p.openingAssigned) assignPgnOpening(p, pgnGames);
     }
 
-    private void assignPgnOpening(Pairing p) {
+    private void assignPgnOpening(Pairing p, List<String> pgnGames) {
+        if (pgnGames == null || pgnGames.isEmpty()) return;
         int zeroBased = Math.max(0, openingStartIndex - 1) + (repeatOpening ? Math.max(0, p.index / 2) : p.index);
-        String selected = PgnOpeningBook.gameAt(openingPgn, zeroBased);
+        int selectedIndex = zeroBased % pgnGames.size();
+        if (selectedIndex < 0) selectedIndex += pgnGames.size();
+        String selected = pgnGames.get(selectedIndex);
         List<String> moves = PgnOpeningBook.mainLineSan(selected);
         if (openingPlies > 0 && moves.size() > openingPlies)
             moves = new ArrayList<>(moves.subList(0, openingPlies));
