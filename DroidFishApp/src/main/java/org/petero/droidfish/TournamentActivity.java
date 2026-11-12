@@ -987,6 +987,7 @@ public final class TournamentActivity extends Activity {
             TournamentManager tournament = activeTournamentManager != null ? activeTournamentManager : TournamentManager.restore(this);
             List<TournamentManager.Engine> engines = tournament.engines();
             StringBuilder out = new StringBuilder();
+            List<Integer> priorityQueue = tournament.playQueue();
             for (TournamentManager.Pairing pairing : tournament.pairings()) {
                 String white = engineDisplayName(engines, pairing.whiteEngineId);
                 String black = engineDisplayName(engines, pairing.blackEngineId);
@@ -998,8 +999,11 @@ public final class TournamentActivity extends Activity {
                     default: result = "*"; break;
                 }
                 int endedAtMoves = countFullMoves(pairing.pgn);
+                int queuePosition = priorityQueue.indexOf(pairing.index) + 1;
+                String state = pairing.replayPending ? " · replay queued" :
+                        (queuePosition > 0 ? " · priority #" + queuePosition : "");
                 out.append(pairing.index + 1).append('.').append(white).append(" - ").append(black)
-                   .append(" (").append(result).append(")").append('\n')
+                   .append(" (").append(result).append(")").append(state).append('\n')
                    .append(endedAtMoves).append(" moves").append("\n\n");
             }
             if (out.length() == 0) out.append("No scheduled games.");
@@ -1018,6 +1022,15 @@ public final class TournamentActivity extends Activity {
             List<TournamentManager.Pairing> drawAnomalies = tournament.pendingDrawAnomalies();
             anomalies.setText("ANOMALIES · " + timeLosses.size() + " TIME LOSSES · " + drawAnomalies.size() + " DRAWS");
             content.addView(anomalies, fullWidth());
+            LinearLayout replayQueueRow = new LinearLayout(this);
+            replayQueueRow.setOrientation(LinearLayout.HORIZONTAL);
+            Button queueGames = new Button(this);
+            queueGames.setText("PLAY QUEUE · " + tournament.playQueue().size());
+            Button replayGame = new Button(this);
+            replayGame.setText("REPLAY GAME");
+            replayQueueRow.addView(queueGames, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            replayQueueRow.addView(replayGame, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            content.addView(replayQueueRow, fullWidth());
             AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Schedule · " + tournament.pairings().size() + " games")
                     .setView(content)
                     .setNegativeButton("COPY", (d, which) -> {
@@ -1028,10 +1041,92 @@ public final class TournamentActivity extends Activity {
                     .setNeutralButton("EDIT", (d, which) -> showScheduleEditor(tournament))
                     .setPositiveButton("CLOSE", null).create();
             anomalies.setOnClickListener(v -> { dialog.dismiss(); showAnomaliesDialog(tournament); });
+            queueGames.setOnClickListener(v -> { dialog.dismiss(); showPlayQueueEditor(tournament); });
+            replayGame.setOnClickListener(v -> { dialog.dismiss(); showReplayGamePicker(tournament); });
             dialog.show();
         } catch (Exception e) {
             Toast.makeText(this, "Could not load tournament schedule: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
+    }
+
+    /** Multi-select unfinished scheduled games in the operator's chosen execution order. */
+    private void showPlayQueueEditor(TournamentManager tournament) {
+        ArrayList<Integer> gameIndices = new ArrayList<>();
+        ArrayList<String> labels = new ArrayList<>();
+        List<TournamentManager.Engine> engines = tournament.engines();
+        List<TournamentManager.Pairing> pairings = tournament.pairings();
+        for (TournamentManager.Pairing pairing : pairings) {
+            if (pairing.isComplete() || pairing.replayPending || pairing.index == tournament.activePairingIndex()) continue;
+            String white = engineDisplayName(engines, pairing.whiteEngineId);
+            String black = engineDisplayName(engines, pairing.blackEngineId);
+            gameIndices.add(pairing.index);
+            labels.add("Game " + (pairing.index + 1) + ": " + white + " - " + black);
+        }
+        if (gameIndices.isEmpty()) {
+            Toast.makeText(this, "No unfinished games available for the play queue", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        boolean[] checked = new boolean[gameIndices.size()];
+        for (int i = 0; i < gameIndices.size(); i++) checked[i] = tournament.isQueued(gameIndices.get(i));
+        new AlertDialog.Builder(this).setTitle("Play queue · Select games")
+                .setMultiChoiceItems(labels.toArray(new String[0]), checked, (dialog, which, isChecked) -> {
+                    int gameIndex = gameIndices.get(which);
+                    try {
+                        tournament.setQueued(gameIndex, isChecked);
+                        String action = isChecked ? "added to" : "removed from";
+                        int queuePosition = tournament.playQueue().indexOf(gameIndex) + 1;
+                        String position = isChecked ? " · queue position " + queuePosition : "";
+                        Toast.makeText(this, "Game " + (gameIndex + 1) + " " + action + " priority queue" + position, Toast.LENGTH_SHORT).show();
+                    } catch (Exception e) {
+                        ((AlertDialog)dialog).getListView().setItemChecked(which, !isChecked);
+                        Toast.makeText(this, "Could not update play queue: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                    }
+                }).setPositiveButton("DONE", (dialog, which) -> showScheduleDialog())
+                .setNegativeButton("CANCEL", (dialog, which) -> showScheduleDialog()).show();
+    }
+
+    /** Select a completed schedule entry to replay with its persisted original opening. */
+    private void showReplayGamePicker(TournamentManager tournament) {
+        ArrayList<Integer> gameIndices = new ArrayList<>();
+        ArrayList<String> labels = new ArrayList<>();
+        List<TournamentManager.Engine> engines = tournament.engines();
+        for (TournamentManager.Pairing pairing : tournament.pairings()) {
+            if (!pairing.isComplete() || pairing.replayPending) continue;
+            String white = engineDisplayName(engines, pairing.whiteEngineId);
+            String black = engineDisplayName(engines, pairing.blackEngineId);
+            String opening = pairing.openingName == null || pairing.openingName.trim().isEmpty()
+                    ? "Starting position" : pairing.openingName;
+            gameIndices.add(pairing.index);
+            labels.add("Game " + (pairing.index + 1) + ": " + white + " - " + black +
+                    " (" + pairingResultLabel(pairing.outcome) + ") · " + opening);
+        }
+        if (gameIndices.isEmpty()) {
+            Toast.makeText(this, "No completed games available to replay", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle("Choose a game to replay")
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                    int gameIndex = gameIndices.get(which);
+                    TournamentManager.Pairing selected = tournament.pairings().get(gameIndex);
+                    String opening = selected.openingName == null || selected.openingName.trim().isEmpty()
+                            ? "Starting position" : selected.openingName;
+                    new AlertDialog.Builder(this).setTitle("Replay Game " + (gameIndex + 1))
+                            .setMessage("The replacement game will use the same engine pairing and saved opening (" + opening +"). " +
+                                    "The existing result and PGN remain recoverable until the replay finishes. The new game will replace the old result and moves.")
+                            .setNegativeButton("CANCEL", null)
+                            .setPositiveButton("REPLAY", (confirm, action) -> {
+                                try {
+                                    tournament.requestReplay(gameIndex);
+                                    if (runner == null) {
+                                        launchTournament(tournament);
+                                    } else {
+                                        Toast.makeText(this, "Game " + (gameIndex + 1) + " placed at the front of the play queue. The current game will finish first.", Toast.LENGTH_LONG).show();
+                                    }
+                                } catch (Exception e) {
+                                    Toast.makeText(this, "Could not queue replay: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                                }
+                            }).show();
+                }).setNegativeButton("CANCEL", null).show();
     }
 
     /** Lists unreviewed time forfeits and drawn games with suspicious rule/evaluation context. */
@@ -1162,7 +1257,9 @@ public final class TournamentActivity extends Activity {
             String white = engineDisplayName(engines, pairing.whiteEngineId);
             String black = engineDisplayName(engines, pairing.blackEngineId);
             String label = "Game " + (pairing.index + 1) + ": " + white + " - " + black + " (" + pairingResultLabel(pairing.outcome) + ")";
-            if (pairing.isComplete()) {
+            if (pairing.replayPending) {
+                // The replacement game owns this record until it finishes.
+            } else if (pairing.isComplete()) {
                 editable.add(pairing.index); labels.add(label + " · correct result");
             } else if (runner == null || pairing.index > lockedIndex) {
                 editable.add(pairing.index); labels.add(label + " · edit pairing");
@@ -1562,6 +1659,7 @@ public final class TournamentActivity extends Activity {
                     engines, games, baseMillis, increment, selectedOpeningPgn, openingPlies,
                     repeatOpeningCheck.isChecked(), TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart);
             tournament.setOpeningBinPath(selectedOpeningBinPath);
+            tournament.prepareOpeningAssignments();
             tournament.save();
             if (!tournament.externalSaveError().isEmpty())
                 Toast.makeText(this, tournament.externalSaveError(), Toast.LENGTH_LONG).show();
@@ -1795,6 +1893,12 @@ public final class TournamentActivity extends Activity {
     }
 
     private void launchTournament(final TournamentManager tournament) {
+        try {
+            tournament.prepareOpeningAssignments();
+        } catch (Exception openingAssignmentError) {
+            Toast.makeText(this, "Could not prepare saved opening assignments: " + openingAssignmentError.getMessage(), Toast.LENGTH_LONG).show();
+            return;
+        }
         activeTournamentManager = tournament;
         int anomalyRuleStart = 1, anomalyMaximumMoves = 160;
         try { anomalyRuleStart = Integer.parseInt(ruleStartMoveInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
@@ -2210,9 +2314,19 @@ public final class TournamentActivity extends Activity {
         java.util.LinkedHashMap<String, String> games = new java.util.LinkedHashMap<>();
         collectPgnGames(games, existing);
         collectPgnGames(games, incoming);
+        ArrayList<String> orderedGames = new ArrayList<>(games.values());
+        Collections.sort(orderedGames, (a, b) -> Long.compare(pgnRoundOrderKey(a), pgnRoundOrderKey(b)));
         StringBuilder result = new StringBuilder();
-        for (String game : games.values()) { if (result.length() > 0) result.append("\n\n"); result.append(game); }
+        for (String game : orderedGames) { if (result.length() > 0) result.append("\n\n"); result.append(game); }
         return result.toString();
+    }
+
+    private long pgnRoundOrderKey(String game) {
+        String round = pgnTagValue(game, "Round");
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^(\\d+)\\.(\\d+)$").matcher(round.trim());
+        if (!m.matches()) return Long.MAX_VALUE;
+        try { return Long.parseLong(m.group(1)) * 1000000L + Long.parseLong(m.group(2)); }
+        catch (NumberFormatException ignored) { return Long.MAX_VALUE; }
     }
 
     private void collectPgnGames(java.util.LinkedHashMap<String, String> games, String source) {
