@@ -956,7 +956,7 @@ public final class TournamentActivity extends Activity {
                                     try { saveTournamentPgnAutomatically(tournament); }
                                     catch (Exception pgnError) { pgnSaveWarning = " · PGN export update failed: " + pgnError.getMessage(); }
                                     if (standingsText != null) standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
-                                    Toast.makeText(this, "Result corrected and tournament saved" + pgnSaveWarning, Toast.LENGTH_LONG).show();
+                                    Toast.makeText(this, "Result corrected; standings, tournament JSON, and PGN result saved (moves unchanged)" + pgnSaveWarning, Toast.LENGTH_LONG).show();
                                     showStandingsDialog();
                                 } catch (Exception e) {
                                     Toast.makeText(this, "Could not correct result: " + e.getMessage(), Toast.LENGTH_LONG).show();
