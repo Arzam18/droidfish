@@ -461,9 +461,8 @@ public final class TournamentRunner {
     }
 
     /**
-     * PGN round metadata treats one complete round-robin cycle as a round.
-     * For example, 6 engines with 2 games per pairing produce 30 games
-     * (1.1 through 1.30); 12 engines produce 132 (1.1 through 1.132).
+     * PGN metadata preserves the existing round-robin cycle convention.
+     * Swiss uses the manager's explicit round and per-round game number.
      */
     private int gamesPerPgnRound() {
         if (tournament.format() == TournamentManager.Format.ROUND_ROBIN) {
@@ -474,11 +473,13 @@ public final class TournamentRunner {
     }
 
     private int pgnRoundNumber(TournamentManager.Pairing target) {
+        if (tournament.format() == TournamentManager.Format.SWISS) return Math.max(1, target.round);
         return Math.max(1, target.index / gamesPerPgnRound() + 1);
     }
 
     /** Sequential game number inside the complete tournament round. */
     private String gameNumberInRound(TournamentManager.Pairing target) {
+        if (tournament.format() == TournamentManager.Format.SWISS) return Integer.toString(target.gameNumber);
         return Integer.toString(target.index % gamesPerPgnRound() + 1);
     }
 
@@ -717,6 +718,11 @@ public final class TournamentRunner {
             tournament.recordResult(pairing.index, outcome, pgn, latestWhiteEvalPawns, latestBlackEvalPawns);
         } catch (IOException | JSONException e) {
             listener.onError("Could not save tournament result", e);
+            stop();
+            return;
+        } catch (RuntimeException e) {
+            if (tournament.format() != TournamentManager.Format.SWISS) throw e;
+            listener.onError("Could not update the next Swiss round", e);
             stop();
             return;
         }
