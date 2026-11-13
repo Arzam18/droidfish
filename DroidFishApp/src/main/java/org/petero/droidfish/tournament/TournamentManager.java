@@ -23,19 +23,27 @@ import java.util.Random;
 
 /** Persistent tournament schedule/result model. Engine execution is owned by the controller. */
 public final class TournamentManager {
-    // Keep SWISS last: the setup spinner and saved setup preferences use ordinals.
-    public enum Format { ROUND_ROBIN, MATCH, GAUNTLET, SWISS }
+    // Preserve existing format ordinals; new formats are appended.
+    public enum Format { ROUND_ROBIN, MATCH, GAUNTLET, SWISS, CUP }
     /** Initial Swiss seed assignment: reproducibly random or strength-ranked/group-seeded. */
     public enum SwissSeedingMode { RANDOM, RANK_ENGINE }
+    public enum CupSeedingMode { RANDOM, RANK_ENGINE }
     public enum Outcome { WHITE_WIN, DRAW, BLACK_WIN, UNFINISHED }
     public enum TimeMode { CLOCK, MOVE_TIME, DEPTH, NODES, MOVE_PERIOD }
 
     public static final class Engine {
+        /** Stable tournament participant identity. Pairings and historical PGNs reference this ID. */
         public final String id;
         public final String displayName;
-        public Engine(String id, String displayName) {
+        /** Installed executable may change at a Cup stage checkpoint without changing participant identity. */
+        public final String executableId;
+        public Engine(String id, String displayName) { this(id, displayName, id); }
+        public Engine(String id, String displayName, String executableId) {
             if (id == null || id.trim().isEmpty()) throw new IllegalArgumentException("Empty engine id");
-            this.id = id; this.displayName = displayName == null || displayName.trim().isEmpty() ? id : displayName;
+            if (executableId == null || executableId.trim().isEmpty()) throw new IllegalArgumentException("Empty engine executable");
+            this.id = id;
+            this.displayName = displayName == null || displayName.trim().isEmpty() ? id : displayName;
+            this.executableId = executableId;
         }
     }
 
@@ -57,6 +65,10 @@ public final class TournamentManager {
         public String openingSanLine = "";
         /** Original PGN date is retained so replay replaces the same archived record. */
         public String pgnDate = "";
+        /** Cup match metadata; zero means this is not a Cup game. */
+        public int cupMatchNumber, cupPairNumber, cupGameInPair;
+        /** Names actually used for this completed game, preserving version history in the schedule. */
+        public String whiteNameAtPlay = "", blackNameAtPlay = "";
         Pairing(int index, int round, int gameNumber, String white, String black, Outcome outcome, String pgn) {
             this.index = index; this.round = round; this.gameNumber = gameNumber;
             whiteEngineId = white; blackEngineId = black; this.outcome = outcome; this.pgn = pgn;
@@ -92,6 +104,22 @@ public final class TournamentManager {
         }
     }
 
+
+    /** Persistent Cup match state. Game indexes point into the shared tournament schedule. */
+    public static final class CupMatch {
+        public final int stageIndex, matchNumber, regularPairLimit;
+        public final String engineAId, engineBId;
+        public String winnerId = "";
+        public boolean decided, bye;
+        public int pairsScheduled, pairsCompleted;
+        public double engineAPoints, engineBPoints;
+        public final List<Integer> gameIndices = new ArrayList<>();
+        CupMatch(int stageIndex, int matchNumber, int regularPairLimit, String a, String b) {
+            this.stageIndex = stageIndex; this.matchNumber = matchNumber; this.regularPairLimit = regularPairLimit;
+            this.engineAId = a == null ? "" : a; this.engineBId = b == null ? "" : b;
+        }
+    }
+
     private final Context context;
     private final String fileName;
     private String title;
@@ -103,6 +131,16 @@ public final class TournamentManager {
     private long swissRandomSeed;
     /** Original strongest-to-weakest order, before TCEC-style group seeding. */
     private final List<String> swissStrengthOrder = new ArrayList<>();
+    private CupSeedingMode cupSeedingMode = CupSeedingMode.RANDOM;
+    private long cupRandomSeed;
+    private int cupBracketSize, cupCurrentStage;
+    private boolean cupCheckpointPending, cupFinished;
+    private final List<String> cupStrengthOrder = new ArrayList<>();
+    private final List<String> cupSeedSlots = new ArrayList<>();
+    private final List<CupMatch> cupMatches = new ArrayList<>();
+    private int cupNextMatchNumber = 1, cupNextGameNumber = 1;
+    /** Stable base filename for the one cumulative Cup PGN across every stage. */
+    private String cupPgnFileBaseName = "";
     private long baseTimeMs = 30000, incrementMs = 500;
     private TimeMode timeMode = TimeMode.CLOCK;
     private int limitValue = 30;
@@ -169,6 +207,16 @@ public final class TournamentManager {
                              int gamesPerPair, long baseTimeMs, long incrementMs, String openingPgn, int openingPlies,
                              boolean repeatOpening, TimeMode timeMode, int limitValue, int openingStartIndex,
                              int swissRounds, SwissSeedingMode seedingMode, List<String> rankOrderIds) {
+        this(context, title, format, engines, gamesPerPair, baseTimeMs, incrementMs, openingPgn, openingPlies,
+                repeatOpening, timeMode, limitValue, openingStartIndex, swissRounds, seedingMode, rankOrderIds,
+                CupSeedingMode.RANDOM, engineIdsInOrder(engines));
+    }
+
+    public TournamentManager(Context context, String title, Format format, List<Engine> engines,
+                             int gamesPerPair, long baseTimeMs, long incrementMs, String openingPgn, int openingPlies,
+                             boolean repeatOpening, TimeMode timeMode, int limitValue, int openingStartIndex,
+                             int swissRounds, SwissSeedingMode seedingMode, List<String> rankOrderIds,
+                             CupSeedingMode cupMode, List<String> cupRankOrderIds) {
         if (context == null || engines == null || engines.size() < 2) throw new IllegalArgumentException("At least two engines are required");
         if (format == null) throw new IllegalArgumentException("Tournament format is required");
         if (gamesPerPair < 1) throw new IllegalArgumentException("Games per pairing must be positive");
@@ -178,7 +226,7 @@ public final class TournamentManager {
         // creating an event can never overwrite another saved tournament.
         this.fileName = newUniqueFileName(this.context);
         this.title = title == null ? "CET Tournament" : title; this.format = format;
-        this.gamesPerPair = format == Format.SWISS ? 2 : gamesPerPair;
+        this.gamesPerPair = (format == Format.SWISS || format == Format.CUP) ? 2 : gamesPerPair;
         if (format == Format.SWISS) {
             int maximumRounds = maximumSwissRounds(engines.size());
             this.swissRoundsTotal = swissRounds > 0 ? swissRounds : recommendedSwissRounds(engines.size());
@@ -189,7 +237,7 @@ public final class TournamentManager {
         this.baseTimeMs = baseTimeMs; this.incrementMs = incrementMs;
         this.timeMode = timeMode == null ? TimeMode.CLOCK : timeMode; this.limitValue = Math.max(1, limitValue);
         this.openingPgn = openingPgn == null ? "" : openingPgn; this.openingPlies = openingPlies;
-        this.repeatOpening = format == Format.SWISS || repeatOpening;
+        this.repeatOpening = format == Format.SWISS || format == Format.CUP || repeatOpening;
         this.openingStartIndex = Math.max(1, openingStartIndex);
         if (format == Format.SWISS) {
             this.swissSeedingMode = seedingMode == null ? SwissSeedingMode.RANDOM : seedingMode;
@@ -205,10 +253,30 @@ public final class TournamentManager {
                 for (Engine engine : strengthOrder) swissStrengthOrder.add(engine.id);
                 this.engines.addAll(createEqualDistanceSeedOrder(strengthOrder));
             }
+        } else if (format == Format.CUP) {
+            this.engines.addAll(engines);
+            this.cupSeedingMode = cupMode == null ? CupSeedingMode.RANDOM : cupMode;
+            this.cupBracketSize = CupTournamentManager.bracketSizeFor(engines.size());
+            this.cupRandomSeed = new Random().nextLong();
+            ArrayList<String> selectedIds = new ArrayList<>();
+            for (Engine engine : engines) selectedIds.add(engine.id);
+            List<String> rankOrder = cupRankOrderIds == null ? selectedIds : cupRankOrderIds;
+            if (this.cupSeedingMode == CupSeedingMode.RANK_ENGINE) {
+                if (rankOrder.size() != engines.size())
+                    throw new IllegalArgumentException("Rank Engine Cup requires a ranking for every selected engine");
+                this.cupStrengthOrder.addAll(orderEngineIds(selectedIds, rankOrder));
+            } else {
+                this.cupStrengthOrder.addAll(selectedIds);
+            }
+            this.cupSeedSlots.addAll(CupTournamentManager.createSeedSlots(selectedIds, rankOrder,
+                    this.cupSeedingMode == CupSeedingMode.RANK_ENGINE ? CupTournamentManager.SeedingMode.RANK_ENGINE : CupTournamentManager.SeedingMode.RANDOM,
+                    this.cupRandomSeed, cupBracketSize));
+            this.cupCurrentStage = 0;
+            generateCupInitialStage();
         } else {
             this.engines.addAll(engines);
         }
-        buildSchedule();
+        if (format != Format.CUP) buildSchedule();
         // Opening assignment is deferred to prepareOpeningAssignments(), which is
         // invoked by the activity on a worker thread. Avoid parsing a large PGN
         // book while the setup screen is running on the Android UI thread.
@@ -218,6 +286,20 @@ public final class TournamentManager {
         ArrayList<String> ids = new ArrayList<>();
         if (engines != null) for (Engine engine : engines) ids.add(engine.id);
         return ids;
+    }
+
+    private static List<String> orderEngineIds(List<String> selectedIds, List<String> orderIds) {
+        if (orderIds == null || orderIds.size() != selectedIds.size())
+            throw new IllegalArgumentException("Ranking must include every selected engine exactly once");
+        Set<String> selected = new HashSet<>(selectedIds);
+        Set<String> seen = new HashSet<>();
+        ArrayList<String> ordered = new ArrayList<>();
+        for (String id : orderIds) {
+            if (id == null || !selected.contains(id) || !seen.add(id))
+                throw new IllegalArgumentException("Ranking contains an unknown or duplicated engine");
+            ordered.add(id);
+        }
+        return ordered;
     }
 
     private static ArrayList<Engine> orderEnginesByIds(List<Engine> engines, List<String> orderIds) {
@@ -286,7 +368,7 @@ public final class TournamentManager {
         anomalyMaximumFullMoves = Math.max(1, root.optInt("anomalyMaximumFullMoves", 160));
         timeMode = TimeMode.valueOf(root.optString("timeMode", "CLOCK")); limitValue = root.optInt("limitValue", 30);
         JSONArray ea = root.getJSONArray("engines");
-        for (int i = 0; i < ea.length(); i++) { JSONObject e = ea.getJSONObject(i); engines.add(new Engine(e.getString("id"), e.optString("name"))); }
+        for (int i = 0; i < ea.length(); i++) { JSONObject e = ea.getJSONObject(i); String id = e.getString("id"); engines.add(new Engine(id, e.optString("name"), e.optString("executableId", id))); }
         JSONArray strengthArray = root.optJSONArray("swissStrengthOrder");
         if (strengthArray != null) {
             for (int i = 0; i < strengthArray.length(); i++) swissStrengthOrder.add(strengthArray.optString(i, ""));
@@ -308,6 +390,11 @@ public final class TournamentManager {
             pairing.openingName = p.optString("openingName", "");
             pairing.openingSanLine = p.optString("openingSanLine", "");
             pairing.pgnDate = p.optString("pgnDate", pgnTagValue(pairing.pgn, "Date"));
+            pairing.cupMatchNumber = p.optInt("cupMatchNumber", 0);
+            pairing.cupPairNumber = p.optInt("cupPairNumber", 0);
+            pairing.cupGameInPair = p.optInt("cupGameInPair", 0);
+            pairing.whiteNameAtPlay = p.optString("whiteNameAtPlay", "");
+            pairing.blackNameAtPlay = p.optString("blackNameAtPlay", "");
             pairings.add(pairing);
         }
         JSONArray byeArray = root.optJSONArray("swissByes");
@@ -321,6 +408,40 @@ public final class TournamentManager {
             if (m != null) swissMatches.add(new SwissMatch(m.optInt("round", 0),
                     m.optString("first", ""), m.optString("second", ""),
                     m.optInt("firstGame", -1), m.optInt("secondGame", -1)));
+        }
+        String savedCupMode = root.optString("cupSeedingMode", "RANDOM");
+        try { cupSeedingMode = CupSeedingMode.valueOf(savedCupMode); }
+        catch (IllegalArgumentException invalidCupMode) { cupSeedingMode = CupSeedingMode.RANDOM; }
+        cupRandomSeed = root.optLong("cupRandomSeed", 0L);
+        cupBracketSize = root.optInt("cupBracketSize", 0);
+        cupCurrentStage = Math.max(0, root.optInt("cupCurrentStage", 0));
+        cupCheckpointPending = root.optBoolean("cupCheckpointPending", false);
+        cupFinished = root.optBoolean("cupFinished", false);
+        JSONArray cupStrength = root.optJSONArray("cupStrengthOrder");
+        if (cupStrength != null) for (int i = 0; i < cupStrength.length(); i++) cupStrengthOrder.add(cupStrength.optString(i, ""));
+        JSONArray cupSlots = root.optJSONArray("cupSeedSlots");
+        if (cupSlots != null) for (int i = 0; i < cupSlots.length(); i++) cupSeedSlots.add(cupSlots.isNull(i) ? "" : cupSlots.optString(i, ""));
+        cupNextMatchNumber = Math.max(1, root.optInt("cupNextMatchNumber", 1));
+        cupNextGameNumber = Math.max(1, root.optInt("cupNextGameNumber", 1));
+        cupPgnFileBaseName = root.optString("cupPgnFileBaseName", "");
+        JSONArray cupMatchArray = root.optJSONArray("cupMatches");
+        if (cupMatchArray != null) for (int i = 0; i < cupMatchArray.length(); i++) {
+            JSONObject o = cupMatchArray.optJSONObject(i);
+            if (o == null) continue;
+            CupMatch m = new CupMatch(o.optInt("stage", 0), o.optInt("number", 0), o.optInt("regularPairLimit", 0),
+                    o.optString("engineA", ""), o.optString("engineB", ""));
+            m.winnerId = o.optString("winner", ""); m.decided = o.optBoolean("decided", false); m.bye = o.optBoolean("bye", false);
+            m.pairsScheduled = o.optInt("pairsScheduled", 0); m.pairsCompleted = o.optInt("pairsCompleted", 0);
+            m.engineAPoints = o.optDouble("engineAPoints", 0.0); m.engineBPoints = o.optDouble("engineBPoints", 0.0);
+            JSONArray games = o.optJSONArray("games");
+            if (games != null) for (int j = 0; j < games.length(); j++) m.gameIndices.add(games.optInt(j, -1));
+            cupMatches.add(m);
+        }
+        if (format == Format.CUP) {
+            gamesPerPair = 2; repeatOpening = true;
+            if (cupBracketSize < 2) cupBracketSize = CupTournamentManager.bracketSizeFor(engines.size());
+            if (cupMatches.isEmpty()) throw new JSONException("Cup tournament has no bracket match history");
+            if (cupFinished) cupCheckpointPending = false;
         }
         if (format == Format.SWISS) {
             gamesPerPair = 2;
@@ -387,6 +508,7 @@ public final class TournamentManager {
             if (pairing.outcome == null) throw new IOException("Game " + (i + 1) + " has an invalid result");
         }
         if (format == Format.SWISS) validateImportedSwissData(engineIds);
+        if (format == Format.CUP) validateImportedCupData(engineIds);
     }
 
     private void validateImportedSwissData(Set<String> engineIds) throws IOException {
@@ -438,6 +560,157 @@ public final class TournamentManager {
                     roundParticipants.contains(bye.round + ":" + bye.engineId))
                 throw new IOException("Imported Swiss bye data is invalid");
         }
+    }
+
+    private void validateImportedCupData(Set<String> engineIds) throws IOException {
+        int stages = CupTournamentManager.stageCount(cupBracketSize);
+        if (cupBracketSize != CupTournamentManager.bracketSizeFor(engines.size()) ||
+                cupSeedSlots.size() != cupBracketSize || cupCurrentStage < 0 ||
+                cupCurrentStage >= stages || cupMatches.isEmpty())
+            throw new IOException("Imported Cup bracket settings are invalid");
+
+        Set<String> slotIds = new HashSet<>();
+        for (String id : cupSeedSlots) if (id != null && !id.isEmpty()) {
+            if (!engineIds.contains(id) || !slotIds.add(id))
+                throw new IOException("Cup seed slots contain an unknown or duplicated engine");
+        }
+        if (slotIds.size() != engines.size())
+            throw new IOException("Cup seed slots do not contain every selected engine");
+        if (cupStrengthOrder.size() != engines.size() || !new HashSet<>(cupStrengthOrder).equals(engineIds) ||
+                new HashSet<>(cupStrengthOrder).size() != engines.size())
+            throw new IOException("Cup ranking/draw metadata is incomplete");
+
+        Map<Integer, CupMatch> matchesByNumber = new HashMap<>();
+        ArrayList<ArrayList<CupMatch>> stagesOfMatches = new ArrayList<>();
+        for (int stage = 0; stage < stages; stage++) stagesOfMatches.add(new ArrayList<>());
+        Set<Integer> coveredGames = new HashSet<>();
+        for (CupMatch match : cupMatches) {
+            if (match.matchNumber < 1 || matchesByNumber.put(match.matchNumber, match) != null ||
+                    match.stageIndex < 0 || match.stageIndex > cupCurrentStage ||
+                    match.regularPairLimit != CupTournamentManager.regularPairsPerMatch(cupBracketSize, match.stageIndex))
+                throw new IOException("Cup match metadata is invalid");
+            if (!match.engineAId.isEmpty() && !engineIds.contains(match.engineAId))
+                throw new IOException("Cup match references an unknown engine");
+            if (!match.engineBId.isEmpty() && !engineIds.contains(match.engineBId))
+                throw new IOException("Cup match references an unknown engine");
+            if (match.engineAId.isEmpty() && match.engineBId.isEmpty())
+                throw new IOException("Cup bracket contains an empty match");
+            if (match.engineAId.equals(match.engineBId) && !match.engineAId.isEmpty())
+                throw new IOException("Cup match contains the same engine twice");
+            boolean hasBye = match.engineAId.isEmpty() || match.engineBId.isEmpty();
+            if (match.bye != hasBye || (hasBye && (!match.decided || match.winnerId.isEmpty() ||
+                    !match.winnerId.equals(match.engineAId.isEmpty() ? match.engineBId : match.engineAId))))
+                throw new IOException("Cup bye data is inconsistent");
+            if (match.decided && !hasBye && (!match.winnerId.equals(match.engineAId) && !match.winnerId.equals(match.engineBId)))
+                throw new IOException("Cup match winner is not one of its participants");
+            if (!match.decided && !match.winnerId.isEmpty())
+                throw new IOException("An unfinished Cup match already has a winner");
+            if (match.pairsScheduled < 0 || match.pairsCompleted < 0 || match.pairsCompleted > match.pairsScheduled ||
+                    match.gameIndices.size() != match.pairsScheduled * 2 || (hasBye && match.pairsScheduled != 0) ||
+                    (!hasBye && match.pairsScheduled < 1))
+                throw new IOException("Cup match pair counts are invalid");
+
+            boolean[] firstDone = new boolean[match.pairsScheduled];
+            boolean[] secondDone = new boolean[match.pairsScheduled];
+            for (Integer index : match.gameIndices) {
+                if (index == null || index < 0 || index >= pairings.size() || !coveredGames.add(index))
+                    throw new IOException("Cup match contains an invalid or duplicated game reference");
+                Pairing pairing = pairings.get(index);
+                if (pairing.cupMatchNumber != match.matchNumber || pairing.round != match.stageIndex + 1 ||
+                        pairing.cupPairNumber < 1 || pairing.cupPairNumber > match.pairsScheduled ||
+                        (pairing.cupGameInPair != 1 && pairing.cupGameInPair != 2))
+                    throw new IOException("Cup game metadata does not match its bracket match");
+                int pairIndex = pairing.cupPairNumber - 1;
+                if (pairing.cupGameInPair == 1) firstDone[pairIndex] = pairing.isComplete();
+                else secondDone[pairIndex] = pairing.isComplete();
+                if (pairing.cupGameInPair == 1) {
+                    if (!pairing.whiteEngineId.equals(match.engineAId) || !pairing.blackEngineId.equals(match.engineBId))
+                        throw new IOException("Cup first game does not use the expected colors");
+                } else if (!pairing.whiteEngineId.equals(match.engineBId) || !pairing.blackEngineId.equals(match.engineAId)) {
+                    throw new IOException("Cup second game does not reverse the first game's colors");
+                }
+            }
+            int contiguousCompleted = 0;
+            for (int pair = 0; pair < match.pairsScheduled; pair++) {
+                // Each scheduled color-reversed pair must have exactly two records.
+                int game1Count = 0, game2Count = 0;
+                for (Integer index : match.gameIndices) {
+                    Pairing game = pairings.get(index);
+                    if (game.cupPairNumber == pair + 1) {
+                        if (game.cupGameInPair == 1) game1Count++;
+                        if (game.cupGameInPair == 2) game2Count++;
+                    }
+                }
+                if (game1Count != 1 || game2Count != 1)
+                    throw new IOException("Cup color-reversal pair is incomplete");
+                if (firstDone[pair] && secondDone[pair]) {
+                    if (contiguousCompleted == pair) contiguousCompleted++;
+                }
+            }
+            if (contiguousCompleted != match.pairsCompleted || (match.decided &&
+                    (match.pairsCompleted != match.pairsScheduled || (!hasBye &&
+                    Math.abs(match.engineAPoints - match.engineBPoints) < 0.000001))))
+                throw new IOException("Cup match completion state is inconsistent");
+            if (!hasBye) {
+                double aPoints = 0.0, bPoints = 0.0;
+                for (Integer index : match.gameIndices) {
+                    Pairing game = pairings.get(index);
+                    if (!game.isComplete()) continue;
+                    aPoints += cupGamePoints(match.engineAId, game);
+                    bPoints += cupGamePoints(match.engineBId, game);
+                }
+                if (Math.abs(aPoints - match.engineAPoints) > 0.000001 ||
+                        Math.abs(bPoints - match.engineBPoints) > 0.000001)
+                    throw new IOException("Cup match totals do not match its game results");
+                if (match.decided && !match.winnerId.equals(aPoints > bPoints ? match.engineAId : match.engineBId))
+                    throw new IOException("Cup match winner does not match its score");
+            }
+            stagesOfMatches.get(match.stageIndex).add(match);
+        }
+        if (coveredGames.size() != pairings.size())
+            throw new IOException("Cup schedule contains a game without match metadata");
+
+        int expectedMatchesSoFar = 0;
+        for (int stage = 0; stage <= cupCurrentStage; stage++) {
+            ArrayList<CupMatch> stageMatches = stagesOfMatches.get(stage);
+            int expectedCount = cupBracketSize >> (stage + 1);
+            if (stageMatches.size() != expectedCount)
+                throw new IOException("Cup bracket has an incomplete stage " + (stage + 1));
+            Collections.sort(stageMatches, (a, b) -> Integer.compare(a.matchNumber, b.matchNumber));
+            for (int i = 0; i < stageMatches.size(); i++) {
+                CupMatch match = stageMatches.get(i);
+                if (match.matchNumber != expectedMatchesSoFar + i + 1)
+                    throw new IOException("Cup match numbers are not in bracket order");
+                if (stage == 0) {
+                    List<Integer> order = CupTournamentManager.firstRoundSeedOrder(cupBracketSize);
+                    String expectedA = cupSeedSlots.get(order.get(i * 2) - 1);
+                    String expectedB = cupSeedSlots.get(order.get(i * 2 + 1) - 1);
+                    if (!match.engineAId.equals(expectedA == null ? "" : expectedA) ||
+                            !match.engineBId.equals(expectedB == null ? "" : expectedB))
+                        throw new IOException("Cup first-round pairings do not match the saved draw");
+                } else {
+                    ArrayList<CupMatch> previous = stagesOfMatches.get(stage - 1);
+                    if (previous.size() != stageMatches.size() * 2)
+                        throw new IOException("Cup previous stage has an invalid match count");
+                    CupMatch first = previous.get(i * 2), second = previous.get(i * 2 + 1);
+                    if (!first.decided || !second.decided ||
+                            !match.engineAId.equals(first.winnerId) || !match.engineBId.equals(second.winnerId))
+                        throw new IOException("Cup advancement does not match the previous stage winners");
+                }
+                if (stage < cupCurrentStage && !match.decided)
+                    throw new IOException("A previous Cup stage contains an unfinished match");
+            }
+            expectedMatchesSoFar += expectedCount;
+        }
+        if (cupNextMatchNumber != cupMatches.size() + 1)
+            throw new IOException("Cup next-match counter is inconsistent");
+        boolean currentStageDecided = isCupStageDecided(cupCurrentStage);
+        if (cupCheckpointPending && (cupCurrentStage >= stages - 1 || !currentStageDecided || cupFinished))
+            throw new IOException("Cup checkpoint is marked pending at an invalid stage");
+        if (cupFinished && (cupCurrentStage != stages - 1 || !currentStageDecided || cupCheckpointPending))
+            throw new IOException("Cup completion state is inconsistent");
+        if (!cupFinished && !cupCheckpointPending && currentStageDecided)
+            throw new IOException("Cup stage is complete but its transition state was not saved");
     }
 
     private static String newUniqueFileName(Context context) {
@@ -572,6 +845,194 @@ public final class TournamentManager {
     }
 
     public synchronized String savedFileName() { return fileName; }
+
+    private void generateCupInitialStage() {
+        cupMatches.clear(); pairings.clear(); cupNextMatchNumber = 1; cupNextGameNumber = 1;
+        List<Integer> order = CupTournamentManager.firstRoundSeedOrder(cupBracketSize);
+        for (int i = 0; i < order.size(); i += 2) {
+            String a = cupSeedSlots.get(order.get(i) - 1);
+            String b = cupSeedSlots.get(order.get(i + 1) - 1);
+            CupMatch match = new CupMatch(0, cupNextMatchNumber++,
+                    CupTournamentManager.regularPairsPerMatch(cupBracketSize, 0), a, b);
+            cupMatches.add(match);
+            if (a == null || a.isEmpty() || b == null || b.isEmpty()) {
+                match.bye = true; match.decided = true; match.winnerId = a == null || a.isEmpty() ? b : a;
+            } else {
+                appendCupPairGames(match);
+            }
+        }
+        updateCupStageCompletion();
+    }
+
+    private void appendCupPairGames(CupMatch match) {
+        if (match == null || match.decided || match.engineAId.isEmpty() || match.engineBId.isEmpty())
+            throw new IllegalStateException("Cannot add games to an already decided Cup match");
+        int pairNo = ++match.pairsScheduled;
+        int stageRound = match.stageIndex + 1;
+        int first = pairings.size();
+        Pairing aWhite = new Pairing(first, stageRound, cupNextGameNumber++, match.engineAId, match.engineBId, Outcome.UNFINISHED, "");
+        aWhite.cupMatchNumber = match.matchNumber; aWhite.cupPairNumber = pairNo; aWhite.cupGameInPair = 1;
+        Pairing bWhite = new Pairing(first + 1, stageRound, cupNextGameNumber++, match.engineBId, match.engineAId, Outcome.UNFINISHED, "");
+        bWhite.cupMatchNumber = match.matchNumber; bWhite.cupPairNumber = pairNo; bWhite.cupGameInPair = 2;
+        pairings.add(aWhite); pairings.add(bWhite);
+        match.gameIndices.add(first); match.gameIndices.add(first + 1);
+    }
+
+    private CupMatch findCupMatch(int matchNumber) {
+        for (CupMatch match : cupMatches) if (match.matchNumber == matchNumber) return match;
+        return null;
+    }
+
+    private static double cupGamePoints(String engineId, Pairing game) {
+        boolean white = engineId.equals(game.whiteEngineId);
+        boolean black = engineId.equals(game.blackEngineId);
+        if (!white && !black) return 0.0;
+        if (game.outcome == Outcome.DRAW) return 0.5;
+        if ((white && game.outcome == Outcome.WHITE_WIN) || (black && game.outcome == Outcome.BLACK_WIN)) return 1.0;
+        return 0.0;
+    }
+
+    private void evaluateCupMatch(CupMatch match) {
+        if (match == null || match.decided || match.bye) return;
+        int completePairs = 0;
+        for (int pairNo = 1; pairNo <= match.pairsScheduled; pairNo++) {
+            boolean firstDone = false, secondDone = false;
+            for (Integer index : match.gameIndices) {
+                Pairing game = pairings.get(index);
+                if (game.cupPairNumber == pairNo) {
+                    if (game.cupGameInPair == 1) firstDone = game.isComplete();
+                    if (game.cupGameInPair == 2) secondDone = game.isComplete();
+                }
+            }
+            if (firstDone && secondDone) completePairs++;
+            else break;
+        }
+        match.pairsCompleted = completePairs;
+        double a = 0.0, b = 0.0;
+        for (Integer index : match.gameIndices) {
+            Pairing game = pairings.get(index);
+            if (!game.isComplete()) continue;
+            a += cupGamePoints(match.engineAId, game);
+            b += cupGamePoints(match.engineBId, game);
+        }
+        match.engineAPoints = a; match.engineBPoints = b;
+        if (completePairs != match.pairsScheduled) return;
+        double margin = Math.abs(a - b);
+        int regularRemaining = Math.max(0, match.regularPairLimit - completePairs);
+        if (margin > (2.0 * regularRemaining) || (regularRemaining == 0 && margin > 0.000001)) {
+            match.decided = true;
+            match.winnerId = a > b ? match.engineAId : match.engineBId;
+        } else {
+            // Continue regular pairs, or use additional two-game reversed-color pairs as tiebreaks.
+            appendCupPairGames(match);
+        }
+        updateCupStageCompletion();
+    }
+
+    private boolean isCupStageDecided(int stageIndex) {
+        boolean found = false;
+        for (CupMatch match : cupMatches) if (match.stageIndex == stageIndex) {
+            found = true;
+            if (!match.decided) return false;
+        }
+        return found;
+    }
+
+    private void updateCupStageCompletion() {
+        if (format != Format.CUP || cupFinished || cupCheckpointPending || !isCupStageDecided(cupCurrentStage)) return;
+        int stages = CupTournamentManager.stageCount(cupBracketSize);
+        if (cupCurrentStage >= stages - 1) {
+            cupFinished = true;
+            cupCheckpointPending = false;
+        } else {
+            cupCheckpointPending = true;
+        }
+    }
+
+    /** Continue from the completed-stage checkpoint, optionally after replacing survivor executables. */
+    public synchronized void advanceCupAfterCheckpoint() throws IOException, JSONException {
+        if (format != Format.CUP || !cupCheckpointPending) throw new IllegalStateException("Cup is not waiting at a stage checkpoint");
+        List<CupMatch> previous = new ArrayList<>();
+        for (CupMatch match : cupMatches) if (match.stageIndex == cupCurrentStage) previous.add(match);
+        if (previous.size() < 2 || (previous.size() & 1) != 0) throw new IllegalStateException("Cup bracket stage cannot advance");
+        cupCheckpointPending = false;
+        cupCurrentStage++;
+        cupNextGameNumber = 1;
+        for (int i = 0; i < previous.size(); i += 2) {
+            String a = previous.get(i).winnerId;
+            String b = previous.get(i + 1).winnerId;
+            CupMatch next = new CupMatch(cupCurrentStage, cupNextMatchNumber++,
+                    CupTournamentManager.regularPairsPerMatch(cupBracketSize, cupCurrentStage), a, b);
+            cupMatches.add(next);
+            if (a == null || a.isEmpty() || b == null || b.isEmpty()) {
+                next.bye = true; next.decided = true; next.winnerId = a == null || a.isEmpty() ? b : a;
+            } else {
+                appendCupPairGames(next);
+            }
+        }
+        updateCupStageCompletion();
+        save();
+    }
+
+    public synchronized boolean cupCheckpointPending() { return format == Format.CUP && cupCheckpointPending; }
+    public synchronized boolean cupFinished() { return format == Format.CUP && cupFinished; }
+    public synchronized int cupCurrentStage() { return cupCurrentStage; }
+    public synchronized int cupBracketSize() { return cupBracketSize; }
+    public synchronized CupSeedingMode cupSeedingMode() { return cupSeedingMode; }
+    public synchronized List<String> cupStrengthOrder() { return Collections.unmodifiableList(new ArrayList<>(cupStrengthOrder)); }
+    public synchronized List<String> cupSeedSlots() { return Collections.unmodifiableList(new ArrayList<>(cupSeedSlots)); }
+    public synchronized List<CupMatch> cupMatches() { return Collections.unmodifiableList(new ArrayList<>(cupMatches)); }
+    public synchronized String cupCurrentStageLabel() {
+        return format == Format.CUP && cupBracketSize >= 2 ? CupTournamentManager.stageLabel(cupBracketSize, cupCurrentStage) : "";
+    }
+    public synchronized String cupNextStageLabel() {
+        return format == Format.CUP && cupCurrentStage + 1 < CupTournamentManager.stageCount(cupBracketSize)
+                ? CupTournamentManager.stageLabel(cupBracketSize, cupCurrentStage + 1) : "";
+    }
+    public synchronized List<String> cupAdvancingEngineIds() {
+        ArrayList<String> ids = new ArrayList<>();
+        for (CupMatch match : cupMatches) if (match.stageIndex == cupCurrentStage && match.decided && !match.winnerId.isEmpty() && !ids.contains(match.winnerId)) ids.add(match.winnerId);
+        return Collections.unmodifiableList(ids);
+    }
+    public synchronized String pgnEventName(Pairing pairing) {
+        if (format != Format.CUP || pairing == null) return title;
+        String base = title.toLowerCase(java.util.Locale.US).endsWith(" cup") ? title : title + " Cup";
+        return base + " " + CupTournamentManager.stageLabel(cupBracketSize, Math.max(0, Math.min(cupCurrentStageFor(pairing), CupTournamentManager.stageCount(cupBracketSize)-1))).replace("Round ", "Round ");
+    }
+    private int cupCurrentStageFor(Pairing pairing) { return Math.max(0, pairing.round - 1); }
+    public synchronized String pgnFileBaseName() {
+        if (format != Format.CUP) return title;
+        if (!cupPgnFileBaseName.isEmpty()) return cupPgnFileBaseName;
+        return title.toLowerCase(java.util.Locale.US).endsWith(" cup") ? title : title + " Cup";
+    }
+
+    public synchronized String cupPgnFileBaseName() { return cupPgnFileBaseName; }
+
+    /** Assign once so separate Cup tournaments with the same title never merge into one PGN. */
+    public synchronized void setCupPgnFileBaseNameIfEmpty(String baseName) throws IOException, JSONException {
+        if (format != Format.CUP) throw new IllegalStateException("Only Cup tournaments use a cumulative Cup PGN filename");
+        if (!cupPgnFileBaseName.isEmpty()) return;
+        if (baseName == null || baseName.trim().isEmpty() || baseName.contains("/") || baseName.contains("\\") || baseName.equals(".") || baseName.equals(".."))
+            throw new IllegalArgumentException("Invalid Cup PGN filename");
+        cupPgnFileBaseName = baseName.trim();
+        save();
+    }
+
+    /** Replace a survivor's installed executable without changing its stable Cup identity or old PGNs. */
+    public synchronized void updateCupEngineExecutable(String engineId, String executableId, String displayName)
+            throws IOException, JSONException {
+        if (format != Format.CUP || !cupCheckpointPending) throw new IllegalStateException("Cup engines can only be updated between stages");
+        if (engineId == null || executableId == null || executableId.trim().isEmpty() || displayName == null || displayName.trim().isEmpty())
+            throw new IllegalArgumentException("Choose a valid replacement engine");
+        if (!cupAdvancingEngineIds().contains(engineId)) throw new IllegalArgumentException("Only engines advancing to the next stage can be updated");
+        for (Engine engine : engines) if (!engine.id.equals(engineId) && engine.executableId.equals(executableId))
+            throw new IllegalArgumentException("That executable is already assigned to another Cup participant");
+        for (int i = 0; i < engines.size(); i++) if (engines.get(i).id.equals(engineId)) {
+            engines.set(i, new Engine(engines.get(i).id, displayName.trim(), executableId.trim()));
+            save(); return;
+        }
+        throw new IllegalArgumentException("Cup participant was not found");
+    }
 
     private void buildSchedule() {
         pairings.clear(); int index = 0;
@@ -817,6 +1278,8 @@ public final class TournamentManager {
      */
     public synchronized void updateTournamentEngine(int engineIndex, String newId, String newDisplayName)
             throws IOException, JSONException {
+        if (format == Format.CUP)
+            throw new IllegalStateException("Cup engines can only be updated at a stage checkpoint");
         if (engineIndex < 0 || engineIndex >= engines.size()) throw new IllegalArgumentException("Unknown tournament engine");
         if (newId == null || newId.trim().isEmpty()) throw new IllegalArgumentException("Choose a valid installed engine");
         if (newDisplayName == null || newDisplayName.trim().isEmpty()) throw new IllegalArgumentException("Engine display name cannot be empty");
@@ -862,7 +1325,7 @@ public final class TournamentManager {
                 }
             }
         }
-        engines.set(engineIndex, new Engine(newId, newDisplayName));
+        engines.set(engineIndex, new Engine(newId, newDisplayName, newId));
         save();
     }
 
@@ -916,6 +1379,8 @@ public final class TournamentManager {
     }
     /** Queue a replacement play at the head while keeping the old result recoverable until replacement finishes. */
     public synchronized void requestReplay(int index) throws IOException, JSONException {
+        if (format == Format.CUP)
+            throw new IllegalStateException("Cup games cannot be replayed after they enter the bracket result history");
         Pairing p = pairings.get(index);
         if (!p.isComplete()) throw new IllegalStateException("Only completed games can be replayed");
         if (p.replayPending) throw new IllegalStateException("This game is already waiting to be replayed");
@@ -925,6 +1390,7 @@ public final class TournamentManager {
         save();
     }
     public synchronized Pairing current() {
+        if (format == Format.CUP && (cupCheckpointPending || cupFinished)) return null;
         if (activePairingIndex >= 0 && activePairingIndex < pairings.size()) {
             Pairing active = pairings.get(activePairingIndex);
             if (active.replayPending || !active.isComplete()) return active;
@@ -936,7 +1402,7 @@ public final class TournamentManager {
         for (Pairing p : pairings) if (p.replayPending || !p.isComplete()) return p;
         return null;
     }
-    public synchronized boolean isComplete() { return current() == null; }
+    public synchronized boolean isComplete() { return format == Format.CUP ? cupFinished : current() == null; }
 
     /** Initialize stable assignments for every PGN opening (or empty assignments when no book is selected). */
     public synchronized void prepareOpeningAssignments() throws IOException, JSONException {
@@ -1078,6 +1544,11 @@ public final class TournamentManager {
         }
         return out.toString();
     }
+    private Engine findEngineOrNull(String id) {
+        for (Engine engine : engines) if (engine.id.equals(id)) return engine;
+        return null;
+    }
+
     public synchronized void recordResult(int index, Outcome outcome, String pgn) throws IOException, JSONException {
         recordResult(index, outcome, pgn, Double.NaN, Double.NaN);
     }
@@ -1094,16 +1565,24 @@ public final class TournamentManager {
         playQueue.remove(Integer.valueOf(index));
         if (activePairingIndex == index) activePairingIndex = -1;
         if (p.pgnDate == null || p.pgnDate.isEmpty()) p.pgnDate = pgnTagValue(p.pgn, "Date");
+        Engine whiteEngine = findEngineOrNull(p.whiteEngineId), blackEngine = findEngineOrNull(p.blackEngineId);
+        if (whiteEngine != null) p.whiteNameAtPlay = whiteEngine.displayName;
+        if (blackEngine != null) p.blackNameAtPlay = blackEngine.displayName;
         RuntimeException pairingError = null;
-        if (format == Format.SWISS && p.round == swissCurrentRound &&
+        if (format == Format.CUP) {
+            try { evaluateCupMatch(findCupMatch(p.cupMatchNumber)); }
+            catch (RuntimeException error) { pairingError = error; }
+        } else if (format == Format.SWISS && p.round == swissCurrentRound &&
                 swissCurrentRound < swissRoundsTotal && swissRoundComplete(swissCurrentRound)) {
             try { generateSwissRound(); }
             catch (RuntimeException error) { pairingError = error; }
         }
         save();
-        if (pairingError != null)
-            throw new IllegalStateException("The round was saved, but the next Swiss round could not be paired: " +
+        if (pairingError != null) {
+            String operation = format == Format.CUP ? "Cup match progression" : "Swiss round pairing";
+            throw new IllegalStateException("The game result was saved, but " + operation + " failed: " +
                     pairingError.getMessage(), pairingError);
+        }
     }
 
     /** Unreviewed games that ended because one side ran out of time. */
@@ -1262,6 +1741,8 @@ public final class TournamentManager {
 
     /** Correct a recorded result; standings are always recalculated from the game records. */
     public synchronized void updatePairingResult(int index, Outcome outcome) throws IOException, JSONException {
+        if (format == Format.CUP)
+            throw new IllegalStateException("Cup game results are locked to preserve match advancement and bracket history");
         if (outcome == null || outcome == Outcome.UNFINISHED) throw new IllegalArgumentException("Choose a final result");
         Pairing p = pairings.get(index);
         if (!p.isComplete() || p.replayPending) throw new IllegalStateException("An unfinished or queued-replay game cannot have its result corrected");
@@ -1433,8 +1914,8 @@ public final class TournamentManager {
         root.put("openingPgn", openingPgn); root.put("openingBinPath", openingBinPath); root.put("openingPlies", openingPlies); root.put("openingStartIndex", openingStartIndex); root.put("repeatOpening", repeatOpening); root.put("tournamentElapsedMs", tournamentElapsedMs);
         root.put("anomalyRuleSettingsSaved", anomalyRuleSettingsSaved); root.put("anomalyRulesEnabled", anomalyRulesEnabled);
         root.put("anomalyRuleStartFullMove", anomalyRuleStartFullMove); root.put("anomalyMaximumFullMoves", anomalyMaximumFullMoves);
-        JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); ea.put(o); } root.put("engines", ea);
-        JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); o.put("whiteEvalPawns", Double.isFinite(p.whiteEvalPawns) ? p.whiteEvalPawns : JSONObject.NULL); o.put("blackEvalPawns", Double.isFinite(p.blackEvalPawns) ? p.blackEvalPawns : JSONObject.NULL); o.put("anomalyReviewed", p.anomalyReviewed); o.put("replayPending", p.replayPending); o.put("openingAssigned", p.openingAssigned); o.put("openingIndex", p.openingIndex); o.put("openingName", p.openingName); o.put("openingSanLine", p.openingSanLine); o.put("pgnDate", p.pgnDate); pa.put(o); } root.put("pairings", pa);
+        JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); o.put("executableId", e.executableId); ea.put(o); } root.put("engines", ea);
+        JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); o.put("whiteEvalPawns", Double.isFinite(p.whiteEvalPawns) ? p.whiteEvalPawns : JSONObject.NULL); o.put("blackEvalPawns", Double.isFinite(p.blackEvalPawns) ? p.blackEvalPawns : JSONObject.NULL); o.put("anomalyReviewed", p.anomalyReviewed); o.put("replayPending", p.replayPending); o.put("openingAssigned", p.openingAssigned); o.put("openingIndex", p.openingIndex); o.put("openingName", p.openingName); o.put("openingSanLine", p.openingSanLine); o.put("pgnDate", p.pgnDate); o.put("cupMatchNumber", p.cupMatchNumber); o.put("cupPairNumber", p.cupPairNumber); o.put("cupGameInPair", p.cupGameInPair); o.put("whiteNameAtPlay", p.whiteNameAtPlay); o.put("blackNameAtPlay", p.blackNameAtPlay); pa.put(o); } root.put("pairings", pa);
         if (format == Format.SWISS) {
             root.put("swissRoundsTotal", swissRoundsTotal);
             root.put("swissCurrentRound", swissCurrentRound);
@@ -1456,6 +1937,26 @@ public final class TournamentManager {
                 matches.put(entry);
             }
             root.put("swissMatches", matches);
+        }
+        if (format == Format.CUP) {
+            root.put("cupSeedingMode", cupSeedingMode.name()); root.put("cupRandomSeed", cupRandomSeed);
+            root.put("cupBracketSize", cupBracketSize); root.put("cupCurrentStage", cupCurrentStage);
+            root.put("cupCheckpointPending", cupCheckpointPending); root.put("cupFinished", cupFinished);
+            root.put("cupNextMatchNumber", cupNextMatchNumber); root.put("cupNextGameNumber", cupNextGameNumber);
+            root.put("cupPgnFileBaseName", cupPgnFileBaseName);
+            JSONArray strength = new JSONArray(); for (String id : cupStrengthOrder) strength.put(id); root.put("cupStrengthOrder", strength);
+            JSONArray slots = new JSONArray(); for (String id : cupSeedSlots) { if (id == null || id.isEmpty()) slots.put(JSONObject.NULL); else slots.put(id); } root.put("cupSeedSlots", slots);
+            JSONArray matches = new JSONArray();
+            for (CupMatch match : cupMatches) {
+                JSONObject o = new JSONObject(); o.put("stage", match.stageIndex); o.put("number", match.matchNumber);
+                o.put("regularPairLimit", match.regularPairLimit); o.put("engineA", match.engineAId); o.put("engineB", match.engineBId);
+                o.put("winner", match.winnerId); o.put("decided", match.decided); o.put("bye", match.bye);
+                o.put("pairsScheduled", match.pairsScheduled); o.put("pairsCompleted", match.pairsCompleted);
+                o.put("engineAPoints", match.engineAPoints); o.put("engineBPoints", match.engineBPoints);
+                JSONArray games = new JSONArray(); for (Integer index : match.gameIndices) games.put(index); o.put("games", games);
+                matches.put(o);
+            }
+            root.put("cupMatches", matches);
         }
         JSONArray queue = new JSONArray(); for (Integer index : playQueue) queue.put(index); root.put("playQueue", queue);
         root.put("activePairingIndex", activePairingIndex);

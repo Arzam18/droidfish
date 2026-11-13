@@ -238,8 +238,8 @@ public final class TournamentRunner {
         // the exact same Game position.
         activeWhiteId = ++whiteSearchId;
         activeBlackId = ++blackSearchId;
-        whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.id);
-        blackPlayer.queueStartEngine(activeBlackId, blackEngine.id);
+        whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.executableId);
+        blackPlayer.queueStartEngine(activeBlackId, blackEngine.executableId);
         listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
         notifyPosition();
         requestMove(game.currPos().whiteMove);
@@ -391,7 +391,7 @@ public final class TournamentRunner {
         String pgnTimeControl = tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD
                 ? tournament.limitValue() + "/" + (baseTimeMs / 1000)
                 : (baseTimeMs / 1000) + "+" + String.format(java.util.Locale.US, "%g", incrementMs / 1000.0);
-        game.tree.setTournamentMetadata(tournament.title(), "DroidFish", pgnRoundNumber(pairing) + "." + gameNumberInRound(pairing),
+        game.tree.setTournamentMetadata(tournament.pgnEventName(pairing), "DroidFish", pgnRoundNumber(pairing) + "." + gameNumberInRound(pairing),
                 eventType, pgnTimeControl);
         try {
             game.tree.setTournamentDate(tournament.ensurePairingPgnDate(pairing.index));
@@ -453,8 +453,8 @@ public final class TournamentRunner {
         blackPlayer.uciNewGame();
         activeWhiteId = ++whiteSearchId;
         activeBlackId = ++blackSearchId;
-        whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.id);
-        blackPlayer.queueStartEngine(activeBlackId, blackEngine.id);
+        whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.executableId);
+        blackPlayer.queueStartEngine(activeBlackId, blackEngine.executableId);
         listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
         notifyPosition();
         requestMove(game.currPos().whiteMove);
@@ -473,13 +473,13 @@ public final class TournamentRunner {
     }
 
     private int pgnRoundNumber(TournamentManager.Pairing target) {
-        if (tournament.format() == TournamentManager.Format.SWISS) return Math.max(1, target.round);
+        if (tournament.format() == TournamentManager.Format.SWISS || tournament.format() == TournamentManager.Format.CUP) return Math.max(1, target.round);
         return Math.max(1, target.index / gamesPerPgnRound() + 1);
     }
 
     /** Sequential game number inside the complete tournament round. */
     private String gameNumberInRound(TournamentManager.Pairing target) {
-        if (tournament.format() == TournamentManager.Format.SWISS) return Integer.toString(target.gameNumber);
+        if (tournament.format() == TournamentManager.Format.SWISS || tournament.format() == TournamentManager.Format.CUP) return Integer.toString(target.gameNumber);
         return Integer.toString(target.index % gamesPerPgnRound() + 1);
     }
 
@@ -523,12 +523,12 @@ public final class TournamentRunner {
                     id, System.currentTimeMillis(), history.first, history.second,
                     new Position(game.currPos()), game.haveDrawOffer(), wTime, bTime, 0, 0,
                     clock.movesToNextPeriod(whiteToMove), false, null,
-                    whiteToMove ? whiteEngine.id : blackEngine.id, Integer.MAX_VALUE);
+                    whiteToMove ? whiteEngine.executableId : blackEngine.executableId, Integer.MAX_VALUE);
         } else {
             request = DroidComputerPlayer.SearchRequest.cetSearchRequest(
                     id, System.currentTimeMillis(), history.first, history.second,
                     new Position(game.currPos()), game.haveDrawOffer(), wTime, bTime, inc, inc,
-                    whiteToMove ? whiteEngine.id : blackEngine.id);
+                    whiteToMove ? whiteEngine.executableId : blackEngine.executableId);
         }
         switch (tournament.timeMode()) {
             case MOVE_TIME: request.tournamentGoCommand = "go movetime " + Math.max(1, tournament.limitValue()); break;
@@ -721,8 +721,9 @@ public final class TournamentRunner {
             stop();
             return;
         } catch (RuntimeException e) {
-            if (tournament.format() != TournamentManager.Format.SWISS) throw e;
-            listener.onError("Could not update the next Swiss round", e);
+            if (tournament.format() != TournamentManager.Format.SWISS && tournament.format() != TournamentManager.Format.CUP) throw e;
+            listener.onError(tournament.format() == TournamentManager.Format.CUP
+                    ? "Could not update the next Cup match" : "Could not update the next Swiss round", e);
             stop();
             return;
         }
