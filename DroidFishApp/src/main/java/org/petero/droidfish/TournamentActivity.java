@@ -106,7 +106,11 @@ public final class TournamentActivity extends Activity {
     private TextView cachedAnomalySummary;
     private LinearLayout cachedAnomalyRows;
     private Spinner formatSpinner, timeModeSpinner;
-    private EditText titleInput, gamesInput, baseInput, incrementInput, limitInput, openingPliesInput, openingStartInput, autoWinEvalInput;
+    private EditText titleInput, gamesInput, swissRoundsInput, baseInput, incrementInput, limitInput, openingPliesInput, openingStartInput, autoWinEvalInput;
+    private TextView swissSetupHint;
+    private boolean wasSwissFormat;
+    private boolean repeatOpeningBeforeSwiss;
+    private String gamesPerPairBeforeSwiss = "2";
     private CheckBox fastWinRuleCheck;
     private TextView openingFileText;
     private String selectedOpeningPgn = "";
@@ -205,11 +209,18 @@ public final class TournamentActivity extends Activity {
         root.addView(text("Tournament format"), fullWidth());
         formatSpinner = new Spinner(this);
         formatSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
-                new String[]{"Round Robin", "Match", "Gauntlet (first engine vs rest)"}));
+                new String[]{"Round Robin", "Match", "Gauntlet (first engine vs rest)", "Swiss"}));
         root.addView(formatSpinner, fullWidth());
 
         titleInput = field("Tournament name", "My Tournament"); root.addView(titleInput, fullWidth());
         gamesInput = field("Games per pairing", "2"); root.addView(gamesInput, fullWidth());
+        swissRoundsInput = field("Swiss rounds (blank = automatic)", "");
+        swissRoundsInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        swissRoundsInput.setVisibility(View.GONE);
+        root.addView(swissRoundsInput, fullWidth());
+        swissSetupHint = text("Seeding follows engine selection order. Each pairing plays two games with colors reversed.");
+        swissSetupHint.setVisibility(View.GONE);
+        root.addView(swissSetupHint, fullWidth());
         root.addView(text("Time control mode"), fullWidth());
         timeModeSpinner = new Spinner(this);
         timeModeSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
@@ -254,6 +265,12 @@ public final class TournamentActivity extends Activity {
         openingPliesInput = field("PGN opening plies (0 = full opening; positive = custom half-move limit)", "0"); root.addView(openingPliesInput, fullWidth());
         repeatOpeningCheck = new CheckBox(this); repeatOpeningCheck.setText("Repeat opening for paired color-reversal games");
         root.addView(repeatOpeningCheck, fullWidth());
+        formatSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                applySwissSetupMode(position == TournamentManager.Format.SWISS.ordinal());
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
         Button chooseOpeningPgn = new Button(this);
         chooseOpeningPgn.setText("Select opening PGN file");
         root.addView(chooseOpeningPgn, fullWidth());
@@ -910,7 +927,7 @@ public final class TournamentActivity extends Activity {
     private void showStandingsDialog() {
         try {
             TournamentManager tournament = activeTournamentManager != null ? activeTournamentManager : TournamentManager.restore(this);
-            final String standings = formatStandings(tournament.standings(), tournament.engines());
+            final String standings = formatStandings(tournament, tournament.standings(), tournament.engines());
             new AlertDialog.Builder(this).setTitle("Standings " + completedGameCount(tournament) + "/" + tournament.pairings().size())
                     .setMessage(standings)
                     .setNegativeButton("COPY", (dialog, which) -> {
@@ -976,7 +993,7 @@ public final class TournamentActivity extends Activity {
                                     String pgnSaveWarning = "";
                                     try { saveTournamentPgnAutomatically(tournament); }
                                     catch (Exception pgnError) { pgnSaveWarning = " · PGN export update failed: " + pgnError.getMessage(); }
-                                    if (standingsText != null) standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
+                                    if (standingsText != null) standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
                                     Toast.makeText(this, "Result corrected; standings, tournament JSON, and PGN result saved (moves unchanged)" + pgnSaveWarning, Toast.LENGTH_LONG).show();
                                     showStandingsDialog();
                                 } catch (Exception e) {
@@ -1087,19 +1104,31 @@ public final class TournamentActivity extends Activity {
         cachedScheduleRows.clear();
         List<TournamentManager.Engine> engines = tournament.engines();
         List<Integer> priorityQueue = tournament.playQueue();
+        boolean swiss = tournament.format() == TournamentManager.Format.SWISS;
+        int displayedSwissRound = 0;
         for (TournamentManager.Pairing pairing : tournament.pairings()) {
+            if (swiss && pairing.round != displayedSwissRound) {
+                if (displayedSwissRound > 0) appendSwissByeRows(tournament, engines, displayedSwissRound, copy);
+                displayedSwissRound = pairing.round;
+                String heading = "ROUND " + displayedSwissRound;
+                cachedScheduleRows.add(heading);
+                if (copy.length() > 0) copy.append("\n\n");
+                copy.append(heading);
+            }
             String white = engineDisplayName(engines, pairing.whiteEngineId);
             String black = engineDisplayName(engines, pairing.blackEngineId);
             String result = pairingResultLabel(pairing.outcome);
             int endedAtMoves = countFullMoves(pairing.pgn);
             int queuePosition = priorityQueue.indexOf(pairing.index) + 1;
             String state = pairing.replayPending ? " · replay queued" : (queuePosition > 0 ? " · priority #" + queuePosition : "");
-            String row = (pairing.index + 1) + "." + white + " - " + black + " (" + result + ")" + state
+            String gamePrefix = swiss ? "R" + pairing.round + "." + pairing.gameNumber : Integer.toString(pairing.index + 1);
+            String row = gamePrefix + ". " + white + " - " + black + " (" + result + ")" + state
                     + "\n" + endedAtMoves + " moves";
             cachedScheduleRows.add(row);
             if (copy.length() > 0) copy.append("\n\n");
             copy.append(row);
         }
+        if (swiss && displayedSwissRound > 0) appendSwissByeRows(tournament, engines, displayedSwissRound, copy);
         if (cachedScheduleRows.isEmpty()) {
             cachedScheduleRows.add("No scheduled games.");
             copy.append("No scheduled games.");
@@ -1114,6 +1143,18 @@ public final class TournamentActivity extends Activity {
             cachedScheduleAnomaliesButton.setText("ANOMALIES · " + timeLosses.size() + " TIME LOSSES · " + drawAnomalies.size() + " DRAWS");
         if (cachedScheduleQueueButton != null)
             cachedScheduleQueueButton.setText("PLAY QUEUE · " + tournament.playQueue().size());
+    }
+
+
+    private void appendSwissByeRows(TournamentManager tournament, List<TournamentManager.Engine> engines,
+                                    int round, StringBuilder copy) {
+        for (TournamentManager.SwissBye bye : tournament.swissByes()) {
+            if (bye.round != round) continue;
+            String row = "BYE · " + engineDisplayName(engines, bye.engineId) + " (+2 points)";
+            cachedScheduleRows.add(row);
+            if (copy.length() > 0) copy.append("\n\n");
+            copy.append(row);
+        }
     }
 
     private void invalidateCachedSchedule(TournamentManager tournament) {
@@ -1324,7 +1365,7 @@ public final class TournamentActivity extends Activity {
                                 String warning = "";
                                 try { saveTournamentPgnAutomatically(tournament); }
                                 catch (Exception pgnError) { warning = " · PGN export update failed: " + pgnError.getMessage(); }
-                                if (standingsText != null) standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
+                                if (standingsText != null) standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
                                 invalidateCachedSchedule(tournament);
                                 Toast.makeText(this, "Game adjudicated" + warning, Toast.LENGTH_LONG).show();
                                 refreshAnomalyRows(tournament, summary, parent, dialog);
@@ -1446,7 +1487,7 @@ public final class TournamentActivity extends Activity {
                         try {
                             tournament.updateTournamentEngine(engineIndex, newId, newName);
                             invalidateCachedSchedule(tournament);
-                            if (standingsText != null) standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
+                            if (standingsText != null) standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
                             String warning = "";
                             try { saveTournamentPgnAutomatically(tournament); }
                             catch (Exception pgnError) { warning = " · PGN export update failed: " + pgnError.getMessage(); }
@@ -1483,7 +1524,10 @@ public final class TournamentActivity extends Activity {
         for (TournamentManager.Pairing pairing : pairings) {
             String white = engineDisplayName(engines, pairing.whiteEngineId);
             String black = engineDisplayName(engines, pairing.blackEngineId);
-            String label = "Game " + (pairing.index + 1) + ": " + white + " - " + black + " (" + pairingResultLabel(pairing.outcome) + ")";
+            String gameLabel = tournament.format() == TournamentManager.Format.SWISS
+                    ? "Round " + pairing.round + " · Game " + pairing.gameNumber
+                    : "Game " + (pairing.index + 1);
+            String label = gameLabel + ": " + white + " - " + black + " (" + pairingResultLabel(pairing.outcome) + ")";
             if (pairing.replayPending) {
                 // The replacement game owns this record until it finishes.
             } else if (pairing.isComplete()) {
@@ -1529,7 +1573,10 @@ public final class TournamentActivity extends Activity {
         blackSpinner.setSelection(blackSelection);
         form.addView(whiteLabel, fullWidth()); form.addView(whiteSpinner, fullWidth());
         form.addView(blackLabel, fullWidth()); form.addView(blackSpinner, fullWidth());
-        new AlertDialog.Builder(this).setTitle("Edit Game " + (pairingIndex + 1))
+        String editTitle = tournament.format() == TournamentManager.Format.SWISS
+                ? "Edit Round " + pairing.round + " · Game " + pairing.gameNumber
+                : "Edit Game " + (pairingIndex + 1);
+        new AlertDialog.Builder(this).setTitle(editTitle)
                 .setView(form)
                 .setNegativeButton("CANCEL", null)
                 .setPositiveButton("SAVE", (dialog, which) -> {
@@ -1589,6 +1636,28 @@ public final class TournamentActivity extends Activity {
         } catch (RuntimeException ignored) { }
     }
 
+    private void applySwissSetupMode(boolean swiss) {
+        if (swissRoundsInput != null) swissRoundsInput.setVisibility(swiss ? View.VISIBLE : View.GONE);
+        if (swissSetupHint != null) swissSetupHint.setVisibility(swiss ? View.VISIBLE : View.GONE);
+        if (swiss == wasSwissFormat || gamesInput == null || repeatOpeningCheck == null) return;
+        if (swiss) {
+            gamesPerPairBeforeSwiss = gamesInput.getText().toString();
+            repeatOpeningBeforeSwiss = repeatOpeningCheck.isChecked();
+            gamesInput.setText("2");
+            gamesInput.setHint("Games per Swiss pairing (fixed at 2)");
+            gamesInput.setEnabled(false);
+            repeatOpeningCheck.setChecked(true);
+            repeatOpeningCheck.setEnabled(false);
+        } else {
+            gamesInput.setEnabled(true);
+            gamesInput.setHint("Games per pairing");
+            gamesInput.setText(gamesPerPairBeforeSwiss);
+            repeatOpeningCheck.setEnabled(true);
+            repeatOpeningCheck.setChecked(repeatOpeningBeforeSwiss);
+        }
+        wasSwissFormat = swiss;
+    }
+
     private void chooseEngines() {
         if (availableEngines.isEmpty()) { Toast.makeText(this, "No engines found", Toast.LENGTH_LONG).show(); return; }
         String[] labels = new String[availableEngines.size()];
@@ -1598,7 +1667,10 @@ public final class TournamentActivity extends Activity {
             for (EngineChoice selected : selectedEngines) if (selected.id.equals(choice.id)) checked[i] = true;
         }
         final ArrayList<EngineChoice> dialogSelection = new ArrayList<>(selectedEngines);
-        new AlertDialog.Builder(this).setTitle("Choose engines; selection order sets the gauntlet engine")
+        String selectionTitle = formatSpinner.getSelectedItemPosition() == TournamentManager.Format.SWISS.ordinal()
+                ? "Choose engines; selection order sets Swiss seeds"
+                : "Choose engines; selection order sets the gauntlet engine";
+        new AlertDialog.Builder(this).setTitle(selectionTitle)
                 .setMultiChoiceItems(labels, checked, (dialog, which, isChecked) -> {
                     EngineChoice choice = availableEngines.get(which);
                     if (isChecked) {
@@ -1627,7 +1699,8 @@ public final class TournamentActivity extends Activity {
         if (titleInput == null) return;
         android.content.SharedPreferences.Editor e = getPreferences(MODE_PRIVATE).edit();
         e.putString("setupTitle", titleInput.getText().toString());
-        e.putString("setupGames", gamesInput.getText().toString());
+        e.putString("setupGames", wasSwissFormat ? gamesPerPairBeforeSwiss : gamesInput.getText().toString());
+        e.putString("setupSwissRounds", swissRoundsInput.getText().toString());
         e.putInt("setupFormat", formatSpinner.getSelectedItemPosition());
         e.putInt("setupTimeMode", timeModeSpinner.getSelectedItemPosition());
         e.putString("setupBase", baseInput.getText().toString());
@@ -1635,7 +1708,7 @@ public final class TournamentActivity extends Activity {
         e.putString("setupLimit", limitInput.getText().toString());
         e.putString("setupPlies", openingPliesInput.getText().toString());
         e.putString("setupOpeningStart", openingStartInput.getText().toString());
-        e.putBoolean("setupRepeat", repeatOpeningCheck.isChecked());
+        e.putBoolean("setupRepeat", wasSwissFormat ? repeatOpeningBeforeSwiss : repeatOpeningCheck.isChecked());
         e.putBoolean("setupArrows", showTournamentArrowsCheck.isChecked());
         e.putBoolean("tournamentDisableScreenTimeout", disableScreenTimeoutCheck != null && disableScreenTimeoutCheck.isChecked());
         e.putString("setupAutoWinEval", autoWinEvalInput.getText().toString());
@@ -1662,10 +1735,15 @@ public final class TournamentActivity extends Activity {
         android.content.SharedPreferences p = getPreferences(MODE_PRIVATE);
         titleInput.setText(p.getString("setupTitle", titleInput.getText().toString()));
         gamesInput.setText(p.getString("setupGames", gamesInput.getText().toString()));
-        formatSpinner.setSelection(p.getInt("setupFormat", 0)); timeModeSpinner.setSelection(p.getInt("setupTimeMode", 0));
+        swissRoundsInput.setText(p.getString("setupSwissRounds", ""));
+        repeatOpeningCheck.setChecked(p.getBoolean("setupRepeat", false));
+        int savedFormat = p.getInt("setupFormat", 0);
+        formatSpinner.setSelection(savedFormat);
+        applySwissSetupMode(savedFormat == TournamentManager.Format.SWISS.ordinal());
+        timeModeSpinner.setSelection(p.getInt("setupTimeMode", 0));
         baseInput.setText(p.getString("setupBase", baseInput.getText().toString())); incrementInput.setText(p.getString("setupIncrement", incrementInput.getText().toString()));
         limitInput.setText(p.getString("setupLimit", limitInput.getText().toString())); openingPliesInput.setText(p.getString("setupPlies", openingPliesInput.getText().toString()));
-        openingStartInput.setText(p.getString("setupOpeningStart", openingStartInput.getText().toString())); repeatOpeningCheck.setChecked(p.getBoolean("setupRepeat", false));
+        openingStartInput.setText(p.getString("setupOpeningStart", openingStartInput.getText().toString()));
         showTournamentArrowsCheck.setChecked(p.getBoolean("setupArrows", true));
         if (disableScreenTimeoutCheck != null) disableScreenTimeoutCheck.setChecked(p.getBoolean("tournamentDisableScreenTimeout", false));
         autoWinEvalInput.setText(p.getString("setupAutoWinEval", "10"));
@@ -1862,7 +1940,19 @@ public final class TournamentActivity extends Activity {
         }
         if (selectedEngines.size() < 2) { Toast.makeText(this, "Select at least two engines", Toast.LENGTH_LONG).show(); return; }
         try {
-            int games = positiveInt(gamesInput, "games per pairing", 1);
+            TournamentManager.Format format = TournamentManager.Format.values()[formatSpinner.getSelectedItemPosition()];
+            int games = format == TournamentManager.Format.SWISS ? 2 : positiveInt(gamesInput, "games per pairing", 1);
+            int swissRounds = 0;
+            if (format == TournamentManager.Format.SWISS) {
+                int maximumRounds = TournamentManager.maximumSwissRounds(selectedEngines.size());
+                String requestedRounds = swissRoundsInput.getText().toString().trim();
+                swissRounds = requestedRounds.isEmpty()
+                        ? TournamentManager.recommendedSwissRounds(selectedEngines.size())
+                        : Integer.parseInt(requestedRounds);
+                if (swissRounds < 1 || swissRounds > maximumRounds)
+                    throw new IllegalArgumentException("Swiss rounds must be between 1 and " + maximumRounds +
+                            " for " + selectedEngines.size() + " selected engines");
+            }
             int timeModeIndex = timeModeSpinner.getSelectedItemPosition();
             boolean movePeriodMode = timeModeIndex == 4;
             double baseMinutes = (timeModeIndex == 0 || movePeriodMode)
@@ -1880,7 +1970,6 @@ public final class TournamentActivity extends Activity {
             if (openingPlies > 0 && selectedOpeningPgn.trim().isEmpty() && selectedOpeningBinPath.trim().isEmpty())
                 throw new IllegalArgumentException("Select a PGN opening file before setting a custom opening-ply limit");
             if (baseMillis > Integer.MAX_VALUE) throw new IllegalArgumentException("Base time is too large");
-            TournamentManager.Format format = TournamentManager.Format.values()[formatSpinner.getSelectedItemPosition()];
             if (format == TournamentManager.Format.MATCH && selectedEngines.size() != 2)
                 throw new IllegalArgumentException("Match format requires exactly two engines");
             ArrayList<TournamentManager.Engine> engines = new ArrayList<>();
@@ -1890,7 +1979,8 @@ public final class TournamentActivity extends Activity {
             saveSetup();
             TournamentManager tournament = new TournamentManager(this, tournamentName, format,
                     engines, games, baseMillis, increment, selectedOpeningPgn, openingPlies,
-                    repeatOpeningCheck.isChecked(), TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart);
+                    format == TournamentManager.Format.SWISS || repeatOpeningCheck.isChecked(),
+                    TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart, swissRounds);
             tournament.setOpeningBinPath(selectedOpeningBinPath);
             launchTournament(tournament);
         } catch (Exception e) {
@@ -2124,7 +2214,11 @@ public final class TournamentActivity extends Activity {
         for (TournamentManager.Engine engine : tournament.engines()) selectedEngines.add(new EngineChoice(engine.id, engine.displayName));
         updateSelectedText();
         titleInput.setText(tournament.title());
+        if (tournament.format() == TournamentManager.Format.SWISS) {
+            swissRoundsInput.setText(String.valueOf(tournament.swissRoundsTotal()));
+        }
         formatSpinner.setSelection(tournament.format().ordinal());
+        applySwissSetupMode(tournament.format() == TournamentManager.Format.SWISS);
         gamesInput.setText(String.valueOf(tournament.gamesPerPair()));
         baseInput.setText(String.valueOf(Math.max(0.01, tournament.baseTimeMs() / 60000.0)));
         incrementInput.setText(String.valueOf(tournament.incrementMs() / 1000.0));
@@ -2474,7 +2568,7 @@ public final class TournamentActivity extends Activity {
                     // independently so it is actually visible to the user.
                     android.widget.Toast.makeText(TournamentActivity.this, result,
                             android.widget.Toast.LENGTH_LONG).show();
-                    standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
+                    standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
                     invalidateCachedSchedule(tournament);
                     if (cachedAnomalyDialog != null && cachedAnomalyDialog.isShowing() &&
                             cachedAnomalyTournament == tournament && cachedAnomalySummary != null && cachedAnomalyRows != null)
@@ -2490,7 +2584,7 @@ public final class TournamentActivity extends Activity {
                 runOnUiThread(() -> {
                     statusText.setText("Tournament complete");
                     moveStatusText.setText("TOURNAMENT COMPLETE");
-                    standingsText.setText(formatStandings(tournament.standings(), tournament.engines()));
+                    standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
                     runner = null; applyTournamentKeepScreenOn(); startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(runner != null);
                 });
             }
@@ -2578,15 +2672,23 @@ public final class TournamentActivity extends Activity {
         return count;
     }
 
-    private String formatStandings(List<TournamentManager.Standing> standings, List<TournamentManager.Engine> engines) {
+    private String formatStandings(TournamentManager tournament, List<TournamentManager.Standing> standings, List<TournamentManager.Engine> engines) {
         StringBuilder out = new StringBuilder("Standings\n");
         for (int i = 0; i < standings.size(); i++) {
             TournamentManager.Standing s = standings.get(i);
             String name = s.engineId;
             for (TournamentManager.Engine e : engines) if (e.id.equals(s.engineId)) { name = e.displayName; break; }
-            out.append(i + 1).append(".").append(name).append("\n    ").append(s.points)
-                    .append("/").append(s.played).append("  +").append(s.wins)
-                    .append(" =").append(s.draws).append(" -").append(s.losses).append("\n");
+            out.append(i + 1).append(".").append(name).append("\n    ");
+            if (tournament != null && tournament.format() == TournamentManager.Format.SWISS) {
+                out.append(s.points).append(" pts  ").append(s.played).append(" games  +")
+                        .append(s.wins).append(" =").append(s.draws).append(" -").append(s.losses)
+                        .append("  BYE:").append(s.byes)
+                        .append("  SB:").append(String.format(java.util.Locale.US, "%.2f", s.sonnebornBerger));
+            } else {
+                out.append(s.points).append("/").append(s.played).append("  +").append(s.wins)
+                        .append(" =").append(s.draws).append(" -").append(s.losses);
+            }
+            out.append("\n");
         }
         return out.toString();
     }
