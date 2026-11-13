@@ -1391,8 +1391,16 @@ public final class TournamentActivity extends Activity {
             stages.addView(vertical, columnLp);
         }
         horizontal.addView(stages, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, bracketHeight));
+        // This project targets an AlertDialog.Builder API that only exposes
+        // setView(View), not the newer setView(View, left, top, right, bottom)
+        // overload. Keep the intended inset by applying padding to a wrapper.
+        LinearLayout bracketContainer = new LinearLayout(this);
+        bracketContainer.setOrientation(LinearLayout.VERTICAL);
+        bracketContainer.setPadding(dp(4), dp(4), dp(4), dp(4));
+        bracketContainer.addView(horizontal, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         new AlertDialog.Builder(this).setTitle("Cup bracket · " + tournament.title())
-                .setView(horizontal, dp(4), dp(4), dp(4), dp(4)).setPositiveButton("CLOSE", null).show();
+                .setView(bracketContainer).setPositiveButton("CLOSE", null).show();
     }
 
     private void invalidateCachedSchedule(TournamentManager tournament) {
