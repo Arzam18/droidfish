@@ -19,11 +19,14 @@ import java.util.Map;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.Random;
 
 /** Persistent tournament schedule/result model. Engine execution is owned by the controller. */
 public final class TournamentManager {
     // Keep SWISS last: the setup spinner and saved setup preferences use ordinals.
     public enum Format { ROUND_ROBIN, MATCH, GAUNTLET, SWISS }
+    /** Initial Swiss seed assignment: reproducibly random or strength-ranked/group-seeded. */
+    public enum SwissSeedingMode { RANDOM, RANK_ENGINE }
     public enum Outcome { WHITE_WIN, DRAW, BLACK_WIN, UNFINISHED }
     public enum TimeMode { CLOCK, MOVE_TIME, DEPTH, NODES, MOVE_PERIOD }
 
@@ -96,6 +99,10 @@ public final class TournamentManager {
     private int gamesPerPair;
     private int swissRoundsTotal;
     private int swissCurrentRound;
+    private SwissSeedingMode swissSeedingMode = SwissSeedingMode.RANDOM;
+    private long swissRandomSeed;
+    /** Original strongest-to-weakest order, before TCEC-style group seeding. */
+    private final List<String> swissStrengthOrder = new ArrayList<>();
     private long baseTimeMs = 30000, incrementMs = 500;
     private TimeMode timeMode = TimeMode.CLOCK;
     private int limitValue = 30;
@@ -153,6 +160,15 @@ public final class TournamentManager {
                              int gamesPerPair, long baseTimeMs, long incrementMs, String openingPgn, int openingPlies,
                              boolean repeatOpening, TimeMode timeMode, int limitValue, int openingStartIndex,
                              int swissRounds) {
+        this(context, title, format, engines, gamesPerPair, baseTimeMs, incrementMs, openingPgn, openingPlies,
+                repeatOpening, timeMode, limitValue, openingStartIndex, swissRounds,
+                SwissSeedingMode.RANK_ENGINE, engineIdsInOrder(engines));
+    }
+
+    public TournamentManager(Context context, String title, Format format, List<Engine> engines,
+                             int gamesPerPair, long baseTimeMs, long incrementMs, String openingPgn, int openingPlies,
+                             boolean repeatOpening, TimeMode timeMode, int limitValue, int openingStartIndex,
+                             int swissRounds, SwissSeedingMode seedingMode, List<String> rankOrderIds) {
         if (context == null || engines == null || engines.size() < 2) throw new IllegalArgumentException("At least two engines are required");
         if (format == null) throw new IllegalArgumentException("Tournament format is required");
         if (gamesPerPair < 1) throw new IllegalArgumentException("Games per pairing must be positive");
@@ -175,11 +191,75 @@ public final class TournamentManager {
         this.openingPgn = openingPgn == null ? "" : openingPgn; this.openingPlies = openingPlies;
         this.repeatOpening = format == Format.SWISS || repeatOpening;
         this.openingStartIndex = Math.max(1, openingStartIndex);
-        this.engines.addAll(engines);
+        if (format == Format.SWISS) {
+            this.swissSeedingMode = seedingMode == null ? SwissSeedingMode.RANDOM : seedingMode;
+            if (this.swissSeedingMode == SwissSeedingMode.RANDOM) {
+                // Persist the random seed and resulting order for reproducible resume/import.
+                this.swissRandomSeed = new Random().nextLong();
+                ArrayList<Engine> shuffled = new ArrayList<>(engines);
+                Collections.shuffle(shuffled, new Random(this.swissRandomSeed));
+                this.engines.addAll(shuffled);
+                for (Engine engine : shuffled) swissStrengthOrder.add(engine.id);
+            } else {
+                ArrayList<Engine> strengthOrder = orderEnginesByIds(engines, rankOrderIds);
+                for (Engine engine : strengthOrder) swissStrengthOrder.add(engine.id);
+                this.engines.addAll(createEqualDistanceSeedOrder(strengthOrder));
+            }
+        } else {
+            this.engines.addAll(engines);
+        }
         buildSchedule();
         // Opening assignment is deferred to prepareOpeningAssignments(), which is
         // invoked by the activity on a worker thread. Avoid parsing a large PGN
         // book while the setup screen is running on the Android UI thread.
+    }
+
+    private static List<String> engineIdsInOrder(List<Engine> engines) {
+        ArrayList<String> ids = new ArrayList<>();
+        if (engines != null) for (Engine engine : engines) ids.add(engine.id);
+        return ids;
+    }
+
+    private static ArrayList<Engine> orderEnginesByIds(List<Engine> engines, List<String> orderIds) {
+        if (orderIds == null || orderIds.size() != engines.size())
+            throw new IllegalArgumentException("Rank Engine mode requires a rank for every selected engine");
+        Map<String, Engine> byId = new HashMap<>();
+        for (Engine engine : engines) byId.put(engine.id, engine);
+        ArrayList<Engine> ordered = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (String id : orderIds) {
+            Engine engine = byId.get(id);
+            if (engine == null || !seen.add(id))
+                throw new IllegalArgumentException("Swiss engine ranking contains a missing or duplicated engine");
+            ordered.add(engine);
+        }
+        if (ordered.size() != engines.size()) throw new IllegalArgumentException("Swiss engine ranking is incomplete");
+        return ordered;
+    }
+
+    /** TCEC-style group seeding: strength groups are interleaved to assign seeds. */
+    private static ArrayList<Engine> createEqualDistanceSeedOrder(List<Engine> strengthOrder) {
+        int count = strengthOrder.size();
+        if (count < 2) return new ArrayList<>(strengthOrder);
+        int groupCount = Math.max(2, (int)Math.round(count / 6.5));
+        if ((groupCount & 1) != 0) groupCount++;
+        if (groupCount > count) groupCount = (count & 1) == 0 ? count : count - 1;
+        groupCount = Math.max(2, groupCount);
+        ArrayList<ArrayList<Engine>> groups = new ArrayList<>();
+        int next = 0;
+        for (int group = 0; group < groupCount; group++) {
+            int remaining = count - next;
+            int groupsRemaining = groupCount - group;
+            int groupSize = (remaining + groupsRemaining - 1) / groupsRemaining;
+            ArrayList<Engine> members = new ArrayList<>();
+            for (int i = 0; i < groupSize && next < count; i++) members.add(strengthOrder.get(next++));
+            groups.add(members);
+        }
+        ArrayList<Engine> seeded = new ArrayList<>(count);
+        for (int row = 0; seeded.size() < count; row++) {
+            for (ArrayList<Engine> group : groups) if (row < group.size()) seeded.add(group.get(row));
+        }
+        return seeded;
     }
 
     private TournamentManager(Context context, JSONObject root, String fileName) throws JSONException {
@@ -188,6 +268,10 @@ public final class TournamentManager {
         gamesPerPair = root.optInt("gamesPerPair", 2);
         swissRoundsTotal = Math.max(0, root.optInt("swissRoundsTotal", 0));
         swissCurrentRound = Math.max(0, root.optInt("swissCurrentRound", 0));
+        String savedSeedingMode = root.optString("swissSeedingMode", "RANK_ENGINE");
+        try { swissSeedingMode = SwissSeedingMode.valueOf(savedSeedingMode); }
+        catch (IllegalArgumentException invalidMode) { swissSeedingMode = SwissSeedingMode.RANK_ENGINE; }
+        swissRandomSeed = root.optLong("swissRandomSeed", 0L);
         baseTimeMs = root.optLong("baseTimeMs", 30000);
         incrementMs = root.optLong("incrementMs", 500);
         openingPgn = root.optString("openingPgn", "");
@@ -203,6 +287,13 @@ public final class TournamentManager {
         timeMode = TimeMode.valueOf(root.optString("timeMode", "CLOCK")); limitValue = root.optInt("limitValue", 30);
         JSONArray ea = root.getJSONArray("engines");
         for (int i = 0; i < ea.length(); i++) { JSONObject e = ea.getJSONObject(i); engines.add(new Engine(e.getString("id"), e.optString("name"))); }
+        JSONArray strengthArray = root.optJSONArray("swissStrengthOrder");
+        if (strengthArray != null) {
+            for (int i = 0; i < strengthArray.length(); i++) swissStrengthOrder.add(strengthArray.optString(i, ""));
+        } else {
+            // Legacy Swiss files already contain their seed order in the engines array.
+            for (Engine engine : engines) swissStrengthOrder.add(engine.id);
+        }
         JSONArray pa = root.getJSONArray("pairings");
         for (int i = 0; i < pa.length(); i++) {
             JSONObject p = pa.getJSONObject(i);
@@ -304,6 +395,10 @@ public final class TournamentManager {
                 swissCurrentRound < 1 || swissCurrentRound > swissRoundsTotal)
             throw new IOException("Invalid Swiss round settings in imported tournament");
         if (swissMatches.isEmpty()) throw new IOException("Imported Swiss tournament has no pairing history");
+        if (swissStrengthOrder.size() != engines.size() ||
+                !new HashSet<>(swissStrengthOrder).equals(engineIds) ||
+                new HashSet<>(swissStrengthOrder).size() != engines.size())
+            throw new IOException("Imported Swiss seeding order is incomplete or contains duplicate engines");
         Set<Integer> coveredGames = new HashSet<>();
         Set<String> opponentPairs = new HashSet<>();
         Set<String> roundParticipants = new HashSet<>();
@@ -550,6 +645,10 @@ public final class TournamentManager {
 
     public synchronized int swissRoundsTotal() { return swissRoundsTotal; }
     public synchronized int swissCurrentRound() { return swissCurrentRound; }
+    public synchronized SwissSeedingMode swissSeedingMode() { return swissSeedingMode; }
+    public synchronized List<String> swissStrengthOrder() {
+        return Collections.unmodifiableList(new ArrayList<>(swissStrengthOrder));
+    }
     public synchronized List<SwissBye> swissByes() {
         return Collections.unmodifiableList(new ArrayList<>(swissByes));
     }
@@ -751,6 +850,8 @@ public final class TournamentManager {
                 if (old.id.equals(pairing.blackEngineId)) pairing.blackEngineId = newId;
             }
             if (format == Format.SWISS) {
+                for (int i = 0; i < swissStrengthOrder.size(); i++)
+                    if (old.id.equals(swissStrengthOrder.get(i))) swissStrengthOrder.set(i, newId);
                 for (SwissMatch match : swissMatches) {
                     if (old.id.equals(match.firstEngineId)) match.firstEngineId = newId;
                     if (old.id.equals(match.secondEngineId)) match.secondEngineId = newId;
@@ -1337,6 +1438,11 @@ public final class TournamentManager {
         if (format == Format.SWISS) {
             root.put("swissRoundsTotal", swissRoundsTotal);
             root.put("swissCurrentRound", swissCurrentRound);
+            root.put("swissSeedingMode", swissSeedingMode.name());
+            root.put("swissRandomSeed", swissRandomSeed);
+            JSONArray strengthOrder = new JSONArray();
+            for (String engineId : swissStrengthOrder) strengthOrder.put(engineId);
+            root.put("swissStrengthOrder", strengthOrder);
             JSONArray byes = new JSONArray();
             for (SwissBye bye : swissByes) {
                 JSONObject entry = new JSONObject(); entry.put("round", bye.round); entry.put("engine", bye.engineId); byes.put(entry);
