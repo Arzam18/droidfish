@@ -53,7 +53,9 @@ import java.nio.charset.Charset;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /** Simple native setup and live-results screen for CET-style engine tournaments. */
 public final class TournamentActivity extends Activity {
@@ -105,9 +107,12 @@ public final class TournamentActivity extends Activity {
     private TournamentManager cachedAnomalyTournament;
     private TextView cachedAnomalySummary;
     private LinearLayout cachedAnomalyRows;
-    private Spinner formatSpinner, timeModeSpinner;
+    private Spinner formatSpinner, timeModeSpinner, swissSeedingSpinner;
     private EditText titleInput, gamesInput, swissRoundsInput, baseInput, incrementInput, limitInput, openingPliesInput, openingStartInput, autoWinEvalInput;
     private TextView swissSetupHint;
+    private Button swissRankEditorButton;
+    private final ArrayList<EngineChoice> swissRankedEngines = new ArrayList<>();
+    private boolean swissRankOrderConfirmed;
     private boolean wasSwissFormat;
     private boolean repeatOpeningBeforeSwiss;
     private String gamesPerPairBeforeSwiss = "2";
@@ -218,9 +223,26 @@ public final class TournamentActivity extends Activity {
         swissRoundsInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         swissRoundsInput.setVisibility(View.GONE);
         root.addView(swissRoundsInput, fullWidth());
-        swissSetupHint = text("Seeding follows engine selection order. Each pairing plays two games with colors reversed.");
+        root.addView(text("Swiss initial seeding"), fullWidth());
+        swissSeedingSpinner = new Spinner(this);
+        swissSeedingSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
+                new String[]{"Choose Swiss seeding method", "Random (independent Swiss)", "Rank engine (continuous tournament / MCEC)"}));
+        swissSeedingSpinner.setVisibility(View.GONE);
+        root.addView(swissSeedingSpinner, fullWidth());
+        swissRankEditorButton = new Button(this);
+        swissRankEditorButton.setText("Edit engine ranking (strongest to weakest)");
+        swissRankEditorButton.setVisibility(View.GONE);
+        root.addView(swissRankEditorButton, fullWidth());
+        swissRankEditorButton.setOnClickListener(v -> showSwissRankEditor());
+        swissSetupHint = text("Choose Random for an independent Swiss draw, or Rank engine for a continuous tournament. Each opponent pairing plays two games with colors reversed.");
         swissSetupHint.setVisibility(View.GONE);
         root.addView(swissSetupHint, fullWidth());
+        swissSeedingSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                updateSwissSeedingUi();
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
         root.addView(text("Time control mode"), fullWidth());
         timeModeSpinner = new Spinner(this);
         timeModeSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
@@ -1638,7 +1660,9 @@ public final class TournamentActivity extends Activity {
 
     private void applySwissSetupMode(boolean swiss) {
         if (swissRoundsInput != null) swissRoundsInput.setVisibility(swiss ? View.VISIBLE : View.GONE);
+        if (swissSeedingSpinner != null) swissSeedingSpinner.setVisibility(swiss ? View.VISIBLE : View.GONE);
         if (swissSetupHint != null) swissSetupHint.setVisibility(swiss ? View.VISIBLE : View.GONE);
+        updateSwissSeedingUi();
         if (swiss == wasSwissFormat || gamesInput == null || repeatOpeningCheck == null) return;
         if (swiss) {
             gamesPerPairBeforeSwiss = gamesInput.getText().toString();
@@ -1658,6 +1682,110 @@ public final class TournamentActivity extends Activity {
         wasSwissFormat = swiss;
     }
 
+    private void updateSwissSeedingUi() {
+        boolean swiss = formatSpinner != null &&
+                formatSpinner.getSelectedItemPosition() == TournamentManager.Format.SWISS.ordinal();
+        int seedingChoice = swissSeedingSpinner == null ? 0 : swissSeedingSpinner.getSelectedItemPosition();
+        boolean rankMode = seedingChoice == 2;
+        if (swissRankEditorButton != null) swissRankEditorButton.setVisibility(swiss && rankMode ? View.VISIBLE : View.GONE);
+        if (swissSetupHint != null) {
+            if (rankMode) {
+                swissSetupHint.setText("Rank engines from strongest to weakest, then tap Edit engine ranking and confirm. DroidFish applies TCEC-style equal-distance group seeding for Round 1; later rounds use score and initial seed.");
+            } else if (seedingChoice == 1) {
+                swissSetupHint.setText("A fresh random engine order is generated for this independent Swiss. Later rounds use score-and-seed pairing.");
+            } else {
+                swissSetupHint.setText("Choose Random for an independent Swiss or Rank engine for a continuous tournament such as MCEC.");
+            }
+        }
+    }
+
+    private void syncSwissRankedEngines() {
+        ArrayList<EngineChoice> updated = new ArrayList<>();
+        for (EngineChoice ranked : swissRankedEngines) {
+            for (EngineChoice selected : selectedEngines) {
+                if (ranked.id.equals(selected.id)) { updated.add(selected); break; }
+            }
+        }
+        for (EngineChoice selected : selectedEngines) {
+            boolean present = false;
+            for (EngineChoice ranked : updated) if (selected.id.equals(ranked.id)) { present = true; break; }
+            if (!present) updated.add(selected);
+        }
+        swissRankedEngines.clear();
+        swissRankedEngines.addAll(updated);
+    }
+
+    private void showSwissRankEditor() {
+        syncSwissRankedEngines();
+        if (swissRankedEngines.size() < 2) {
+            Toast.makeText(this, "Select at least two engines first", Toast.LENGTH_LONG).show();
+            return;
+        }
+        final ArrayList<EngineChoice> working = new ArrayList<>(swissRankedEngines);
+        final ArrayList<String> labels = new ArrayList<>();
+        final ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_single_choice, labels);
+        final int[] selectedIndex = {0};
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(12);
+        content.setPadding(pad, pad, pad, pad);
+        TextView instruction = text("Move engines into strength order. Rank #1 is the strongest engine. Confirming this ranking is required for Rank engine mode. It controls only initial TCEC-style group seeding; later rounds follow tournament scores.");
+        content.addView(instruction, fullWidth());
+        ListView list = new ListView(this);
+        list.setChoiceMode(ListView.CHOICE_MODE_SINGLE);
+        list.setAdapter(adapter);
+        content.addView(list, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(320)));
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.HORIZONTAL);
+        Button up = new Button(this); up.setText("Move up");
+        Button down = new Button(this); down.setText("Move down");
+        controls.addView(up, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        controls.addView(down, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        content.addView(controls, fullWidth());
+        Runnable refresh = () -> {
+            labels.clear();
+            for (int i = 0; i < working.size(); i++) labels.add("#" + (i + 1) + "  " + working.get(i).name);
+            adapter.notifyDataSetChanged();
+            if (!working.isEmpty()) {
+                selectedIndex[0] = Math.max(0, Math.min(selectedIndex[0], working.size() - 1));
+                list.setItemChecked(selectedIndex[0], true);
+                list.setSelection(selectedIndex[0]);
+            }
+        };
+        list.setOnItemClickListener((parent, view, position, id) -> selectedIndex[0] = position);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Swiss engine ranking")
+                .setView(content)
+                .setPositiveButton("Use ranking", null)
+                .setNegativeButton(android.R.string.cancel, null)
+                .create();
+        up.setOnClickListener(v -> {
+            int index = selectedIndex[0];
+            if (index > 0) {
+                Collections.swap(working, index, index - 1);
+                selectedIndex[0] = index - 1;
+                refresh.run();
+            }
+        });
+        down.setOnClickListener(v -> {
+            int index = selectedIndex[0];
+            if (index >= 0 && index + 1 < working.size()) {
+                Collections.swap(working, index, index + 1);
+                selectedIndex[0] = index + 1;
+                refresh.run();
+            }
+        });
+        refresh.run();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            swissRankedEngines.clear();
+            swissRankedEngines.addAll(working);
+            swissRankOrderConfirmed = true;
+            saveSetup();
+            dialog.dismiss();
+        }));
+        dialog.show();
+    }
+
     private void chooseEngines() {
         if (availableEngines.isEmpty()) { Toast.makeText(this, "No engines found", Toast.LENGTH_LONG).show(); return; }
         String[] labels = new String[availableEngines.size()];
@@ -1668,7 +1796,7 @@ public final class TournamentActivity extends Activity {
         }
         final ArrayList<EngineChoice> dialogSelection = new ArrayList<>(selectedEngines);
         String selectionTitle = formatSpinner.getSelectedItemPosition() == TournamentManager.Format.SWISS.ordinal()
-                ? "Choose engines; selection order sets Swiss seeds"
+                ? "Choose engines; select Random or Rank engine for Swiss seeding"
                 : "Choose engines; selection order sets the gauntlet engine";
         new AlertDialog.Builder(this).setTitle(selectionTitle)
                 .setMultiChoiceItems(labels, checked, (dialog, which, isChecked) -> {
@@ -1683,7 +1811,13 @@ public final class TournamentActivity extends Activity {
                     }
                 })
                 .setPositiveButton("Apply", (dialog, which) -> {
+                    Set<String> previousIds = new HashSet<>();
+                    for (EngineChoice e : selectedEngines) previousIds.add(e.id);
+                    Set<String> updatedIds = new HashSet<>();
+                    for (EngineChoice e : dialogSelection) updatedIds.add(e.id);
+                    if (!previousIds.equals(updatedIds)) swissRankOrderConfirmed = false;
                     selectedEngines.clear(); selectedEngines.addAll(dialogSelection);
+                    syncSwissRankedEngines();
                     updateSelectedText();
                 }).setNegativeButton(android.R.string.cancel, null).show();
     }
@@ -1701,6 +1835,11 @@ public final class TournamentActivity extends Activity {
         e.putString("setupTitle", titleInput.getText().toString());
         e.putString("setupGames", wasSwissFormat ? gamesPerPairBeforeSwiss : gamesInput.getText().toString());
         e.putString("setupSwissRounds", swissRoundsInput.getText().toString());
+        e.putInt("setupSwissSeedingMode", swissSeedingSpinner == null ? 0 : swissSeedingSpinner.getSelectedItemPosition());
+        StringBuilder swissRankIds = new StringBuilder();
+        for (EngineChoice c : swissRankedEngines) { if (swissRankIds.length() > 0) swissRankIds.append("\n"); swissRankIds.append(c.id); }
+        e.putString("setupSwissRankIds", swissRankIds.toString());
+        e.putBoolean("setupSwissRankOrderConfirmed", swissRankOrderConfirmed);
         e.putInt("setupFormat", formatSpinner.getSelectedItemPosition());
         e.putInt("setupTimeMode", timeModeSpinner.getSelectedItemPosition());
         e.putString("setupBase", baseInput.getText().toString());
@@ -1736,6 +1875,8 @@ public final class TournamentActivity extends Activity {
         titleInput.setText(p.getString("setupTitle", titleInput.getText().toString()));
         gamesInput.setText(p.getString("setupGames", gamesInput.getText().toString()));
         swissRoundsInput.setText(p.getString("setupSwissRounds", ""));
+        if (swissSeedingSpinner != null) swissSeedingSpinner.setSelection(Math.max(0, Math.min(2, p.getInt("setupSwissSeedingMode", 0))));
+        swissRankOrderConfirmed = p.getBoolean("setupSwissRankOrderConfirmed", false);
         repeatOpeningCheck.setChecked(p.getBoolean("setupRepeat", false));
         int savedFormat = p.getInt("setupFormat", 0);
         formatSpinner.setSelection(savedFormat);
@@ -1757,7 +1898,14 @@ public final class TournamentActivity extends Activity {
         if (evalDrawConditionInput != null) evalDrawConditionInput.setText(p.getString("setupEvalDrawCondition", "6"));
         selectedOpeningBinPath = p.getString("setupOpeningBinPath", "");
         selectedOpeningPgn=p.getString("setupOpeningPgn", ""); selectedOpeningFileName=p.getString("setupOpeningName", selectedOpeningPgn.isEmpty()?"No PGN file selected":"Saved PGN book loaded"); openingFileText.setText(selectedOpeningFileName);
-        selectedEngines.clear(); String ids=p.getString("setupEngineIds", ""); if (!ids.isEmpty()) for(String id:ids.split("\n")) for(EngineChoice c:availableEngines) if(c.id.equals(id)){selectedEngines.add(c); break;} updateSelectedText();
+        selectedEngines.clear(); String ids=p.getString("setupEngineIds", ""); if (!ids.isEmpty()) for(String id:ids.split("\n")) for(EngineChoice c:availableEngines) if(c.id.equals(id)){selectedEngines.add(c); break;}
+        swissRankedEngines.clear();
+        String savedSwissRankIds = p.getString("setupSwissRankIds", "");
+        if (!savedSwissRankIds.isEmpty()) for (String id : savedSwissRankIds.split("\n"))
+            for (EngineChoice c : selectedEngines) if (c.id.equals(id)) { swissRankedEngines.add(c); break; }
+        syncSwissRankedEngines();
+        updateSelectedText();
+        updateSwissSeedingUi();
     }
     private String mirrorHeaderLabel() {
         return "Game " + (currentGameNumber == 0 ? "—" : currentGameNumber) + "/" +
@@ -1953,6 +2101,26 @@ public final class TournamentActivity extends Activity {
                     throw new IllegalArgumentException("Swiss rounds must be between 1 and " + maximumRounds +
                             " for " + selectedEngines.size() + " selected engines");
             }
+            int selectedSwissSeeding = swissSeedingSpinner.getSelectedItemPosition();
+            if (format == TournamentManager.Format.SWISS && selectedSwissSeeding == 0)
+                throw new IllegalArgumentException("Choose Random or Rank engine for Swiss seeding first");
+            TournamentManager.SwissSeedingMode swissSeedingMode = format == TournamentManager.Format.SWISS
+                    ? TournamentManager.SwissSeedingMode.values()[selectedSwissSeeding - 1]
+                    : TournamentManager.SwissSeedingMode.RANDOM;
+            ArrayList<String> swissRankOrderIds = new ArrayList<>();
+            if (format == TournamentManager.Format.SWISS && swissSeedingMode == TournamentManager.SwissSeedingMode.RANK_ENGINE) {
+                if (!swissRankOrderConfirmed) {
+                    Toast.makeText(this, "Review and confirm the engine ranking before starting Rank engine Swiss", Toast.LENGTH_LONG).show();
+                    showSwissRankEditor();
+                    return;
+                }
+                syncSwissRankedEngines();
+                if (swissRankedEngines.size() != selectedEngines.size())
+                    throw new IllegalArgumentException("Rank every selected engine before starting Swiss");
+                for (EngineChoice engine : swissRankedEngines) swissRankOrderIds.add(engine.id);
+            } else {
+                for (EngineChoice engine : selectedEngines) swissRankOrderIds.add(engine.id);
+            }
             int timeModeIndex = timeModeSpinner.getSelectedItemPosition();
             boolean movePeriodMode = timeModeIndex == 4;
             double baseMinutes = (timeModeIndex == 0 || movePeriodMode)
@@ -1980,7 +2148,8 @@ public final class TournamentActivity extends Activity {
             TournamentManager tournament = new TournamentManager(this, tournamentName, format,
                     engines, games, baseMillis, increment, selectedOpeningPgn, openingPlies,
                     format == TournamentManager.Format.SWISS || repeatOpeningCheck.isChecked(),
-                    TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart, swissRounds);
+                    TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart, swissRounds,
+                    swissSeedingMode, swissRankOrderIds);
             tournament.setOpeningBinPath(selectedOpeningBinPath);
             launchTournament(tournament);
         } catch (Exception e) {
@@ -2212,10 +2381,17 @@ public final class TournamentActivity extends Activity {
     private void loadTournamentSetup(TournamentManager tournament) {
         selectedEngines.clear();
         for (TournamentManager.Engine engine : tournament.engines()) selectedEngines.add(new EngineChoice(engine.id, engine.displayName));
+        swissRankedEngines.clear();
+        for (String id : tournament.swissStrengthOrder())
+            for (EngineChoice engine : selectedEngines) if (engine.id.equals(id)) { swissRankedEngines.add(engine); break; }
+        swissRankOrderConfirmed = tournament.format() == TournamentManager.Format.SWISS &&
+                tournament.swissSeedingMode() == TournamentManager.SwissSeedingMode.RANK_ENGINE;
+        syncSwissRankedEngines();
         updateSelectedText();
         titleInput.setText(tournament.title());
         if (tournament.format() == TournamentManager.Format.SWISS) {
             swissRoundsInput.setText(String.valueOf(tournament.swissRoundsTotal()));
+            swissSeedingSpinner.setSelection(tournament.swissSeedingMode().ordinal() + 1);
         }
         formatSpinner.setSelection(tournament.format().ordinal());
         applySwissSetupMode(tournament.format() == TournamentManager.Format.SWISS);
