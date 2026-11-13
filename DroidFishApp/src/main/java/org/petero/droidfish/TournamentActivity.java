@@ -27,6 +27,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.ListView;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -41,6 +42,7 @@ import org.petero.droidfish.gamelogic.ChessParseError;
 import org.petero.droidfish.gamelogic.TextIO;
 import org.petero.droidfish.ChessBoardPlay;
 import org.petero.droidfish.tournament.TournamentManager;
+import org.petero.droidfish.tournament.CupTournamentManager;
 import org.petero.droidfish.tournament.TournamentRunner;
 import org.petero.droidfish.engine.DroidComputerPlayer;
 import org.petero.droidfish.gamelogic.SearchListener;
@@ -107,15 +109,16 @@ public final class TournamentActivity extends Activity {
     private TournamentManager cachedAnomalyTournament;
     private TextView cachedAnomalySummary;
     private LinearLayout cachedAnomalyRows;
-    private Spinner formatSpinner, timeModeSpinner, swissSeedingSpinner;
+    private Spinner formatSpinner, timeModeSpinner, swissSeedingSpinner, cupSeedingSpinner;
     private EditText titleInput, gamesInput, swissRoundsInput, baseInput, incrementInput, limitInput, openingPliesInput, openingStartInput, autoWinEvalInput;
-    private TextView swissSetupHint;
-    private Button swissRankEditorButton;
+    private TextView swissSetupHint, cupSetupHint, cupSeedingLabel;
+    private Button swissRankEditorButton, cupRankEditorButton, cachedScheduleBracketButton;
     private final ArrayList<EngineChoice> swissRankedEngines = new ArrayList<>();
-    private boolean swissRankOrderConfirmed;
-    private boolean wasSwissFormat;
-    private boolean repeatOpeningBeforeSwiss;
-    private String gamesPerPairBeforeSwiss = "2";
+    private final ArrayList<EngineChoice> cupRankedEngines = new ArrayList<>();
+    private boolean swissRankOrderConfirmed, cupRankOrderConfirmed;
+    private boolean forcedPairFormat;
+    private boolean repeatOpeningBeforeForcedPairFormat;
+    private String gamesPerPairBeforeForcedPairFormat = "2";
     private CheckBox fastWinRuleCheck;
     private TextView openingFileText;
     private String selectedOpeningPgn = "";
@@ -214,7 +217,7 @@ public final class TournamentActivity extends Activity {
         root.addView(text("Tournament format"), fullWidth());
         formatSpinner = new Spinner(this);
         formatSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
-                new String[]{"Round Robin", "Match", "Gauntlet (first engine vs rest)", "Swiss"}));
+                new String[]{"Round Robin", "Match", "Gauntlet (first engine vs rest)", "Swiss", "Cup"}));
         root.addView(formatSpinner, fullWidth());
 
         titleInput = field("Tournament name", "My Tournament"); root.addView(titleInput, fullWidth());
@@ -237,6 +240,26 @@ public final class TournamentActivity extends Activity {
         swissSetupHint = text("Choose Random for an independent Swiss draw, or Rank engine for a continuous tournament. Each opponent pairing plays two games with colors reversed.");
         swissSetupHint.setVisibility(View.GONE);
         root.addView(swissSetupHint, fullWidth());
+        cupSeedingLabel = text("Cup initial seeding");
+        cupSeedingLabel.setVisibility(View.GONE);
+        root.addView(cupSeedingLabel, fullWidth());
+        cupSeedingSpinner = new Spinner(this);
+        cupSeedingSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
+                new String[]{"Choose Cup seeding method", "Random (independent Cup)", "Rank engine (continuous tournament / MCEC)"}));
+        cupSeedingSpinner.setVisibility(View.GONE);
+        root.addView(cupSeedingSpinner, fullWidth());
+        cupRankEditorButton = new Button(this);
+        cupRankEditorButton.setText("Edit engine ranking (strongest to weakest)");
+        cupRankEditorButton.setVisibility(View.GONE);
+        root.addView(cupRankEditorButton, fullWidth());
+        cupRankEditorButton.setOnClickListener(v -> showCupRankEditor());
+        cupSetupHint = text("Cup uses stage-specific match lengths, reversed-color game pairs, and a knockout bracket. Default field size is 32.");
+        cupSetupHint.setVisibility(View.GONE);
+        root.addView(cupSetupHint, fullWidth());
+        cupSeedingSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) { updateCupSeedingUi(); }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
         swissSeedingSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 updateSwissSeedingUi();
@@ -289,7 +312,7 @@ public final class TournamentActivity extends Activity {
         root.addView(repeatOpeningCheck, fullWidth());
         formatSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
-                applySwissSetupMode(position == TournamentManager.Format.SWISS.ordinal());
+                applyTournamentFormatUi(position);
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
         });
@@ -949,15 +972,18 @@ public final class TournamentActivity extends Activity {
     private void showStandingsDialog() {
         try {
             TournamentManager tournament = activeTournamentManager != null ? activeTournamentManager : TournamentManager.restore(this);
+            final boolean cup = tournament.format() == TournamentManager.Format.CUP;
             final String standings = formatStandings(tournament, tournament.standings(), tournament.engines());
-            new AlertDialog.Builder(this).setTitle("Standings " + completedGameCount(tournament) + "/" + tournament.pairings().size())
+            new AlertDialog.Builder(this).setTitle((cup ? "Cup Progress " : "Standings ") + completedGameCount(tournament) + "/" + tournament.pairings().size())
                     .setMessage(standings)
                     .setNegativeButton("COPY", (dialog, which) -> {
                         ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
-                        if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Tournament standings", standings));
-                        Toast.makeText(this, "Standings copied", Toast.LENGTH_SHORT).show();
+                        if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText(cup ? "Cup progress" : "Tournament standings", standings));
+                        Toast.makeText(this, cup ? "Cup progress copied" : "Standings copied", Toast.LENGTH_SHORT).show();
                     })
-                    .setNeutralButton("EDIT RESULT", (dialog, which) -> showStandingsResultPicker(tournament))
+                    .setNeutralButton(cup ? "BRACKET" : "EDIT RESULT", (dialog, which) -> {
+                        if (cup) showCupBracketDialog(tournament); else showStandingsResultPicker(tournament);
+                    })
                     .setPositiveButton("CLOSE", null).show();
         } catch (Exception e) {
             final String standings = standingsText == null ? "No results yet" : standingsText.getText().toString();
@@ -1079,6 +1105,12 @@ public final class TournamentActivity extends Activity {
             int screenHeight = getResources().getDisplayMetrics().heightPixels;
             int scheduleViewportHeight = Math.min(dp(660), Math.max(dp(440), (int)(screenHeight * 0.70f)));
             content.addView(scheduleList, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, scheduleViewportHeight));
+            Button bracketButton = new Button(this);
+            cachedScheduleBracketButton = bracketButton;
+            bracketButton.setText("VIEW CUP BRACKET");
+            bracketButton.setVisibility(tournament.format() == TournamentManager.Format.CUP ? View.VISIBLE : View.GONE);
+            content.addView(bracketButton, fullWidth());
+            bracketButton.setOnClickListener(v -> showCupBracketDialog(tournament));
             Button anomalies = new Button(this);
             cachedScheduleAnomaliesButton = anomalies;
             content.addView(anomalies, fullWidth());
@@ -1114,7 +1146,8 @@ public final class TournamentActivity extends Activity {
 
     /** Title includes completed/total progress; rows are cached until tournament state changes. */
     private String scheduleTitle(TournamentManager tournament) {
-        return "Schedule •" + tournament.completedGamesCount() + "/" + tournament.pairings().size();
+        String prefix = tournament.format() == TournamentManager.Format.CUP ? "Cup Schedule" : "Schedule";
+        return prefix + " •" + tournament.completedGamesCount() + "/" + tournament.pairings().size();
     }
 
     private void refreshCachedSchedule(TournamentManager tournament) {
@@ -1127,8 +1160,23 @@ public final class TournamentActivity extends Activity {
         List<TournamentManager.Engine> engines = tournament.engines();
         List<Integer> priorityQueue = tournament.playQueue();
         boolean swiss = tournament.format() == TournamentManager.Format.SWISS;
-        int displayedSwissRound = 0;
-        for (TournamentManager.Pairing pairing : tournament.pairings()) {
+        boolean cup = tournament.format() == TournamentManager.Format.CUP;
+        int displayedSwissRound = 0, displayedCupStage = -1, displayedCupMatch = -1;
+        List<TournamentManager.Pairing> schedulePairings = new ArrayList<>(tournament.pairings());
+        if (cup) {
+            // Tiebreak pairs are appended to the execution queue when needed. Display
+            // them beside their match rather than at the bottom of the whole schedule.
+            java.util.Collections.sort(schedulePairings, (a, b) -> {
+                int stageOrder = Integer.compare(a.round, b.round);
+                if (stageOrder != 0) return stageOrder;
+                int matchOrder = Integer.compare(a.cupMatchNumber, b.cupMatchNumber);
+                if (matchOrder != 0) return matchOrder;
+                int pairOrder = Integer.compare(a.cupPairNumber, b.cupPairNumber);
+                if (pairOrder != 0) return pairOrder;
+                return Integer.compare(a.cupGameInPair, b.cupGameInPair);
+            });
+        }
+        for (TournamentManager.Pairing pairing : schedulePairings) {
             if (swiss && pairing.round != displayedSwissRound) {
                 if (displayedSwissRound > 0) appendSwissByeRows(tournament, engines, displayedSwissRound, copy);
                 displayedSwissRound = pairing.round;
@@ -1137,19 +1185,43 @@ public final class TournamentActivity extends Activity {
                 if (copy.length() > 0) copy.append("\n\n");
                 copy.append(heading);
             }
-            String white = engineDisplayName(engines, pairing.whiteEngineId);
-            String black = engineDisplayName(engines, pairing.blackEngineId);
+            if (cup && pairing.round - 1 != displayedCupStage) {
+                if (displayedCupStage >= 0) appendCupByeRows(tournament, engines, displayedCupStage, copy);
+                displayedCupStage = pairing.round - 1;
+                displayedCupMatch = -1;
+                String heading = CupTournamentManager.stageLabel(tournament.cupBracketSize(), displayedCupStage).toUpperCase(java.util.Locale.US);
+                cachedScheduleRows.add("========== " + heading + " ==========");
+                if (copy.length() > 0) copy.append("\n\n");
+                copy.append("========== ").append(heading).append(" ==========");
+            }
+            if (cup && pairing.cupMatchNumber != displayedCupMatch) {
+                displayedCupMatch = pairing.cupMatchNumber;
+                TournamentManager.CupMatch match = findCupMatch(tournament, displayedCupMatch);
+                String aName = match == null ? "" : cupMatchEngineName(tournament, match, true, engines);
+                String bName = match == null ? "" : cupMatchEngineName(tournament, match, false, engines);
+                String matchHeading = "MATCH #" + displayedCupMatch + " · " + aName + " vs " + bName;
+                cachedScheduleRows.add(matchHeading);
+                if (copy.length() > 0) copy.append("\n\n");
+                copy.append(matchHeading);
+            }
+            String white = pairing.isComplete() && !pairing.whiteNameAtPlay.isEmpty()
+                    ? pairing.whiteNameAtPlay : engineDisplayName(engines, pairing.whiteEngineId);
+            String black = pairing.isComplete() && !pairing.blackNameAtPlay.isEmpty()
+                    ? pairing.blackNameAtPlay : engineDisplayName(engines, pairing.blackEngineId);
             String result = pairingResultLabel(pairing.outcome);
             int endedAtMoves = countFullMoves(pairing.pgn);
             int queuePosition = priorityQueue.indexOf(pairing.index) + 1;
             String state = pairing.replayPending ? " · replay queued" : (queuePosition > 0 ? " · priority #" + queuePosition : "");
-            String gamePrefix = swiss ? "R" + pairing.round + "." + pairing.gameNumber : Integer.toString(pairing.index + 1);
+            String gamePrefix = swiss ? "R" + pairing.round + "." + pairing.gameNumber
+                    : (cup ? "Pair " + pairing.cupPairNumber + " · Game " + pairing.cupGameInPair
+                    : Integer.toString(pairing.index + 1));
             String row = gamePrefix + ". " + white + " - " + black + " (" + result + ")" + state
                     + "\n" + endedAtMoves + " moves";
             cachedScheduleRows.add(row);
             if (copy.length() > 0) copy.append("\n\n");
             copy.append(row);
         }
+        if (cup && displayedCupStage >= 0) appendCupByeRows(tournament, engines, displayedCupStage, copy);
         if (swiss && displayedSwissRound > 0) appendSwissByeRows(tournament, engines, displayedSwissRound, copy);
         if (cachedScheduleRows.isEmpty()) {
             cachedScheduleRows.add("No scheduled games.");
@@ -1158,6 +1230,8 @@ public final class TournamentActivity extends Activity {
         cachedScheduleContents = copy.toString();
         cachedScheduleAdapter.notifyDataSetChanged();
         if (cachedScheduleDialog != null) cachedScheduleDialog.setTitle(scheduleTitle(tournament));
+        if (cachedScheduleBracketButton != null)
+            cachedScheduleBracketButton.setVisibility(tournament.format() == TournamentManager.Format.CUP ? View.VISIBLE : View.GONE);
         cachedScheduleDirty = false;
         List<TournamentManager.Pairing> timeLosses = tournament.pendingTimeLosses();
         List<TournamentManager.Pairing> drawAnomalies = tournament.pendingDrawAnomalies();
@@ -1177,6 +1251,148 @@ public final class TournamentActivity extends Activity {
             if (copy.length() > 0) copy.append("\n\n");
             copy.append(row);
         }
+    }
+
+    private TournamentManager.CupMatch findCupMatch(TournamentManager tournament, int matchNumber) {
+        for (TournamentManager.CupMatch match : tournament.cupMatches()) if (match.matchNumber == matchNumber) return match;
+        return null;
+    }
+
+    private void appendCupByeRows(TournamentManager tournament, List<TournamentManager.Engine> engines,
+                                  int stageIndex, StringBuilder copy) {
+        for (TournamentManager.CupMatch match : tournament.cupMatches()) {
+            if (match.stageIndex != stageIndex || !match.bye) continue;
+            String row = "MATCH #" + match.matchNumber + " · BYE · " +
+                    engineDisplayName(engines, match.winnerId) + " advances";
+            cachedScheduleRows.add(row);
+            if (copy.length() > 0) copy.append("\n\n");
+            copy.append(row);
+        }
+    }
+
+    private String cupMatchEngineName(TournamentManager tournament, TournamentManager.CupMatch match,
+                                      boolean first, List<TournamentManager.Engine> engines) {
+        if (match == null) return "TBD";
+        String id = first ? match.engineAId : match.engineBId;
+        if (id == null || id.isEmpty()) return match.bye ? "BYE" : "TBD";
+        if (!match.gameIndices.isEmpty()) {
+            int gameIndex = match.gameIndices.get(0);
+            if (gameIndex >= 0 && gameIndex < tournament.pairings().size()) {
+                TournamentManager.Pairing firstGame = tournament.pairings().get(gameIndex);
+                String historical = first ? firstGame.whiteNameAtPlay : firstGame.blackNameAtPlay;
+                if (historical != null && !historical.isEmpty()) return historical;
+            }
+        }
+        return engineDisplayName(engines, id);
+    }
+
+    /** Lightweight horizontal bracket, backed by the same persisted match records as the schedule. */
+    private void showCupBracketDialog(TournamentManager tournament) {
+        if (tournament == null || tournament.format() != TournamentManager.Format.CUP) return;
+        final int bracketHeight = Math.min(dp(660), Math.max(dp(420),
+                (int)(getResources().getDisplayMetrics().heightPixels * 0.68f)));
+        HorizontalScrollView horizontal = new HorizontalScrollView(this);
+        horizontal.setFillViewport(false);
+        horizontal.setHorizontalScrollBarEnabled(true);
+        LinearLayout stages = new LinearLayout(this);
+        stages.setOrientation(LinearLayout.HORIZONTAL);
+        stages.setPadding(dp(8), dp(8), dp(8), dp(8));
+        List<TournamentManager.Engine> engines = tournament.engines();
+        int bracketSize = tournament.cupBracketSize();
+        int stageCount = CupTournamentManager.stageCount(bracketSize);
+        List<TournamentManager.CupMatch> allMatches = tournament.cupMatches();
+        for (int stage = 0; stage < stageCount; stage++) {
+            LinearLayout column = new LinearLayout(this);
+            column.setOrientation(LinearLayout.VERTICAL);
+            column.setPadding(dp(4), dp(4), dp(12), dp(4));
+            TextView heading = text(CupTournamentManager.stageLabel(bracketSize, stage));
+            heading.setTextSize(17);
+            heading.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+            heading.setPadding(dp(4), dp(8), dp(4), dp(12));
+            column.addView(heading, fullWidth());
+
+            int expectedMatches = bracketSize >> (stage + 1);
+            int matchOffset = 0;
+            for (int prior = 0; prior < stage; prior++) matchOffset += bracketSize >> (prior + 1);
+            int rendered = 0;
+            for (TournamentManager.CupMatch match : allMatches) {
+                if (match.stageIndex != stage) continue;
+                rendered++;
+                LinearLayout card = new LinearLayout(this);
+                card.setOrientation(LinearLayout.VERTICAL);
+                card.setPadding(dp(8), dp(6), dp(8), dp(6));
+                card.setBackgroundColor(0xFFE2E2E2);
+                TextView number = text("#" + match.matchNumber);
+                number.setTextColor(0xFF333333);
+                number.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+                String aName = cupMatchEngineName(tournament, match, true, engines);
+                String bName = cupMatchEngineName(tournament, match, false, engines);
+                TextView a = text(aName + "   " + (match.bye ? "BYE" : String.format(java.util.Locale.US, "%.1f", match.engineAPoints)));
+                TextView b = text(bName + "   " + (match.bye ? "--" : String.format(java.util.Locale.US, "%.1f", match.engineBPoints)));
+                a.setTextColor(match.decided && match.winnerId.equals(match.engineAId) ? 0xFF176B2C : 0xFF222222);
+                b.setTextColor(match.decided && !match.winnerId.isEmpty() && match.winnerId.equals(match.engineBId) ? 0xFF176B2C : 0xFF222222);
+                String stateText;
+                if (match.bye) {
+                    stateText = "BYE · advances";
+                } else if (match.decided) {
+                    stateText = "Advances: " + engineDisplayName(engines, match.winnerId);
+                    if (stage + 1 < stageCount) {
+                        int nextStageMatchOffset = 0;
+                        for (int prior = 0; prior <= stage; prior++) nextStageMatchOffset += bracketSize >> (prior + 1);
+                        int matchPosition = 0;
+                        for (TournamentManager.CupMatch candidate : allMatches) {
+                            if (candidate.stageIndex == stage) {
+                                if (candidate.matchNumber == match.matchNumber) break;
+                                matchPosition++;
+                            }
+                        }
+                        stateText += " · Winner to #" + (nextStageMatchOffset + matchPosition / 2 + 1);
+                    }
+                } else {
+                    stateText = "Match in progress · " + match.pairsCompleted + "/" + match.pairsScheduled + " pairs";
+                }
+                TextView state = text(stateText);
+                state.setTextSize(12);
+                state.setTextColor(0xFF555555);
+                card.addView(number, fullWidth());
+                card.addView(a, fullWidth());
+                card.addView(b, fullWidth());
+                card.addView(state, fullWidth());
+                LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(dp(250), ViewGroup.LayoutParams.WRAP_CONTENT);
+                cardLp.bottomMargin = dp(10);
+                column.addView(card, cardLp);
+            }
+            // Render future rounds as simple TBD cards so the complete bracket is visible
+            // before the first stage finishes. The match numbering is fixed and persisted
+            // when each stage is generated.
+            for (int i = rendered; i < expectedMatches; i++) {
+                int matchNumber = matchOffset + i + 1;
+                LinearLayout card = new LinearLayout(this);
+                card.setOrientation(LinearLayout.VERTICAL);
+                card.setPadding(dp(8), dp(6), dp(8), dp(6));
+                card.setBackgroundColor(0xFFD8D8D8);
+                TextView number = text("#" + matchNumber);
+                number.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+                TextView a = text("TBD   --");
+                TextView b = text("TBD   --");
+                TextView state = text("Waiting for previous stage");
+                state.setTextSize(12); state.setTextColor(0xFF666666);
+                card.addView(number, fullWidth()); card.addView(a, fullWidth());
+                card.addView(b, fullWidth()); card.addView(state, fullWidth());
+                LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(dp(250), ViewGroup.LayoutParams.WRAP_CONTENT);
+                cardLp.bottomMargin = dp(10);
+                column.addView(card, cardLp);
+            }
+
+            ScrollView vertical = new ScrollView(this);
+            vertical.setFillViewport(false);
+            vertical.addView(column, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            LinearLayout.LayoutParams columnLp = new LinearLayout.LayoutParams(dp(270), bracketHeight);
+            stages.addView(vertical, columnLp);
+        }
+        horizontal.addView(stages, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, bracketHeight));
+        new AlertDialog.Builder(this).setTitle("Cup bracket · " + tournament.title())
+                .setView(horizontal, dp(4), dp(4), dp(4), dp(4)).setPositiveButton("CLOSE", null).show();
     }
 
     private void invalidateCachedSchedule(TournamentManager tournament) {
@@ -1225,6 +1441,10 @@ public final class TournamentActivity extends Activity {
 
     /** Select a completed schedule entry to replay with its persisted original opening. */
     private void showReplayGamePicker(TournamentManager tournament) {
+        if (tournament.format() == TournamentManager.Format.CUP) {
+            Toast.makeText(this, "Cup results are locked to preserve the knockout bracket. A future Cup correction tool can handle controlled match corrections.", Toast.LENGTH_LONG).show();
+            return;
+        }
         ArrayList<Integer> gameIndices = new ArrayList<>();
         ArrayList<String> labels = new ArrayList<>();
         List<TournamentManager.Engine> engines = tournament.engines();
@@ -1354,6 +1574,7 @@ public final class TournamentActivity extends Activity {
             Button button = new Button(this);
             button.setText(labels[action]);
             button.setTextSize(10);
+            if (tournament.format() == TournamentManager.Format.CUP && selectedAction != 3) button.setEnabled(false);
             button.setMinWidth(0);
             button.setPadding(dp(2), 0, dp(2), 0);
             actions.addView(button, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -1397,6 +1618,10 @@ public final class TournamentActivity extends Activity {
                         }).show();
             });
         }
+        if (tournament.format() == TournamentManager.Format.CUP) {
+            TextView locked = text("Cup match results are locked to preserve bracket advancement. Use CONFIRM to acknowledge this anomaly.");
+            locked.setTextSize(12); locked.setTextColor(0xFFAAAAAA); item.addView(locked, fullWidth());
+        }
         item.addView(actions, fullWidth());
         parent.addView(item, fullWidth());
         View divider = new View(this);
@@ -1406,6 +1631,10 @@ public final class TournamentActivity extends Activity {
 
     /** Offers both pairing edits and tournament-wide engine identity corrections. */
     private void showScheduleEditMenu(TournamentManager tournament) {
+        if (tournament.format() == TournamentManager.Format.CUP) {
+            Toast.makeText(this, "Cup match results are locked into the bracket after a match advances. Engine updates are available at each stage checkpoint.", Toast.LENGTH_LONG).show();
+            return;
+        }
         new AlertDialog.Builder(this).setTitle("Edit tournament")
                 .setItems(new String[]{"Edit scheduled game / result", "Edit tournament engine"}, (dialog, which) -> {
                     if (which == 0) showScheduleEditor(tournament);
@@ -1658,28 +1887,46 @@ public final class TournamentActivity extends Activity {
         } catch (RuntimeException ignored) { }
     }
 
-    private void applySwissSetupMode(boolean swiss) {
+    private void applyTournamentFormatUi(int formatPosition) {
+        boolean swiss = formatPosition == TournamentManager.Format.SWISS.ordinal();
+        boolean cup = formatPosition == TournamentManager.Format.CUP.ordinal();
         if (swissRoundsInput != null) swissRoundsInput.setVisibility(swiss ? View.VISIBLE : View.GONE);
         if (swissSeedingSpinner != null) swissSeedingSpinner.setVisibility(swiss ? View.VISIBLE : View.GONE);
         if (swissSetupHint != null) swissSetupHint.setVisibility(swiss ? View.VISIBLE : View.GONE);
+        if (cupSeedingLabel != null) cupSeedingLabel.setVisibility(cup ? View.VISIBLE : View.GONE);
+        if (cupSeedingSpinner != null) cupSeedingSpinner.setVisibility(cup ? View.VISIBLE : View.GONE);
+        if (cupSetupHint != null) cupSetupHint.setVisibility(cup ? View.VISIBLE : View.GONE);
         updateSwissSeedingUi();
-        if (swiss == wasSwissFormat || gamesInput == null || repeatOpeningCheck == null) return;
-        if (swiss) {
-            gamesPerPairBeforeSwiss = gamesInput.getText().toString();
-            repeatOpeningBeforeSwiss = repeatOpeningCheck.isChecked();
-            gamesInput.setText("2");
-            gamesInput.setHint("Games per Swiss pairing (fixed at 2)");
-            gamesInput.setEnabled(false);
-            repeatOpeningCheck.setChecked(true);
-            repeatOpeningCheck.setEnabled(false);
-        } else {
-            gamesInput.setEnabled(true);
-            gamesInput.setHint("Games per pairing");
-            gamesInput.setText(gamesPerPairBeforeSwiss);
-            repeatOpeningCheck.setEnabled(true);
-            repeatOpeningCheck.setChecked(repeatOpeningBeforeSwiss);
+        updateCupSeedingUi();
+        boolean forceTwoGames = swiss || cup;
+        if (forceTwoGames != forcedPairFormat && gamesInput != null && repeatOpeningCheck != null) {
+            if (forceTwoGames) {
+                gamesPerPairBeforeForcedPairFormat = gamesInput.getText().toString();
+                repeatOpeningBeforeForcedPairFormat = repeatOpeningCheck.isChecked();
+                gamesInput.setText("2");
+                repeatOpeningCheck.setChecked(true);
+            } else {
+                gamesInput.setText(gamesPerPairBeforeForcedPairFormat);
+                repeatOpeningCheck.setChecked(repeatOpeningBeforeForcedPairFormat);
+            }
+            forcedPairFormat = forceTwoGames;
         }
-        wasSwissFormat = swiss;
+        if (gamesInput != null) {
+            gamesInput.setVisibility(cup ? View.GONE : View.VISIBLE);
+            gamesInput.setEnabled(!forceTwoGames);
+            gamesInput.setHint(swiss ? "Games per Swiss pairing (fixed at 2)" : "Games per pairing");
+        }
+        if (repeatOpeningCheck != null) {
+            repeatOpeningCheck.setEnabled(!forceTwoGames);
+            repeatOpeningCheck.setChecked(forceTwoGames || repeatOpeningCheck.isChecked());
+            repeatOpeningCheck.setText(cup ? "Repeat opening for every color-reversed Cup game pair (required)" :
+                    "Repeat opening for paired color-reversal games");
+        }
+    }
+
+    private void applySwissSetupMode(boolean swiss) {
+        applyTournamentFormatUi(swiss ? TournamentManager.Format.SWISS.ordinal() :
+                (formatSpinner == null ? TournamentManager.Format.ROUND_ROBIN.ordinal() : formatSpinner.getSelectedItemPosition()));
     }
 
     private void updateSwissSeedingUi() {
@@ -1697,6 +1944,59 @@ public final class TournamentActivity extends Activity {
                 swissSetupHint.setText("Choose Random for an independent Swiss or Rank engine for a continuous tournament such as MCEC.");
             }
         }
+    }
+
+    private void updateCupSeedingUi() {
+        boolean cup = formatSpinner != null && formatSpinner.getSelectedItemPosition() == TournamentManager.Format.CUP.ordinal();
+        int choice = cupSeedingSpinner == null ? 0 : cupSeedingSpinner.getSelectedItemPosition();
+        boolean rankMode = choice == 2;
+        if (cupRankEditorButton != null) cupRankEditorButton.setVisibility(cup && rankMode ? View.VISIBLE : View.GONE);
+        if (cupSetupHint != null) {
+            if (rankMode) cupSetupHint.setText("Rank all selected engines from strongest to weakest. The top eight are spread across the bracket; for a partial field, the highest-ranked engines receive first-round byes. Remaining entrants are drawn into the open positions.");
+            else if (choice == 1) cupSetupHint.setText("Random creates an independent, saved bracket draw. The draw is never changed when the tournament resumes.");
+            else cupSetupHint.setText("Choose Random for an independent Cup or Rank engine for a continuous MCEC-style Cup.");
+        }
+    }
+
+    private void syncCupRankedEngines() {
+        ArrayList<EngineChoice> updated = new ArrayList<>();
+        for (EngineChoice ranked : cupRankedEngines) for (EngineChoice selected : selectedEngines)
+            if (ranked.id.equals(selected.id)) { updated.add(selected); break; }
+        for (EngineChoice selected : selectedEngines) {
+            boolean found = false;
+            for (EngineChoice ranked : updated) if (ranked.id.equals(selected.id)) { found = true; break; }
+            if (!found) updated.add(selected);
+        }
+        cupRankedEngines.clear(); cupRankedEngines.addAll(updated);
+    }
+
+    private void showCupRankEditor() {
+        syncCupRankedEngines();
+        if (cupRankedEngines.size() < 2) { Toast.makeText(this, "Select at least two engines first", Toast.LENGTH_LONG).show(); return; }
+        final ArrayList<EngineChoice> working = new ArrayList<>(cupRankedEngines);
+        final ArrayList<String> labels = new ArrayList<>();
+        final ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_single_choice, labels);
+        final int[] selectedIndex = {0};
+        LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL); content.setPadding(dp(12), dp(8), dp(12), dp(8));
+        content.addView(text("Move engines into strength order. #1 is strongest. The top eight are distributed across the bracket; remaining engines fill the vacant seed positions."), fullWidth());
+        ListView list = new ListView(this); list.setChoiceMode(ListView.CHOICE_MODE_SINGLE); list.setAdapter(adapter);
+        content.addView(list, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(340)));
+        LinearLayout controls = new LinearLayout(this); controls.setOrientation(LinearLayout.HORIZONTAL);
+        Button up = new Button(this); up.setText("Move up"); Button down = new Button(this); down.setText("Move down");
+        controls.addView(up, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        controls.addView(down, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1)); content.addView(controls, fullWidth());
+        Runnable refresh = () -> { labels.clear(); for (int i=0;i<working.size();i++) labels.add("#"+(i+1)+"  "+working.get(i).name); adapter.notifyDataSetChanged();
+            if (!working.isEmpty()) { selectedIndex[0]=Math.max(0,Math.min(selectedIndex[0],working.size()-1)); list.setItemChecked(selectedIndex[0],true); list.setSelection(selectedIndex[0]); } };
+        list.setOnItemClickListener((parent, view, position, id) -> selectedIndex[0]=position);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Cup engine ranking").setView(content)
+                .setPositiveButton("Use ranking", null).setNegativeButton(android.R.string.cancel, null).create();
+        up.setOnClickListener(v -> { int i=selectedIndex[0]; if(i>0){Collections.swap(working,i,i-1);selectedIndex[0]=i-1;refresh.run();} });
+        down.setOnClickListener(v -> { int i=selectedIndex[0]; if(i>=0&&i+1<working.size()){Collections.swap(working,i,i+1);selectedIndex[0]=i+1;refresh.run();} });
+        refresh.run();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            cupRankedEngines.clear(); cupRankedEngines.addAll(working); cupRankOrderConfirmed=true; saveSetup(); dialog.dismiss();
+        }));
+        dialog.show();
     }
 
     private void syncSwissRankedEngines() {
@@ -1795,9 +2095,12 @@ public final class TournamentActivity extends Activity {
             for (EngineChoice selected : selectedEngines) if (selected.id.equals(choice.id)) checked[i] = true;
         }
         final ArrayList<EngineChoice> dialogSelection = new ArrayList<>(selectedEngines);
-        String selectionTitle = formatSpinner.getSelectedItemPosition() == TournamentManager.Format.SWISS.ordinal()
-                ? "Choose engines; select Random or Rank engine for Swiss seeding"
-                : "Choose engines; selection order sets the gauntlet engine";
+        int selectedFormat = formatSpinner.getSelectedItemPosition();
+        String selectionTitle = selectedFormat == TournamentManager.Format.SWISS.ordinal()
+                ? "Choose engines for Swiss"
+                : (selectedFormat == TournamentManager.Format.CUP.ordinal()
+                    ? "Choose Cup entrants (default bracket size is 32)"
+                    : "Choose engines; selection order sets the gauntlet engine");
         new AlertDialog.Builder(this).setTitle(selectionTitle)
                 .setMultiChoiceItems(labels, checked, (dialog, which, isChecked) -> {
                     EngineChoice choice = availableEngines.get(which);
@@ -1815,9 +2118,9 @@ public final class TournamentActivity extends Activity {
                     for (EngineChoice e : selectedEngines) previousIds.add(e.id);
                     Set<String> updatedIds = new HashSet<>();
                     for (EngineChoice e : dialogSelection) updatedIds.add(e.id);
-                    if (!previousIds.equals(updatedIds)) swissRankOrderConfirmed = false;
+                    if (!previousIds.equals(updatedIds)) { swissRankOrderConfirmed = false; cupRankOrderConfirmed = false; }
                     selectedEngines.clear(); selectedEngines.addAll(dialogSelection);
-                    syncSwissRankedEngines();
+                    syncSwissRankedEngines(); syncCupRankedEngines();
                     updateSelectedText();
                 }).setNegativeButton(android.R.string.cancel, null).show();
     }
@@ -1833,13 +2136,18 @@ public final class TournamentActivity extends Activity {
         if (titleInput == null) return;
         android.content.SharedPreferences.Editor e = getPreferences(MODE_PRIVATE).edit();
         e.putString("setupTitle", titleInput.getText().toString());
-        e.putString("setupGames", wasSwissFormat ? gamesPerPairBeforeSwiss : gamesInput.getText().toString());
+        e.putString("setupGames", forcedPairFormat ? gamesPerPairBeforeForcedPairFormat : gamesInput.getText().toString());
         e.putString("setupSwissRounds", swissRoundsInput.getText().toString());
         e.putInt("setupSwissSeedingMode", swissSeedingSpinner == null ? 0 : swissSeedingSpinner.getSelectedItemPosition());
         StringBuilder swissRankIds = new StringBuilder();
         for (EngineChoice c : swissRankedEngines) { if (swissRankIds.length() > 0) swissRankIds.append("\n"); swissRankIds.append(c.id); }
         e.putString("setupSwissRankIds", swissRankIds.toString());
         e.putBoolean("setupSwissRankOrderConfirmed", swissRankOrderConfirmed);
+        e.putInt("setupCupSeedingMode", cupSeedingSpinner == null ? 0 : cupSeedingSpinner.getSelectedItemPosition());
+        StringBuilder cupRankIds = new StringBuilder();
+        for (EngineChoice c : cupRankedEngines) { if (cupRankIds.length() > 0) cupRankIds.append("\n"); cupRankIds.append(c.id); }
+        e.putString("setupCupRankIds", cupRankIds.toString());
+        e.putBoolean("setupCupRankOrderConfirmed", cupRankOrderConfirmed);
         e.putInt("setupFormat", formatSpinner.getSelectedItemPosition());
         e.putInt("setupTimeMode", timeModeSpinner.getSelectedItemPosition());
         e.putString("setupBase", baseInput.getText().toString());
@@ -1847,7 +2155,7 @@ public final class TournamentActivity extends Activity {
         e.putString("setupLimit", limitInput.getText().toString());
         e.putString("setupPlies", openingPliesInput.getText().toString());
         e.putString("setupOpeningStart", openingStartInput.getText().toString());
-        e.putBoolean("setupRepeat", wasSwissFormat ? repeatOpeningBeforeSwiss : repeatOpeningCheck.isChecked());
+        e.putBoolean("setupRepeat", forcedPairFormat ? repeatOpeningBeforeForcedPairFormat : repeatOpeningCheck.isChecked());
         e.putBoolean("setupArrows", showTournamentArrowsCheck.isChecked());
         e.putBoolean("tournamentDisableScreenTimeout", disableScreenTimeoutCheck != null && disableScreenTimeoutCheck.isChecked());
         e.putString("setupAutoWinEval", autoWinEvalInput.getText().toString());
@@ -1877,10 +2185,12 @@ public final class TournamentActivity extends Activity {
         swissRoundsInput.setText(p.getString("setupSwissRounds", ""));
         if (swissSeedingSpinner != null) swissSeedingSpinner.setSelection(Math.max(0, Math.min(2, p.getInt("setupSwissSeedingMode", 0))));
         swissRankOrderConfirmed = p.getBoolean("setupSwissRankOrderConfirmed", false);
+        if (cupSeedingSpinner != null) cupSeedingSpinner.setSelection(Math.max(0, Math.min(2, p.getInt("setupCupSeedingMode", 0))));
+        cupRankOrderConfirmed = p.getBoolean("setupCupRankOrderConfirmed", false);
         repeatOpeningCheck.setChecked(p.getBoolean("setupRepeat", false));
         int savedFormat = p.getInt("setupFormat", 0);
         formatSpinner.setSelection(savedFormat);
-        applySwissSetupMode(savedFormat == TournamentManager.Format.SWISS.ordinal());
+        applyTournamentFormatUi(savedFormat);
         timeModeSpinner.setSelection(p.getInt("setupTimeMode", 0));
         baseInput.setText(p.getString("setupBase", baseInput.getText().toString())); incrementInput.setText(p.getString("setupIncrement", incrementInput.getText().toString()));
         limitInput.setText(p.getString("setupLimit", limitInput.getText().toString())); openingPliesInput.setText(p.getString("setupPlies", openingPliesInput.getText().toString()));
@@ -1904,8 +2214,13 @@ public final class TournamentActivity extends Activity {
         if (!savedSwissRankIds.isEmpty()) for (String id : savedSwissRankIds.split("\n"))
             for (EngineChoice c : selectedEngines) if (c.id.equals(id)) { swissRankedEngines.add(c); break; }
         syncSwissRankedEngines();
+        cupRankedEngines.clear();
+        String savedCupRankIds = p.getString("setupCupRankIds", "");
+        if (!savedCupRankIds.isEmpty()) for (String id : savedCupRankIds.split("\n"))
+            for (EngineChoice c : selectedEngines) if (c.id.equals(id)) { cupRankedEngines.add(c); break; }
+        syncCupRankedEngines();
         updateSelectedText();
-        updateSwissSeedingUi();
+        updateSwissSeedingUi(); updateCupSeedingUi();
     }
     private String mirrorHeaderLabel() {
         return "Game " + (currentGameNumber == 0 ? "—" : currentGameNumber) + "/" +
@@ -2089,7 +2404,10 @@ public final class TournamentActivity extends Activity {
         if (selectedEngines.size() < 2) { Toast.makeText(this, "Select at least two engines", Toast.LENGTH_LONG).show(); return; }
         try {
             TournamentManager.Format format = TournamentManager.Format.values()[formatSpinner.getSelectedItemPosition()];
-            int games = format == TournamentManager.Format.SWISS ? 2 : positiveInt(gamesInput, "games per pairing", 1);
+            if (format == TournamentManager.Format.CUP && selectedEngines.size() > CupTournamentManager.MAX_ENGINES)
+                throw new IllegalArgumentException("Cup supports up to " + CupTournamentManager.MAX_ENGINES + " selected engines");
+            int games = (format == TournamentManager.Format.SWISS || format == TournamentManager.Format.CUP)
+                    ? 2 : positiveInt(gamesInput, "games per pairing", 1);
             int swissRounds = 0;
             if (format == TournamentManager.Format.SWISS) {
                 int maximumRounds = TournamentManager.maximumSwissRounds(selectedEngines.size());
@@ -2121,6 +2439,26 @@ public final class TournamentActivity extends Activity {
             } else {
                 for (EngineChoice engine : selectedEngines) swissRankOrderIds.add(engine.id);
             }
+            int selectedCupSeeding = cupSeedingSpinner.getSelectedItemPosition();
+            if (format == TournamentManager.Format.CUP && selectedCupSeeding == 0)
+                throw new IllegalArgumentException("Choose Random or Rank engine for Cup seeding first");
+            TournamentManager.CupSeedingMode cupSeedingMode = format == TournamentManager.Format.CUP
+                    ? TournamentManager.CupSeedingMode.values()[selectedCupSeeding - 1]
+                    : TournamentManager.CupSeedingMode.RANDOM;
+            ArrayList<String> cupRankOrderIds = new ArrayList<>();
+            if (format == TournamentManager.Format.CUP && cupSeedingMode == TournamentManager.CupSeedingMode.RANK_ENGINE) {
+                if (!cupRankOrderConfirmed) {
+                    Toast.makeText(this, "Review and confirm the engine ranking before starting Rank engine Cup", Toast.LENGTH_LONG).show();
+                    showCupRankEditor();
+                    return;
+                }
+                syncCupRankedEngines();
+                if (cupRankedEngines.size() != selectedEngines.size())
+                    throw new IllegalArgumentException("Rank every selected engine before starting Cup");
+                for (EngineChoice engine : cupRankedEngines) cupRankOrderIds.add(engine.id);
+            } else {
+                for (EngineChoice engine : selectedEngines) cupRankOrderIds.add(engine.id);
+            }
             int timeModeIndex = timeModeSpinner.getSelectedItemPosition();
             boolean movePeriodMode = timeModeIndex == 4;
             double baseMinutes = (timeModeIndex == 0 || movePeriodMode)
@@ -2147,9 +2485,9 @@ public final class TournamentActivity extends Activity {
             saveSetup();
             TournamentManager tournament = new TournamentManager(this, tournamentName, format,
                     engines, games, baseMillis, increment, selectedOpeningPgn, openingPlies,
-                    format == TournamentManager.Format.SWISS || repeatOpeningCheck.isChecked(),
+                    format == TournamentManager.Format.SWISS || format == TournamentManager.Format.CUP || repeatOpeningCheck.isChecked(),
                     TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart, swissRounds,
-                    swissSeedingMode, swissRankOrderIds);
+                    swissSeedingMode, swissRankOrderIds, cupSeedingMode, cupRankOrderIds);
             tournament.setOpeningBinPath(selectedOpeningBinPath);
             launchTournament(tournament);
         } catch (Exception e) {
@@ -2393,8 +2731,13 @@ public final class TournamentActivity extends Activity {
             swissRoundsInput.setText(String.valueOf(tournament.swissRoundsTotal()));
             swissSeedingSpinner.setSelection(tournament.swissSeedingMode().ordinal() + 1);
         }
+        cupRankedEngines.clear();
+        for (String id : tournament.cupStrengthOrder()) for (EngineChoice c : selectedEngines) if (c.id.equals(id)) { cupRankedEngines.add(c); break; }
+        syncCupRankedEngines();
+        if (tournament.format() == TournamentManager.Format.CUP) cupSeedingSpinner.setSelection(tournament.cupSeedingMode().ordinal() + 1);
+        cupRankOrderConfirmed = tournament.format() == TournamentManager.Format.CUP && tournament.cupSeedingMode() == TournamentManager.CupSeedingMode.RANK_ENGINE;
         formatSpinner.setSelection(tournament.format().ordinal());
-        applySwissSetupMode(tournament.format() == TournamentManager.Format.SWISS);
+        applyTournamentFormatUi(tournament.format().ordinal());
         gamesInput.setText(String.valueOf(tournament.gamesPerPair()));
         baseInput.setText(String.valueOf(Math.max(0.01, tournament.baseTimeMs() / 60000.0)));
         incrementInput.setText(String.valueOf(tournament.incrementMs() / 1000.0));
@@ -2553,6 +2896,102 @@ public final class TournamentActivity extends Activity {
                 launchPreparedTournament(tournament);
             });
         }, "tournament-opening-preparation").start();
+    }
+
+    private void showCupStageCheckpointDialog(TournamentManager tournament) {
+        if (tournament == null || !tournament.cupCheckpointPending()) return;
+        String next = tournament.cupNextStageLabel();
+        new AlertDialog.Builder(this)
+                .setTitle(tournament.cupCurrentStageLabel() + " completed")
+                .setMessage("The winners are saved and the bracket is ready for " + next + ". Would you like to update any advancing engines before the next stage? Earlier games and PGNs will keep the engine versions used when they were played.")
+                .setNeutralButton("UPDATE ENGINES", (dialog, which) -> showCupEngineUpdateList(tournament, new HashSet<>()))
+                .setPositiveButton("CONTINUE", (dialog, which) -> continueCupAfterCheckpoint(tournament))
+                .setNegativeButton("LATER", null)
+                .show();
+    }
+
+    private void showCupEngineUpdateList(TournamentManager tournament, Set<String> updatedIds) {
+        if (tournament == null || !tournament.cupCheckpointPending()) return;
+        List<String> advancing = tournament.cupAdvancingEngineIds();
+        ArrayList<String> pendingIds = new ArrayList<>();
+        ArrayList<String> labels = new ArrayList<>();
+        List<TournamentManager.Engine> engines = tournament.engines();
+        for (String id : advancing) {
+            if (updatedIds.contains(id)) continue;
+            for (TournamentManager.Engine engine : engines) if (engine.id.equals(id)) {
+                pendingIds.add(id);
+                labels.add(engine.displayName + " · " + engine.executableId);
+                break;
+            }
+        }
+        new AlertDialog.Builder(this).setTitle("Update engines for " + tournament.cupNextStageLabel())
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                    if (which >= 0 && which < pendingIds.size()) chooseCupReplacementExecutable(tournament, pendingIds.get(which), updatedIds);
+                })
+                .setPositiveButton("DONE", (dialog, which) -> continueCupAfterCheckpoint(tournament))
+                .setNegativeButton("BACK", (dialog, which) -> showCupStageCheckpointDialog(tournament))
+                .show();
+    }
+
+    private void chooseCupReplacementExecutable(TournamentManager tournament, String participantId, Set<String> updatedIds) {
+        loadEngineChoices();
+        if (availableEngines.isEmpty()) {
+            Toast.makeText(this, "No installed engine executables were found", Toast.LENGTH_LONG).show();
+            showCupEngineUpdateList(tournament, updatedIds);
+            return;
+        }
+        TournamentManager.Engine participant = null;
+        for (TournamentManager.Engine engine : tournament.engines()) if (engine.id.equals(participantId)) { participant = engine; break; }
+        if (participant == null) { showCupEngineUpdateList(tournament, updatedIds); return; }
+        final TournamentManager.Engine target = participant;
+        ArrayList<EngineChoice> choices = new ArrayList<>();
+        ArrayList<String> labels = new ArrayList<>();
+        for (EngineChoice choice : availableEngines) {
+            if (choice.id.equals(target.executableId)) continue;
+            boolean used = false;
+            for (TournamentManager.Engine engine : tournament.engines())
+                if (!engine.id.equals(target.id) && engine.executableId.equals(choice.id)) { used = true; break; }
+            if (!used) { choices.add(choice); labels.add(choice.name + "\n" + choice.id); }
+        }
+        if (choices.isEmpty()) {
+            Toast.makeText(this, "No unused replacement executable is available for " + target.displayName, Toast.LENGTH_LONG).show();
+            showCupEngineUpdateList(tournament, updatedIds);
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle("Replace " + target.displayName + " for next stage")
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                    if (which < 0 || which >= choices.size()) { showCupEngineUpdateList(tournament, updatedIds); return; }
+                    EngineChoice replacement = choices.get(which);
+                    new AlertDialog.Builder(this).setTitle("Confirm Cup engine update")
+                            .setMessage("Use " + replacement.name + " for " + target.displayName + " from " + tournament.cupNextStageLabel() + " onward? Previous games and PGNs remain unchanged.")
+                            .setNegativeButton("CANCEL", (d, w) -> showCupEngineUpdateList(tournament, updatedIds))
+                            .setPositiveButton("UPDATE", (d, w) -> {
+                                try {
+                                    tournament.updateCupEngineExecutable(target.id, replacement.id, replacement.name);
+                                    updatedIds.add(target.id);
+                                    Toast.makeText(this, target.displayName + " updated to " + replacement.name, Toast.LENGTH_SHORT).show();
+                                    showCupEngineUpdateList(tournament, updatedIds);
+                                } catch (Exception error) {
+                                    Toast.makeText(this, "Could not update Cup engine: " + error.getMessage(), Toast.LENGTH_LONG).show();
+                                    showCupEngineUpdateList(tournament, updatedIds);
+                                }
+                            }).show();
+                })
+                .setNegativeButton("BACK", (dialog, which) -> showCupEngineUpdateList(tournament, updatedIds))
+                .show();
+    }
+
+    private void continueCupAfterCheckpoint(TournamentManager tournament) {
+        if (tournament == null || !tournament.cupCheckpointPending()) return;
+        try {
+            tournament.advanceCupAfterCheckpoint();
+            activeTournamentManager = tournament;
+            invalidateCachedSchedule(tournament);
+            launchTournament(tournament);
+        } catch (Exception error) {
+            Toast.makeText(this, "Could not start the next Cup stage: " + error.getMessage(), Toast.LENGTH_LONG).show();
+            showCupStageCheckpointDialog(tournament);
+        }
     }
 
     private void launchPreparedTournament(final TournamentManager tournament) {
@@ -2758,10 +3197,24 @@ public final class TournamentActivity extends Activity {
             @Override public void onTournamentFinished() {
                 freezeTournamentElapsedClock();
                 runOnUiThread(() -> {
-                    statusText.setText("Tournament complete");
-                    moveStatusText.setText("TOURNAMENT COMPLETE");
-                    standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
-                    runner = null; applyTournamentKeepScreenOn(); startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(runner != null);
+                    runner = null;
+                    applyTournamentKeepScreenOn();
+                    if (tournament.format() == TournamentManager.Format.CUP && tournament.cupCheckpointPending()) {
+                        String next = tournament.cupNextStageLabel();
+                        String message = tournament.cupCurrentStageLabel() + " completed. Qualified engines: " +
+                                tournament.cupAdvancingEngineIds().size() + ". Next stage: " + next + ".";
+                        statusText.setText(message + " Engine update checkpoint.");
+                        moveStatusText.setText("CUP CHECKPOINT · " + next.toUpperCase(java.util.Locale.US));
+                        startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(false);
+                        standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
+                        invalidateCachedSchedule(tournament);
+                        showCupStageCheckpointDialog(tournament);
+                    } else {
+                        statusText.setText("Tournament complete");
+                        moveStatusText.setText("TOURNAMENT COMPLETE");
+                        standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
+                        startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(false);
+                    }
                 });
             }
             @Override public void onError(String message, Throwable error) {
@@ -2849,6 +3302,8 @@ public final class TournamentActivity extends Activity {
     }
 
     private String formatStandings(TournamentManager tournament, List<TournamentManager.Standing> standings, List<TournamentManager.Engine> engines) {
+        if (tournament != null && tournament.format() == TournamentManager.Format.CUP)
+            return formatCupProgress(tournament, engines);
         StringBuilder out = new StringBuilder("Standings\n");
         for (int i = 0; i < standings.size(); i++) {
             TournamentManager.Standing s = standings.get(i);
@@ -2865,6 +3320,37 @@ public final class TournamentActivity extends Activity {
                         .append(" =").append(s.draws).append(" -").append(s.losses);
             }
             out.append("\n");
+        }
+        return out.toString();
+    }
+
+    private String formatCupProgress(TournamentManager tournament, List<TournamentManager.Engine> engines) {
+        StringBuilder out = new StringBuilder("Cup bracket progress\n");
+        if (tournament.cupFinished()) {
+            out.append("Tournament complete\n");
+            for (TournamentManager.CupMatch match : tournament.cupMatches()) {
+                if (match.stageIndex == CupTournamentManager.stageCount(tournament.cupBracketSize()) - 1 && match.decided) {
+                    out.append("Champion: ").append(engineDisplayName(engines, match.winnerId)).append("\n");
+                    break;
+                }
+            }
+            return out.toString();
+        }
+        out.append("Current stage: ").append(tournament.cupCurrentStageLabel()).append("\n");
+        int stageMatches = 0, decided = 0;
+        for (TournamentManager.CupMatch match : tournament.cupMatches()) {
+            if (match.stageIndex != tournament.cupCurrentStage()) continue;
+            stageMatches++;
+            if (match.decided) decided++;
+        }
+        out.append("Matches decided: ").append(decided).append("/").append(stageMatches).append("\n");
+        if (tournament.cupCheckpointPending()) {
+            out.append("Stage completed · waiting for engine-update decision\n");
+            out.append("Qualified engines:\n");
+            for (String id : tournament.cupAdvancingEngineIds()) out.append("• ").append(engineDisplayName(engines, id)).append("\n");
+        } else {
+            out.append("Knockout results are determined by the bracket, not cumulative league points.\n");
+            out.append("Open VIEW CUP BRACKET to inspect matches and advancing engines.");
         }
         return out.toString();
     }
@@ -2931,30 +3417,48 @@ public final class TournamentActivity extends Activity {
 
     /** Rewrite the cumulative PGN after every completed game, avoiding duplicate append on resume. */
     private File saveTournamentPgnAutomatically(TournamentManager tournament) throws IOException {
-        String safeName = tournament.title().trim().replaceAll("[^A-Za-z0-9._ -]", "_")
+        String safeName = tournament.pgnFileBaseName().trim().replaceAll("[^A-Za-z0-9._ -]", "_")
                 .replaceAll("\\s+", " ").replaceAll("[ .]+$", "");
         if (safeName.isEmpty()) safeName = "Tournament";
         byte[] bytes = tournament.exportPgn().getBytes(Charset.forName("UTF-8"));
         File pgnDir = new File(new File(Environment.getExternalStorageDirectory(), "DroidFish"), "pgn");
-        File publicFile = new File(pgnDir, safeName + ".pgn");
-        // Preserve an unrelated PGN with the same filename. Reuse this tournament's file
-        // only when it already carries this exact Event tag; otherwise choose a free suffix.
-        if (publicFile.exists()) {
-            String existing = readSmallText(publicFile);
-            String eventTag = "[Event \"" + tournament.title().replace("\\", "\\\\").replace("\"", "\\\"") + "\"]";
-            if (!existing.contains(eventTag)) {
+        File publicFile;
+        if (tournament.format() == TournamentManager.Format.CUP) {
+            String chosenBase = tournament.cupPgnFileBaseName();
+            if (chosenBase.isEmpty()) {
+                String candidateBase = safeName;
                 int suffix = 2;
-                File candidate;
-                do { candidate = new File(pgnDir, safeName + " (" + suffix++ + ").pgn"); }
-                while (candidate.exists() && !readSmallText(candidate).contains(eventTag));
-                publicFile = candidate;
+                File appPgnDir = getExternalFilesDir("pgn");
+                while (new File(pgnDir, candidateBase + ".pgn").exists() ||
+                        (appPgnDir != null && new File(appPgnDir, candidateBase + ".pgn").exists())) {
+                    candidateBase = safeName + " (" + suffix++ + ")";
+                }
+                tournament.setCupPgnFileBaseNameIfEmpty(candidateBase);
+                chosenBase = tournament.cupPgnFileBaseName();
+            }
+            safeName = chosenBase;
+            publicFile = new File(pgnDir, safeName + ".pgn");
+        } else {
+            publicFile = new File(pgnDir, safeName + ".pgn");
+            // Preserve an unrelated PGN with the same filename; other formats retain
+            // their historical single-Event filename matching behavior.
+            if (publicFile.exists()) {
+                String existing = readPgnText(publicFile);
+                String eventTag = "[Event \"" + tournament.title().replace("\\", "\\\\").replace("\"", "\\\"") + "\"]";
+                if (!existing.contains(eventTag)) {
+                    int suffix = 2;
+                    File candidate;
+                    do { candidate = new File(pgnDir, safeName + " (" + suffix++ + ").pgn"); }
+                    while (candidate.exists() && !readPgnText(candidate).contains(eventTag));
+                    publicFile = candidate;
+                }
             }
         }
         try {
             File dir = publicFile.getParentFile();
             if (dir != null && !dir.exists() && !dir.mkdirs() && !dir.isDirectory())
                 throw new IOException("Cannot create " + dir.getAbsolutePath());
-            String mergedPgn = mergePgnGames(publicFile.exists() ? readSmallText(publicFile) : "", tournament.exportPgn());
+            String mergedPgn = mergePgnGames(publicFile.exists() ? readPgnText(publicFile) : "", tournament.exportPgn());
             writeSynced(publicFile, mergedPgn.getBytes(Charset.forName("UTF-8")));
             return publicFile;
         } catch (IOException | SecurityException publicPathError) {
@@ -2965,7 +3469,7 @@ public final class TournamentActivity extends Activity {
             if (!appDir.exists() && !appDir.mkdirs() && !appDir.isDirectory())
                 throw new IOException("Cannot create app PGN folder", publicPathError);
             File fallback = new File(appDir, safeName + ".pgn");
-            String mergedPgn = mergePgnGames(fallback.exists() ? readSmallText(fallback) : "", tournament.exportPgn());
+            String mergedPgn = mergePgnGames(fallback.exists() ? readPgnText(fallback) : "", tournament.exportPgn());
             writeSynced(fallback, mergedPgn.getBytes(Charset.forName("UTF-8")));
             return fallback;
         }
@@ -3026,6 +3530,17 @@ public final class TournamentActivity extends Activity {
                 return new String(data, 0, offset, Charset.forName("UTF-8"));
             }
         } catch (IOException ignored) { return ""; }
+    }
+
+    /** Cup PGNs can be larger than the lightweight preview limit used by other text files. */
+    private String readPgnText(File file) throws IOException {
+        if (file == null || !file.isFile()) return "";
+        try (java.io.FileInputStream in = new java.io.FileInputStream(file);
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[32768]; int count;
+            while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+            return new String(out.toByteArray(), Charset.forName("UTF-8"));
+        }
     }
 
     private void writeSynced(File file, byte[] bytes) throws IOException {
