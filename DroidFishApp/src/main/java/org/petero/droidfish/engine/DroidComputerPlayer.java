@@ -43,6 +43,8 @@ public class DroidComputerPlayer {
     private UCIEngine uciEngine = null;
     private final SearchListener listener;
     private final DroidBook book;
+    /** Tournament runners can request a final analysis callback before bestmove is delivered. */
+    private volatile boolean flushAnalysisBeforeResult;
     private EngineOptions engineOptions = new EngineOptions();
     /** Pending UCI options to send when engine becomes idle. */
     private Map<String,String> pendingOptions = new TreeMap<>();
@@ -299,6 +301,11 @@ public class DroidComputerPlayer {
 
     public final void setEngineOptions(EngineOptions options) {
         engineOptions = options;
+    }
+
+    /** Flush pending UCI analysis just before the search result callback. */
+    public final void setFlushAnalysisBeforeResult(boolean enabled) {
+        flushAnalysisBeforeResult = enabled;
     }
 
     /** Send pending UCI option changes to the engine. */
@@ -915,6 +922,10 @@ public class DroidComputerPlayer {
         }
         if (!canPonder)
             nextPonderMove = null;
+        // The GUI analysis callback is throttled to avoid excessive updates.
+        // Flush any pending UCI info now so the tournament PGN records the final
+        // analysis belonging to this search rather than the previous UI refresh.
+        if (flushAnalysisBeforeResult) notifyGUI(true);
         listener.notifySearchResult(sr.searchId, bestMove, nextPonderMove);
     }
 
@@ -1108,6 +1119,11 @@ public class DroidComputerPlayer {
 
     /** Notify GUI about search statistics. */
     private synchronized void notifyGUI() {
+        notifyGUI(false);
+    }
+
+    /** Notify about pending search data, optionally bypassing the UI throttle. */
+    private synchronized void notifyGUI(boolean force) {
         if (Thread.currentThread().isInterrupted())
             return;
 
@@ -1115,7 +1131,7 @@ public class DroidComputerPlayer {
             return;
 
         long now = System.currentTimeMillis();
-        if (now < lastGUIUpdate + guiUpdateInterval)
+        if (!force && now < lastGUIUpdate + guiUpdateInterval)
             return;
 
         int id = engineState.searchId;
