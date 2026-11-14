@@ -617,6 +617,9 @@ public final class TournamentRunner {
                 if (cursor.whiteMove) out.append(cursor.fullMoveCounter).append('.');
                 else if (out.length() == 0) out.append(cursor.fullMoveCounter).append("...");
                 out.append(org.petero.droidfish.gamelogic.TextIO.moveToString(cursor, move, false, false));
+                String comment = node.getPostComment();
+                if (comment != null && !comment.trim().isEmpty())
+                    out.append(" {").append(comment.replace('}', '］')).append("}");
                 cursor.makeMove(move, new org.petero.droidfish.gamelogic.UndoInfo());
             }
             return out.toString();
