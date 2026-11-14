@@ -44,6 +44,7 @@ import org.petero.droidfish.ChessBoardPlay;
 import org.petero.droidfish.tournament.TournamentManager;
 import org.petero.droidfish.tournament.CupTournamentManager;
 import org.petero.droidfish.tournament.TournamentRunner;
+import org.json.JSONException;
 import org.petero.droidfish.engine.DroidComputerPlayer;
 import org.petero.droidfish.gamelogic.SearchListener;
 import org.petero.droidfish.gamelogic.SearchListener.PvInfo;
@@ -3441,7 +3442,13 @@ public final class TournamentActivity extends Activity {
                         (appPgnDir != null && new File(appPgnDir, candidateBase + ".pgn").exists())) {
                     candidateBase = safeName + " (" + suffix++ + ")";
                 }
-                tournament.setCupPgnFileBaseNameIfEmpty(candidateBase);
+                try {
+                    tournament.setCupPgnFileBaseNameIfEmpty(candidateBase);
+                } catch (JSONException e) {
+                    // Keep the PGN save API's IOException contract while preserving
+                    // the underlying JSON persistence failure for diagnostics.
+                    throw new IOException("Unable to save Cup PGN filename", e);
+                }
                 chosenBase = tournament.cupPgnFileBaseName();
             }
             safeName = chosenBase;
