@@ -1130,6 +1130,8 @@ public class GameTree {
 
         /** Set the PGN comment printed after this move. */
         public void setPostComment(String comment) { this.postComment = comment == null ? "" : comment; }
+        /** Get the PGN comment printed after this move. */
+        public String getPostComment() { return postComment == null ? "" : postComment; }
 
         public boolean hasSibling() {
             return parent != null && parent.children.size() > 1;
