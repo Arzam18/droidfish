@@ -65,6 +65,7 @@ public final class TournamentRunner {
     private volatile double latestWhiteEvalPawns = Double.NaN;
     private volatile double latestBlackEvalPawns = Double.NaN;
     private final DroidComputerPlayer whitePlayer, blackPlayer;
+    private final EngineListener whiteAnalysisListener, blackAnalysisListener;
     private Game game;
     private volatile CetClock clock;
     private TournamentManager.Pairing pairing;
@@ -181,8 +182,14 @@ public final class TournamentRunner {
         pgnOptions = new PGNOptions();
         // Tournament move comments are part of the exported record, not optional UI comments.
         pgnOptions.exp.comments = true;
-        whitePlayer = new DroidComputerPlayer(new EngineListener(true));
-        blackPlayer = new DroidComputerPlayer(new EngineListener(false));
+        whiteAnalysisListener = new EngineListener(true);
+        blackAnalysisListener = new EngineListener(false);
+        whitePlayer = new DroidComputerPlayer(whiteAnalysisListener);
+        blackPlayer = new DroidComputerPlayer(blackAnalysisListener);
+        // Keep the final-info flush specific to tournament PGN capture; normal
+        // DroidFish analysis/search sessions retain their existing update cadence.
+        whitePlayer.setFlushAnalysisBeforeResult(true);
+        blackPlayer.setFlushAnalysisBeforeResult(true);
         whitePlayer.setEngineOptions(this.engineOptions);
         blackPlayer.setEngineOptions(this.engineOptions);
         // A PGN opening book is authoritative for tournament starts. Do not let
@@ -345,6 +352,7 @@ public final class TournamentRunner {
             Pair<Boolean, Move> result = game.processString(san);
             if (result == null || !Boolean.TRUE.equals(result.first) || result.second == null) break;
             applied++;
+            addCurrentMoveComment("Book.");
             listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove, 0, 0,
                     whiteEngine.displayName, blackEngine.displayName, currentPgnMoves(), game.getLastMove());
             try { Thread.sleep(delayMs); }
@@ -536,6 +544,7 @@ public final class TournamentRunner {
             case NODES: request.tournamentGoCommand = "go nodes " + Math.max(1, tournament.limitValue()); break;
             case CLOCK: default: break;
         }
+        (whiteToMove ? whiteAnalysisListener : blackAnalysisListener).beginSearch();
         player.queueSearchRequest(request);
         if (usesClock()) startClockWatchdog(whiteToMove, turnToken);
     }
@@ -567,7 +576,7 @@ public final class TournamentRunner {
     }
 
     private synchronized void onSearchResult(boolean whiteEngineSide, int id, String cmd,
-                                             boolean acceptedAtArrival) {
+                                             boolean acceptedAtArrival, String analysisAtBestMove) {
         if (stopped || finished || paused || game == null) return;
         if (whiteEngineSide ? id != activeWhiteId : id != activeBlackId) return;
         boolean whiteToMove = game.currPos().whiteMove;
@@ -587,7 +596,7 @@ public final class TournamentRunner {
             return;
         }
         lastMoveTimeMs = usesClock() ? clock.lastTurnElapsedMs() : Math.max(0, (System.nanoTime() - currentTurnStartedNs) / 1_000_000L);
-        addMoveAnalysisComment(whiteEngineSide, lastMoveTimeMs);
+        addMoveAnalysisComment(whiteEngineSide, lastMoveTimeMs, analysisAtBestMove);
         recordPosition(lastMoveTimeMs);
         listener.onMoveTime(!game.currPos().whiteMove, lastMoveTimeMs, currentOpeningName);
         notifyPosition();
@@ -627,16 +636,32 @@ public final class TournamentRunner {
     }
 
     private String clockText(long ms) {
-        long tenths = Math.max(0, ms) / 100;
+        long safe = Math.max(0, ms);
+        if (safe < 60000) return String.format(java.util.Locale.US, "%.1f", safe / 1000.0);
+        long tenths = safe / 100;
         return String.format(java.util.Locale.US, "%d:%02d.%d", tenths / 600, (tenths / 10) % 60, tenths % 10);
     }
 
-    private void addMoveAnalysisComment(boolean whiteMoved, long moveMs) {
+    private String moveTimeText(long ms) {
+        long safe = Math.max(0, ms);
+        if (safe < 60000) return String.format(java.util.Locale.US, "%.2f", safe / 1000.0);
+        return String.format(java.util.Locale.US, "%d:%02d.%02d", safe / 60000, (safe / 1000) % 60, (safe % 1000) / 10);
+    }
+
+    private void addCurrentMoveComment(String comment) {
+        try {
+            android.util.Pair<java.util.List<GameTree.Node>, Integer> list = game.tree.getMoveList();
+            if (list != null && list.first != null && !list.first.isEmpty())
+                list.first.get(list.first.size() - 1).setPostComment(comment);
+        } catch (RuntimeException ignored) { }
+    }
+
+    private void addMoveAnalysisComment(boolean whiteMoved, long moveMs, String analysisAtBestMove) {
         try {
             android.util.Pair<java.util.List<GameTree.Node>, Integer> list = game.tree.getMoveList();
             if (list == null || list.first == null || list.first.isEmpty()) return;
             GameTree.Node node = list.first.get(list.first.size() - 1);
-            String analysis = whiteMoved ? latestWhiteAnalysis : latestBlackAnalysis;
+            String analysis = analysisAtBestMove;
             String eval = "n/a", depth = "n/a", nodes = "n/a", nps = "n/a", wdl = "";
             if (analysis != null) {
                 java.util.regex.Matcher m = java.util.regex.Pattern.compile(
@@ -653,7 +678,7 @@ public final class TournamentRunner {
             long remaining = clock == null ? 0 : clock.remainingMs(whiteMoved);
             String comment = "Eval: " + eval + " Depth: " + depth + " Nodes: " + nodes
                     + " NPS: " + nps + " Clock: " + clockText(remaining)
-                    + " Time: " + clockText(moveMs) + wdl;
+                    + " Time: " + moveTimeText(moveMs) + wdl;
             // Do not include the engine's PV/variation in the PGN comment.
             node.setPostComment(comment);
         } catch (RuntimeException ignored) { }
@@ -755,12 +780,36 @@ public final class TournamentRunner {
         private volatile int lastNps;
         private volatile int lastTimeMs;
         private volatile String lastPv = "";
+        private volatile boolean hasCurrentSearchInfo;
+
+        void beginSearch() {
+            lastDepth = 0;
+            lastNodes = 0;
+            lastNps = 0;
+            lastTimeMs = 0;
+            lastPv = "";
+            hasCurrentSearchInfo = false;
+            if (white) latestWhiteAnalysis = "WHITE analysis pending…";
+            else latestBlackAnalysis = "BLACK analysis pending…";
+        }
+
+        String snapshotForMove() {
+            if (!hasCurrentSearchInfo) return "Eval: n/a Depth: n/a Nodes: n/a NPS: n/a";
+            return white ? latestWhiteAnalysis : latestBlackAnalysis;
+        }
+
+        private boolean isCurrentSearch(int id) {
+            return !stopped && !finished && (white ? id == activeWhiteId : id == activeBlackId);
+        }
         @Override public void notifyDepth(int id, int depth) {
+            if (!isCurrentSearch(id)) return;
             lastDepth = depth;
+            hasCurrentSearchInfo = true;
             publishAnalysis();
         }
         @Override public void notifyCurrMove(int id, Position pos, Move move, int moveNr) { }
         @Override public void notifyPV(int id, Position pos, ArrayList<PvInfo> pvInfo, Move ponderMove) {
+            if (!isCurrentSearch(id)) return;
             if (pvInfo != null && !pvInfo.isEmpty()) {
                 PvInfo pv = pvInfo.get(0);
                 StringBuilder line = new StringBuilder();
@@ -798,16 +847,21 @@ public final class TournamentRunner {
                 lastNodes = pv.nodes;
                 lastNps = pv.nps;
                 lastTimeMs = pv.time;
+                hasCurrentSearchInfo = true;
                 publishAnalysis();
             }
         }
         @Override public void notifyStats(int id, long nodes, int nps, long tbHits, int hash, int time, int seldepth) {
+            if (!isCurrentSearch(id)) return;
             lastNodes = nodes; lastNps = nps; lastTimeMs = time;
+            hasCurrentSearchInfo = true;
             publishAnalysis();
         }
         @Override public void notifyBookInfo(int id, String bookInfo, ArrayList<Move> moveList, String eco, int distToEcoTree) {
+            if (!isCurrentSearch(id)) return;
             if (bookInfo != null && !bookInfo.isEmpty()) {
                 lastPv = "Book: " + bookInfo;
+                hasCurrentSearchInfo = true;
                 publishAnalysis();
             }
         }
@@ -913,6 +967,9 @@ public final class TournamentRunner {
             CetClock activeClock = clock;
             boolean acceptedAtArrival = !stopped && !finished && !paused && id == activeId && activeClock != null &&
                     (!usesClock() || activeClock.acceptMove(white, arrivalNs));
+            // Freeze this search's final analysis on bestmove, before deferred result
+            // handling can start another turn or receive any late engine notifications.
+            final String analysisAtBestMove = snapshotForMove();
             // DroidComputerPlayer invokes listeners before it returns its state to IDLE.
             // Defer board/result handling so old-search cleanup cannot overwrite a new search.
             DroidComputerPlayer player = white ? whitePlayer : blackPlayer;
@@ -923,7 +980,7 @@ public final class TournamentRunner {
                     Thread.currentThread().interrupt();
                     return;
                 }
-                onSearchResult(white, id, cmd, acceptedAtArrival);
+                onSearchResult(white, id, cmd, acceptedAtArrival, analysisAtBestMove);
             }, "CET-Tournament-Result");
             worker.start();
         }
