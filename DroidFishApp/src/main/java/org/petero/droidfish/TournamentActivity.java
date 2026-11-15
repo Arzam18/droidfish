@@ -89,6 +89,9 @@ public final class TournamentActivity extends Activity {
             mirrorWhiteName, mirrorBlackName, mirrorWhiteMoveTime, mirrorBlackMoveTime,
             mirrorStatusText, mirrorHeaderText, mirrorEventTitleText, mirrorSectionTitle;
     private LinearLayout mirrorPage, mirrorBlackRow, mirrorWhiteRow, mirrorSectionHost, mirrorControlBar;
+    private final HashMap<Integer, LinearLayout> mirrorSectionCache = new HashMap<>();
+    private final HashMap<Integer, LinearLayout> mirrorMovesSubCache = new HashMap<>();
+    private final HashMap<Integer, LinearLayout> mirrorStandingsSubCache = new HashMap<>();
     private ScrollView mirrorScroll, mirrorBlackAnalysisScroll, mirrorWhiteAnalysisScroll;
     private View mirrorBoardFrame;
     private boolean mirrorBoardOnlyMode;
@@ -97,11 +100,12 @@ public final class TournamentActivity extends Activity {
     private Button mirrorStandingsTableTab, mirrorGraphTab, mirrorCrosstableTab;
     private int mirrorMovesSubTab = 0, mirrorStandingsSubTab = 0, mirrorGraphMetric = 0;
     private ImageView mirrorWhiteIcon, mirrorBlackIcon;
-    private Button mirrorAnalysisToggle, mirrorAnalysisChooseEngine;
+    private Button mirrorAnalysisToggle, mirrorAnalysisChooseEngine, mirrorAnalysisEngineToggle;
     private TextView mirrorAnalysisOutput;
     private DroidComputerPlayer mirrorAnalysisEngine;
     private String mirrorAnalysisEngineId = "";
-    private boolean mirrorAnalysisOn;
+    private boolean mirrorAnalysisOn, mirrorAnalysisEngineActive = true;
+    private String mirrorLatestAnalysisOutput = "Select an engine, then turn analysis on.";
     private int mirrorAnalysisSearchId = 61000;
     private final ArrayList<Move> mirrorAnalysisHints = new ArrayList<>();
     private String mirrorReplayPgn = "";
@@ -133,10 +137,12 @@ public final class TournamentActivity extends Activity {
     private TournamentManager activeTournamentManager;
     private String mirrorTcLabel = "—";
     private final ArrayList<Position> mirrorPositions = new ArrayList<>();
+    private final ArrayList<String> mirrorLiveSanMoves = new ArrayList<>();
+    private final ArrayList<String> mirrorLiveAnalysisByPly = new ArrayList<>();
     private boolean mirrorLiveHistoryInitialized;
     private int mirrorPly = -1;
     private String lastWhiteAnalysis = "Eval: —", lastBlackAnalysis = "Eval: —";
-    private long lastWhiteTimeMs, lastBlackTimeMs;
+    private long lastWhiteTimeMs, lastBlackTimeMs, mirrorLastMoveTimeMs;
     private CheckBox showTournamentArrowsCheck;
     private CheckBox disableScreenTimeoutCheck;
     private Position latestPosition = new Position();
@@ -269,6 +275,7 @@ public final class TournamentActivity extends Activity {
             if (restoringSetup) return;
             saveSetup();
             engineIconBitmaps.clear();
+            invalidateAllMirrorSectionCaches(); clearMirrorSubCaches();
             if (isMirrorShowing()) { updateMirrorRankedNames(); renderMirrorSection(); }
         });
         engineIconFolderButton = new Button(this);
@@ -644,7 +651,7 @@ public final class TournamentActivity extends Activity {
         mirrorBlackRow = new LinearLayout(this);
         mirrorBlackRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
         mirrorBlackRow.addView(mirrorBlackClock, new LinearLayout.LayoutParams(0, -2, 1));
-        mirrorBlackRow.addView(mirrorBlackIcon, new LinearLayout.LayoutParams(dp(25), dp(25)));
+        mirrorBlackRow.addView(mirrorBlackIcon, new LinearLayout.LayoutParams(dp(34), dp(34)));
         mirrorBlackRow.addView(mirrorBlackName, new LinearLayout.LayoutParams(0, -2, 1.4f));
         mirrorBlackRow.addView(mirrorBlackMoveTime, new LinearLayout.LayoutParams(0, -2, 1));
         mirrorPage.addView(mirrorBlackRow, fullWidth());
@@ -684,7 +691,7 @@ public final class TournamentActivity extends Activity {
         mirrorWhiteRow = new LinearLayout(this);
         mirrorWhiteRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
         mirrorWhiteRow.addView(mirrorWhiteClock, new LinearLayout.LayoutParams(0, -2, 1));
-        mirrorWhiteRow.addView(mirrorWhiteIcon, new LinearLayout.LayoutParams(dp(25), dp(25)));
+        mirrorWhiteRow.addView(mirrorWhiteIcon, new LinearLayout.LayoutParams(dp(34), dp(34)));
         mirrorWhiteRow.addView(mirrorWhiteName, new LinearLayout.LayoutParams(0, -2, 1.4f));
         mirrorWhiteRow.addView(mirrorWhiteMoveTime, new LinearLayout.LayoutParams(0, -2, 1));
         mirrorPage.addView(mirrorWhiteRow, fullWidth());
@@ -719,6 +726,7 @@ public final class TournamentActivity extends Activity {
         mirrorSectionTitle.setTypeface(null, android.graphics.Typeface.BOLD);
         mirrorSectionTitle.setPadding(dp(10), dp(8), dp(10), dp(6));
         mirrorSectionTitle.setBackgroundColor(0xFF252525);
+        mirrorSectionTitle.setVisibility(View.GONE);
         mirrorPage.addView(mirrorSectionTitle, fullWidth());
         mirrorSectionHost = new LinearLayout(this);
         mirrorSectionHost.setOrientation(LinearLayout.VERTICAL);
@@ -778,7 +786,6 @@ public final class TournamentActivity extends Activity {
         if (mirrorPage == null || mirrorBoardFrame == null || mirrorScroll == null) return;
         mirrorBoardOnlyMode = !mirrorBoardOnlyMode;
         if (mirrorBoardOnlyMode) {
-            stopMirrorAnalysis();
             mirrorScroll.scrollTo(0, 0);
             mirrorScroll.setFillViewport(true);
             mirrorPage.setGravity(android.view.Gravity.CENTER);
@@ -821,7 +828,7 @@ public final class TournamentActivity extends Activity {
     private void switchTournamentAndMirror() {
         if (mirrorView == null || playView == null) return;
         stopMirrorAutoPlay();
-        stopMirrorAnalysis();
+        if (mirrorAnalysisEngine != null) { try { mirrorAnalysisEngine.stopSearch(); } catch (RuntimeException ignored) { } }
         if (isMirrorShowing()) {
             currentTournamentScreen = 0;
             if (tournamentBoard != null && latestPosition != null) tournamentBoard.setPosition(new Position(latestPosition));
@@ -883,8 +890,13 @@ public final class TournamentActivity extends Activity {
         if (!forceRebuild && mirrorPositions.size() == parsedMoves.size() + 1 && !mirrorPositions.isEmpty() &&
                 samePosition(mirrorPositions.get(mirrorPositions.size() - 1), livePosition)) return;
         if (parsedMoves.isEmpty()) {
-            mirrorPositions.clear();
-            mirrorPositions.add(new Position(livePosition));
+            if (mirrorPositions.isEmpty()) mirrorPositions.add(new Position(livePosition));
+            else if (!samePosition(mirrorPositions.get(mirrorPositions.size() - 1), livePosition)) mirrorPositions.add(new Position(livePosition));
+            return;
+        }
+        // Do not let a short, in-flight PGN snapshot truncate the longer callback history.
+        if (!forceRebuild && mirrorPositions.size() > parsedMoves.size() + 1) {
+            if (!samePosition(mirrorPositions.get(mirrorPositions.size() - 1), livePosition)) mirrorPositions.add(new Position(livePosition));
             return;
         }
         try {
@@ -973,8 +985,7 @@ public final class TournamentActivity extends Activity {
 
     private void selectMirrorTab(int tab, boolean scrollToSection) {
         mirrorSelectedTab = Math.max(0, Math.min(3, tab));
-        if (mirrorSelectedTab != 0) { stopMirrorAutoPlay(); stopMirrorAnalysis(); }
-        else if (mirrorMovesSubTab != 1) stopMirrorAnalysis();
+        if (mirrorSelectedTab != 0) stopMirrorAutoPlay();
         Button[] buttons = {mirrorMovesTab, mirrorStandingsTab, mirrorScheduleTab, mirrorInfoTab};
         String[] labels = {"MOVES", "STANDINGS", "SCHEDULE", "INFO"};
         for (int i = 0; i < buttons.length; i++) {
@@ -986,13 +997,23 @@ public final class TournamentActivity extends Activity {
         }
         renderMirrorSection();
         if (scrollToSection && mirrorScroll != null && mirrorSectionTitle != null) {
-            mirrorScroll.post(() -> mirrorScroll.smoothScrollTo(0, Math.max(0, mirrorSectionTitle.getTop() - dp(110))));
+            mirrorScroll.post(() -> mirrorScroll.smoothScrollTo(0, Math.max(0, mirrorSectionHost.getTop() - dp(110))));
         }
     }
 
     private void renderMirrorSection() {
         if (mirrorSectionHost == null) return;
-        mirrorSectionHost.removeAllViews();
+        LinearLayout parentHost = mirrorSectionHost;
+        parentHost.removeAllViews();
+        LinearLayout cached = mirrorSectionCache.get(mirrorSelectedTab);
+        if (cached != null) {
+            if (cached.getParent() instanceof ViewGroup) ((ViewGroup) cached.getParent()).removeView(cached);
+            parentHost.addView(cached, new LinearLayout.LayoutParams(-1, -1));
+            return;
+        }
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        mirrorSectionHost = content;
         if (mirrorReplayMode) {
             LinearLayout replayBar = new LinearLayout(this);
             replayBar.setGravity(android.view.Gravity.CENTER_VERTICAL);
@@ -1007,20 +1028,40 @@ public final class TournamentActivity extends Activity {
             live.setOnClickListener(v -> returnMirrorToLive());
             mirrorSectionHost.addView(replayBar, fullWidth());
         }
-        if (mirrorSelectedTab == 0) {
-            mirrorSectionTitle.setText("MOVES" + (mirrorReplayMode ? " · GAME " + (mirrorReplayPairingIndex + 1) + " REPLAY" : ""));
-            renderMirrorMovesSection();
-        } else if (mirrorSelectedTab == 1) {
-            mirrorSectionTitle.setText("STANDINGS");
-            renderMirrorStandingsSection();
-        } else if (mirrorSelectedTab == 2) {
-            TournamentManager tournament = activeTournamentManager;
-            mirrorSectionTitle.setText(tournament == null ? "SCHEDULE" : scheduleTitle(tournament));
-            renderMirrorScheduleSection();
-        } else {
-            mirrorSectionTitle.setText("TOURNAMENT INFO");
-            renderMirrorInfoSection();
+        if (mirrorSelectedTab == 0) renderMirrorMovesSection();
+        else if (mirrorSelectedTab == 1) renderMirrorStandingsSection();
+        else if (mirrorSelectedTab == 2) renderMirrorScheduleSection();
+        else renderMirrorInfoSection();
+        mirrorSectionHost = parentHost;
+        mirrorSectionCache.put(mirrorSelectedTab, content);
+        parentHost.addView(content, new LinearLayout.LayoutParams(-1, -1));
+    }
+
+    private void invalidateMirrorSectionCache(int tab) {
+        mirrorSectionCache.remove(tab);
+    }
+
+    private void invalidateAllMirrorSectionCaches() {
+        mirrorSectionCache.clear();
+    }
+
+    private void invalidateMirrorMovesSubCache(int subTab) { mirrorMovesSubCache.remove(subTab); }
+    private void invalidateMirrorStandingsSubCache(int subTab) { mirrorStandingsSubCache.remove(subTab); }
+    private void clearMirrorSubCaches() { mirrorMovesSubCache.clear(); mirrorStandingsSubCache.clear(); }
+
+    private void addCachedMirrorSubpanel(HashMap<Integer, LinearLayout> cache, int key, Runnable builder) {
+        LinearLayout parent = mirrorSectionHost;
+        LinearLayout panel = cache.get(key);
+        if (panel == null) {
+            panel = new LinearLayout(this);
+            panel.setOrientation(LinearLayout.VERTICAL);
+            mirrorSectionHost = panel;
+            builder.run();
+            mirrorSectionHost = parent;
+            cache.put(key, panel);
         }
+        if (panel.getParent() instanceof ViewGroup) ((ViewGroup) panel.getParent()).removeView(panel);
+        parent.addView(panel, new LinearLayout.LayoutParams(-1, 0, 1));
     }
 
     private void renderMirrorMovesSection() {
@@ -1065,9 +1106,12 @@ public final class TournamentActivity extends Activity {
         subtabs.addView(mirrorGameInfoTab, new LinearLayout.LayoutParams(0, -2, 1));
         mirrorSectionHost.addView(subtabs, fullWidth());
 
-        if (mirrorMovesSubTab == 0) renderMirrorMoveList();
-        else if (mirrorMovesSubTab == 1) renderMirrorAnalysisSection();
-        else renderMirrorGameInfoSection();
+        final int selectedSubTab = mirrorMovesSubTab;
+        addCachedMirrorSubpanel(mirrorMovesSubCache, selectedSubTab, () -> {
+            if (selectedSubTab == 0) renderMirrorMoveList();
+            else if (selectedSubTab == 1) renderMirrorAnalysisSection();
+            else renderMirrorGameInfoSection();
+        });
     }
 
     private Button mirrorSubTabButton(String label, int tab, boolean selected) {
@@ -1082,9 +1126,9 @@ public final class TournamentActivity extends Activity {
 
     private void selectMirrorMovesSubTab(int tab) {
         mirrorMovesSubTab = Math.max(0, Math.min(2, tab));
-        if (mirrorMovesSubTab != 1) stopMirrorAnalysis();
+        invalidateMirrorSectionCache(0);
         renderMirrorSection();
-        if (mirrorMovesSubTab == 1 && mirrorAnalysisOn) startMirrorAnalysis();
+        if (mirrorAnalysisOn && mirrorAnalysisEngineActive) startMirrorAnalysis();
     }
 
     private void renderMirrorMoveList() {
@@ -1094,13 +1138,8 @@ public final class TournamentActivity extends Activity {
         moves.setOrientation(LinearLayout.VERTICAL);
         ArrayList<String> sans;
         ArrayList<String> comments;
-        if (mirrorReplayMode) {
-            sans = new ArrayList<>(mirrorReplayMoves);
-            comments = new ArrayList<>(mirrorReplayComments);
-        } else {
-            comments = new ArrayList<>();
-            sans = parseMirrorMoves(currentPgnMoves, comments);
-        }
+        comments = new ArrayList<>();
+        sans = currentMirrorSanMoves(comments);
         // Navigation is driven by the same rebuilt PGN position history as this
         // list; never silently truncate a complete move list to callback count.
         int maxMoves = sans.size();
@@ -1168,12 +1207,21 @@ public final class TournamentActivity extends Activity {
             for (EngineChoice e : availableEngines) if (e.id.equals(mirrorAnalysisEngineId)) { selectedName = e.name; break; }
         }
         mirrorAnalysisChooseEngine.setText(selectedName);
+        mirrorAnalysisEngineToggle = new Button(this);
+        mirrorAnalysisEngineToggle.setText(mirrorAnalysisEngineActive ? "ENGINE ENABLED" : "ENGINE DISABLED");
         mirrorAnalysisToggle = new Button(this);
         mirrorAnalysisToggle.setText(mirrorAnalysisOn ? "ANALYSIS ON" : "ANALYSIS OFF");
         controls.addView(mirrorAnalysisChooseEngine, new LinearLayout.LayoutParams(0, -2, 1));
+        controls.addView(mirrorAnalysisEngineToggle, new LinearLayout.LayoutParams(0, -2, 1));
         controls.addView(mirrorAnalysisToggle, new LinearLayout.LayoutParams(0, -2, 1));
         mirrorSectionHost.addView(controls, fullWidth());
         mirrorAnalysisChooseEngine.setOnClickListener(v -> chooseMirrorAnalysisEngine());
+        mirrorAnalysisEngineToggle.setOnClickListener(v -> {
+            mirrorAnalysisEngineActive = !mirrorAnalysisEngineActive;
+            if (!mirrorAnalysisEngineActive) stopMirrorAnalysisEngineOnly();
+            mirrorAnalysisEngineToggle.setText(mirrorAnalysisEngineActive ? "ENGINE ENABLED" : "ENGINE DISABLED");
+            if (mirrorAnalysisEngineActive && mirrorAnalysisOn) startMirrorAnalysis();
+        });
         mirrorAnalysisToggle.setOnClickListener(v -> {
             if (!mirrorAnalysisOn && mirrorAnalysisEngineId.isEmpty()) {
                 chooseMirrorAnalysisEngine();
@@ -1183,7 +1231,7 @@ public final class TournamentActivity extends Activity {
             mirrorAnalysisToggle.setText(mirrorAnalysisOn ? "ANALYSIS ON" : "ANALYSIS OFF");
             if (mirrorAnalysisOn) startMirrorAnalysis(); else stopMirrorAnalysis();
         });
-        mirrorAnalysisOutput = text(mirrorAnalysisOn ? "Waiting for analysis…" : "Select an engine, then turn analysis on.");
+        mirrorAnalysisOutput = text(mirrorLatestAnalysisOutput);
         mirrorAnalysisOutput.setTextSize(14);
         mirrorAnalysisOutput.setTextColor(0xFFE0E0E0);
         mirrorAnalysisOutput.setPadding(dp(10), dp(10), dp(10), dp(10));
@@ -1198,7 +1246,7 @@ public final class TournamentActivity extends Activity {
         new AlertDialog.Builder(this).setTitle("Choose engine to analyse this position")
                 .setItems(labels, (dialog, which) -> {
                     if (which < 0 || which >= availableEngines.size()) return;
-                    stopMirrorAnalysis();
+                    stopMirrorAnalysisEngineOnly();
                     mirrorAnalysisEngineId = availableEngines.get(which).id;
                     mirrorAnalysisOn = true;
                     renderMirrorSection();
@@ -1207,14 +1255,14 @@ public final class TournamentActivity extends Activity {
     }
 
     private void startMirrorAnalysis() {
-        if (!mirrorAnalysisOn || mirrorAnalysisEngineId.isEmpty() || mirrorMovesSubTab != 1 || !isMirrorShowing()) return;
-        stopMirrorAnalysisEngineOnly();
+        if (!mirrorAnalysisOn || !mirrorAnalysisEngineActive || mirrorAnalysisEngineId.isEmpty()) return;
+        if (mirrorAnalysisEngine != null) { try { mirrorAnalysisEngine.stopSearch(); } catch (RuntimeException ignored) { } }
         ArrayList<Position> positions = currentMirrorPositions();
         if (positions.isEmpty()) return;
         int ply = Math.max(0, Math.min(mirrorDisplayedPly(), positions.size() - 1));
         Position position = new Position(positions.get(ply));
         mirrorAnalysisOutput = mirrorAnalysisOutput == null ? text("Starting analysis…") : mirrorAnalysisOutput;
-        final DroidComputerPlayer analysisPlayer = new DroidComputerPlayer(new SearchListener() {
+        final DroidComputerPlayer analysisPlayer = mirrorAnalysisEngine != null ? mirrorAnalysisEngine : new DroidComputerPlayer(new SearchListener() {
             @Override public void notifyDepth(int id, int depth) { }
             @Override public void notifyCurrMove(int id, Position pos, Move move, int moveNr) { }
             @Override public void notifyPV(int id, Position pos, ArrayList<PvInfo> infos, Move ponderMove) {
@@ -1235,8 +1283,9 @@ public final class TournamentActivity extends Activity {
                 String output = "Eval: " + eval + "    Depth: " + pv.depth + "    Nodes: " + compactViewerCount(pv.nodes) +
                         "    NPS: " + compactViewerCount(pv.nps) + "\n" + line;
                 runOnUiThread(() -> {
-                    if (!mirrorAnalysisOn || !isMirrorShowing() || mirrorMovesSubTab != 1 || mirrorAnalysisOutput == null) return;
-                    mirrorAnalysisOutput.setText(output);
+                    if (!mirrorAnalysisOn || !mirrorAnalysisEngineActive) return;
+                    mirrorLatestAnalysisOutput = output;
+                    if (mirrorAnalysisOutput != null) mirrorAnalysisOutput.setText(output);
                     mirrorAnalysisHints.clear(); mirrorAnalysisHints.addAll(hints);
                     if (mirrorBoard != null) mirrorBoard.setMoveHints(mirrorAnalysisHints);
                 });
@@ -1250,20 +1299,23 @@ public final class TournamentActivity extends Activity {
                 runOnUiThread(() -> Toast.makeText(TournamentActivity.this, "Analysis engine: " + errMsg, Toast.LENGTH_LONG).show());
             }
         });
-        mirrorAnalysisEngine = analysisPlayer;
-        analysisPlayer.setEngineOptions(new org.petero.droidfish.EngineOptions());
-        analysisPlayer.setBookOptions(new BookOptions());
-        int engineId = ++mirrorAnalysisSearchId;
-        analysisPlayer.queueStartEngine(engineId, mirrorAnalysisEngineId);
+        boolean startEngine = mirrorAnalysisEngine == null;
+        if (startEngine) {
+            mirrorAnalysisEngine = analysisPlayer;
+            analysisPlayer.setEngineOptions(new org.petero.droidfish.EngineOptions());
+            analysisPlayer.setBookOptions(new BookOptions());
+            analysisPlayer.queueStartEngine(++mirrorAnalysisSearchId, mirrorAnalysisEngineId);
+        }
+        final DroidComputerPlayer activePlayer = analysisPlayer;
         uiHandler.postDelayed(() -> {
-            if (mirrorAnalysisEngine != analysisPlayer || !mirrorAnalysisOn || !isMirrorShowing() || mirrorMovesSubTab != 1) return;
+            if (mirrorAnalysisEngine != activePlayer || !mirrorAnalysisOn || !mirrorAnalysisEngineActive) return;
             try {
-                analysisPlayer.queueAnalyzeRequest(DroidComputerPlayer.SearchRequest.analyzeRequest(
+                activePlayer.queueAnalyzeRequest(DroidComputerPlayer.SearchRequest.analyzeRequest(
                         ++mirrorAnalysisSearchId, position, new ArrayList<Move>(), position, false, mirrorAnalysisEngineId, 1));
             } catch (RuntimeException ex) {
                 Toast.makeText(this, "Unable to start analysis: " + ex.getMessage(), Toast.LENGTH_LONG).show();
             }
-        }, 700);
+        }, startEngine ? 700 : 80);
     }
 
     private void stopMirrorAnalysisEngineOnly() {
@@ -1277,7 +1329,7 @@ public final class TournamentActivity extends Activity {
 
     private void stopMirrorAnalysis() {
         mirrorAnalysisOn = false;
-        stopMirrorAnalysisEngineOnly();
+        if (mirrorAnalysisEngine != null) { try { mirrorAnalysisEngine.stopSearch(); } catch (RuntimeException ignored) { } }
         if (mirrorAnalysisToggle != null) mirrorAnalysisToggle.setText("ANALYSIS OFF");
     }
 
@@ -1435,6 +1487,29 @@ public final class TournamentActivity extends Activity {
         return moves;
     }
 
+    private ArrayList<String> currentMirrorSanMoves(ArrayList<String> commentsOut) {
+        if (mirrorReplayMode) {
+            if (commentsOut != null) { commentsOut.clear(); commentsOut.addAll(mirrorReplayComments); }
+            return new ArrayList<>(mirrorReplayMoves);
+        }
+        ArrayList<String> parsedComments = new ArrayList<>();
+        ArrayList<String> parsed = parseMirrorMoves(currentPgnMoves, parsedComments);
+        if (!mirrorLiveSanMoves.isEmpty() && mirrorLiveSanMoves.size() >= parsed.size()) {
+            if (commentsOut != null) {
+                commentsOut.clear();
+                for (int i = 0; i < mirrorLiveSanMoves.size(); i++) {
+                    String comment = i < parsedComments.size() ? parsedComments.get(i) : "";
+                    if (comment == null || comment.trim().isEmpty())
+                        comment = i < mirrorLiveAnalysisByPly.size() ? mirrorLiveAnalysisByPly.get(i) : "";
+                    commentsOut.add(comment);
+                }
+            }
+            return new ArrayList<>(mirrorLiveSanMoves);
+        }
+        if (commentsOut != null) { commentsOut.clear(); commentsOut.addAll(parsedComments); }
+        return parsed;
+    }
+
     private void toggleMirrorAutoPlay() {
         if (mirrorAutoPlay) {
             stopMirrorAutoPlay();
@@ -1485,26 +1560,31 @@ public final class TournamentActivity extends Activity {
         if (mirrorReplayMode) updateMirrorReplayDetails(target);
         else updateMirrorRankedNames();
         if (mirrorSelectedTab == 0) {
+            invalidateMirrorMovesSubCache(0);
+            invalidateMirrorSectionCache(0);
             renderMirrorSection();
-            if (mirrorMovesSubTab == 1 && mirrorAnalysisOn) startMirrorAnalysis();
+            if (mirrorAnalysisOn && mirrorAnalysisEngineActive) startMirrorAnalysis();
         }
     }
 
     private void returnMirrorToLive() {
         stopMirrorAutoPlay();
         mirrorReplayMode = false;
+        invalidateAllMirrorSectionCaches();
         mirrorReplayLiveSnapshot = false;
         mirrorReplayPgn = "";
         mirrorReplayPairingIndex = -1;
         mirrorReplayWhiteEngineId = mirrorReplayBlackEngineId = "";
         mirrorReplayPositions.clear();
+        invalidateAllMirrorSectionCaches();
+        clearMirrorSubCaches();
         mirrorReplayMoves.clear();
         mirrorReplayComments.clear();
         mirrorPly = -1;
         syncMirrorFromLive();
         renderMirrorSection();
         if (mirrorScroll != null && mirrorSectionTitle != null)
-            mirrorScroll.post(() -> mirrorScroll.smoothScrollTo(0, Math.max(0, mirrorSectionTitle.getTop() - dp(110))));
+            mirrorScroll.post(() -> mirrorScroll.smoothScrollTo(0, Math.max(0, mirrorSectionHost.getTop() - dp(110))));
         Toast.makeText(this, "Returned to live tournament game", Toast.LENGTH_SHORT).show();
     }
 
@@ -1573,14 +1653,17 @@ public final class TournamentActivity extends Activity {
         subtabs.addView(mirrorGraphTab, new LinearLayout.LayoutParams(0, -2, 1));
         subtabs.addView(mirrorCrosstableTab, new LinearLayout.LayoutParams(0, -2, 1));
         mirrorSectionHost.addView(subtabs, fullWidth());
-        if (mirrorStandingsSubTab == 0) renderMirrorStandingsTable();
-        else if (mirrorStandingsSubTab == 1) renderMirrorGraphSection();
-        else renderMirrorCrosstableSection();
+        final int selectedSubTab = mirrorStandingsSubTab;
+        addCachedMirrorSubpanel(mirrorStandingsSubCache, selectedSubTab, () -> {
+            if (selectedSubTab == 0) renderMirrorStandingsTable();
+            else if (selectedSubTab == 1) renderMirrorGraphSection();
+            else renderMirrorCrosstableSection();
+        });
     }
 
     private void selectMirrorStandingsSubTab(int tab) {
         mirrorStandingsSubTab = Math.max(0, Math.min(2, tab));
-        stopMirrorAnalysis();
+        invalidateMirrorSectionCache(1);
         renderMirrorSection();
     }
 
@@ -1649,18 +1732,18 @@ public final class TournamentActivity extends Activity {
             engineCell.setOrientation(LinearLayout.VERTICAL);
             engineCell.setPadding(dp(7), dp(8), dp(4), dp(8));
             TextView engineName = text((i + 1) + "." + name);
-            engineName.setTextSize(13);
+            engineName.setTextSize(15);
             engineName.setMaxLines(2);
             engineName.setEllipsize(android.text.TextUtils.TruncateAt.END);
             engineName.setTypeface(null, android.graphics.Typeface.BOLD);
             TextView score = text(String.format(java.util.Locale.US, "%.1f/%s · %.1f%%",
                     standing.points, (maxScore == Math.rint(maxScore) ? Integer.toString((int)maxScore) :
                             String.format(java.util.Locale.US, "%.1f", maxScore)), scorePct));
-            score.setTextSize(10);
+            score.setTextSize(12);
             score.setTextColor(0xFFB8C4CC);
             LinearLayout engineNameLine = new LinearLayout(this);
             engineNameLine.setGravity(android.view.Gravity.CENTER_VERTICAL);
-            addMirrorEngineIcon(engineNameLine, standing.engineId, name, 22);
+            addMirrorEngineIcon(engineNameLine, standing.engineId, name, 30);
             engineNameLine.addView(engineName, new LinearLayout.LayoutParams(0, -2, 1));
             engineCell.addView(engineNameLine, fullWidth());
             engineCell.addView(score, fullWidth());
@@ -1696,18 +1779,18 @@ public final class TournamentActivity extends Activity {
             Button button = new Button(this);
             button.setText(labels[i]); button.setTextSize(10); button.setPadding(0, dp(2), 0, dp(2));
             button.setAlpha(i == mirrorGraphMetric ? 1.0f : 0.65f);
-            button.setOnClickListener(v -> { mirrorGraphMetric = metric; renderMirrorSection(); });
+            button.setOnClickListener(v -> { mirrorGraphMetric = metric; invalidateMirrorStandingsSubCache(1); invalidateMirrorSectionCache(1); renderMirrorSection(); });
             metricTabs.addView(button, new LinearLayout.LayoutParams(0, -2, 1));
         }
         mirrorSectionHost.addView(metricTabs, fullWidth());
 
         ArrayList<String> comments = new ArrayList<>();
-        if (mirrorReplayMode) comments.addAll(mirrorReplayComments);
-        else parseMirrorMoves(currentPgnMoves, comments);
+        currentMirrorSanMoves(comments);
         ArrayList<Float> values = new ArrayList<>();
         ArrayList<Integer> moveNumbers = new ArrayList<>();
         for (int i = 0; i < comments.size(); i++) {
             String raw = comments.get(i);
+            if (!mirrorReplayMode && (raw == null || raw.trim().isEmpty()) && i < mirrorLiveAnalysisByPly.size()) raw = mirrorLiveAnalysisByPly.get(i);
             String key;
             switch (mirrorGraphMetric) {
                 case 1: key = "Depth|D"; break;
@@ -1716,7 +1799,18 @@ public final class TournamentActivity extends Activity {
                 case 4: key = "Time|TimeUsed"; break;
                 default: key = "Eval|eval"; break;
             }
-            double parsed = parseMirrorGraphValue(findCommentValue(raw, key), mirrorGraphMetric);
+            String graphValue = findCommentValue(raw, key);
+            if ((graphValue.isEmpty() || graphValue.equalsIgnoreCase("n/a")) && !mirrorReplayMode && i < mirrorLiveAnalysisByPly.size()) {
+                String liveRaw = mirrorLiveAnalysisByPly.get(i);
+                String liveKey = mirrorGraphMetric == 0 ? "Eval|eval" : mirrorGraphMetric == 1 ? "Depth|D" : mirrorGraphMetric == 2 ? "Nodes|N" : mirrorGraphMetric == 3 ? "NPS|nps" : "Time|TimeUsed";
+                graphValue = findCommentValue(liveRaw, liveKey);
+            }
+            if (graphValue.isEmpty() && raw != null) {
+                String field = mirrorGraphMetric == 0 ? "Eval" : mirrorGraphMetric == 1 ? "Depth" : mirrorGraphMetric == 2 ? "Nodes" : mirrorGraphMetric == 3 ? "NPS" : "Time";
+                java.util.regex.Matcher am = java.util.regex.Pattern.compile("(?i)" + field + "\\s*:\\s*([^\\s]+)").matcher(raw);
+                if (am.find()) graphValue = am.group(1);
+            }
+            double parsed = parseMirrorGraphValue(graphValue, mirrorGraphMetric);
             if (Double.isFinite(parsed)) { values.add((float)parsed); moveNumbers.add(i + 1); }
         }
         String unit;
@@ -1737,7 +1831,7 @@ public final class TournamentActivity extends Activity {
             return;
         }
         MirrorGraphView graph = new MirrorGraphView(this, values, moveNumbers, mirrorGraphMetric);
-        mirrorSectionHost.addView(graph, new LinearLayout.LayoutParams(-1, dp(220)));
+        mirrorSectionHost.addView(graph, new LinearLayout.LayoutParams(-1, dp(260)));
         TextView note = text("Source: existing PGN move comments · no extra engine searches");
         note.setTextSize(10); note.setTextColor(0xFF9AA7B0); note.setPadding(dp(8), dp(2), dp(8), dp(2));
         mirrorSectionHost.addView(note, fullWidth());
@@ -1819,15 +1913,15 @@ public final class TournamentActivity extends Activity {
         TournamentManager tournament = activeTournamentManager;
         if (tournament == null) { mirrorSectionHost.addView(text("No tournament loaded."), fullWidth()); return; }
         List<TournamentManager.Engine> engines = tournament.engines();
-        int nameWidth = dp(142), cellWidth = dp(76);
+        int nameWidth = dp(170), cellWidth = dp(88);
         LinearLayout table = new LinearLayout(this); table.setOrientation(LinearLayout.VERTICAL);
         LinearLayout header = new LinearLayout(this); header.setOrientation(LinearLayout.HORIZONTAL);
         addMirrorStandingHeaderCell(header, "Engine", nameWidth);
         for (TournamentManager.Engine engine : engines) {
             LinearLayout cell = new LinearLayout(this); cell.setOrientation(LinearLayout.VERTICAL);
             cell.setGravity(android.view.Gravity.CENTER); cell.setPadding(dp(2), dp(3), dp(2), dp(3));
-            addMirrorEngineIcon(cell, engine.id, engine.displayName, 22);
-            TextView name = text(engine.displayName); name.setTextSize(9); name.setMaxLines(2);
+            addMirrorEngineIcon(cell, engine.id, engine.displayName, 30);
+            TextView name = text(engine.displayName); name.setTextSize(11); name.setMaxLines(2);
             name.setEllipsize(android.text.TextUtils.TruncateAt.END); name.setGravity(android.view.Gravity.CENTER);
             cell.addView(name, new LinearLayout.LayoutParams(cellWidth - dp(4), -2));
             header.addView(cell, new LinearLayout.LayoutParams(cellWidth, -2));
@@ -1855,9 +1949,9 @@ public final class TournamentActivity extends Activity {
             row.setBackgroundColor((i & 1) == 0 ? 0xFF303030 : 0xFF292929);
             LinearLayout nameCell = new LinearLayout(this); nameCell.setGravity(android.view.Gravity.CENTER_VERTICAL);
             nameCell.setPadding(dp(4), dp(7), dp(3), dp(7));
-            TextView name = text((i + 1) + ". " + engine.displayName); name.setTextSize(11); name.setMaxLines(2);
+            TextView name = text((i + 1) + ". " + engine.displayName); name.setTextSize(13); name.setMaxLines(2);
             name.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            addMirrorEngineIcon(nameCell, engine.id, engine.displayName, 22);
+            addMirrorEngineIcon(nameCell, engine.id, engine.displayName, 30);
             nameCell.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
             row.addView(nameCell, new LinearLayout.LayoutParams(nameWidth, -2));
             double totalPoints = 0;
@@ -1870,8 +1964,8 @@ public final class TournamentActivity extends Activity {
                     if (played > 0) cellText = formatCrosstableScore(points) + "/" + played;
                     totalPoints += points;
                 }
-                TextView score = text(cellText); score.setTextSize(11); score.setGravity(android.view.Gravity.CENTER);
-                score.setPadding(dp(2), dp(10), dp(2), dp(10));
+                TextView score = text(cellText); score.setTextSize(13); score.setGravity(android.view.Gravity.CENTER);
+                score.setPadding(dp(2), dp(12), dp(2), dp(12));
                 score.setBackgroundColor(i == j ? 0xFF252525 : ((i + j) % 2 == 0 ? 0xFF303030 : 0xFF292929));
                 row.addView(score, new LinearLayout.LayoutParams(cellWidth, -2));
             }
@@ -2006,22 +2100,27 @@ public final class TournamentActivity extends Activity {
                     fallback.setTextColor(0xFFE6E6E6); fallback.setPadding(dp(10), dp(7), dp(28), dp(7)); return fallback;
                 }
                 LinearLayout row = new LinearLayout(TournamentActivity.this); row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-                row.setPadding(dp(5), dp(5), dp(5), dp(5));
+                row.setPadding(dp(7), dp(7), dp(7), dp(7));
                 row.setBackgroundColor((position & 1) == 0 ? 0xFF303030 : 0xFF292929);
-                String prefix = pairing.index + 1 + ". ";
-                TextView number = text(prefix); number.setTextSize(11); number.setTextColor(0xFFBFCBD2);
-                row.addView(number, new LinearLayout.LayoutParams(-2, -2));
                 String white = pairing.isComplete() && !pairing.whiteNameAtPlay.isEmpty() ? pairing.whiteNameAtPlay : engineDisplayName(activeTournamentManager.engines(), pairing.whiteEngineId);
                 String black = pairing.isComplete() && !pairing.blackNameAtPlay.isEmpty() ? pairing.blackNameAtPlay : engineDisplayName(activeTournamentManager.engines(), pairing.blackEngineId);
-                addMirrorEngineIcon(row, pairing.whiteEngineId, white, 19);
-                TextView whiteName = text(white); whiteName.setTextSize(11); whiteName.setMaxLines(1); whiteName.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                row.addView(whiteName, new LinearLayout.LayoutParams(0, -2, 1));
-                TextView vs = text("–"); vs.setTextSize(10); row.addView(vs, new LinearLayout.LayoutParams(-2, -2));
-                addMirrorEngineIcon(row, pairing.blackEngineId, black, 19);
-                TextView blackName = text(black); blackName.setTextSize(11); blackName.setMaxLines(1); blackName.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                row.addView(blackName, new LinearLayout.LayoutParams(0, -2, 1));
-                TextView result = text(pairingResultLabel(pairing.outcome)); result.setTextSize(10); result.setGravity(android.view.Gravity.RIGHT);
-                row.addView(result, new LinearLayout.LayoutParams(-2, -2));
+                LinearLayout left = new LinearLayout(TournamentActivity.this); left.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                TextView number = text((pairing.index + 1) + "."); number.setTextSize(12); number.setTextColor(0xFFBFCBD2);
+                left.addView(number, new LinearLayout.LayoutParams(dp(25), -2));
+                addMirrorEngineIcon(left, pairing.whiteEngineId, white, 30);
+                TextView whiteName = text(white); whiteName.setTextSize(14); whiteName.setMaxLines(1); whiteName.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                left.addView(whiteName, new LinearLayout.LayoutParams(0, -2, 1));
+                row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
+                LinearLayout center = new LinearLayout(TournamentActivity.this); center.setOrientation(LinearLayout.VERTICAL); center.setGravity(android.view.Gravity.CENTER);
+                TextView result = text(pairingResultLabel(pairing.outcome)); result.setTextSize(14); result.setTypeface(null, android.graphics.Typeface.BOLD);
+                TextView moves = text(countFullMoves(pairing.pgn) + " Moves"); moves.setTextSize(11); moves.setTextColor(0xFFBFCBD2);
+                center.addView(result, new LinearLayout.LayoutParams(-2, -2)); center.addView(moves, new LinearLayout.LayoutParams(-2, -2));
+                row.addView(center, new LinearLayout.LayoutParams(dp(82), -2));
+                LinearLayout right = new LinearLayout(TournamentActivity.this); right.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                addMirrorEngineIcon(right, pairing.blackEngineId, black, 30);
+                TextView blackName = text(black); blackName.setTextSize(14); blackName.setMaxLines(1); blackName.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                right.addView(blackName, new LinearLayout.LayoutParams(0, -2, 1));
+                row.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
                 return row;
             }
         };
@@ -2211,9 +2310,11 @@ public final class TournamentActivity extends Activity {
                         .append(" (inactive while BIN is selected)\n");
             }
         } else if (!t.openingPgn().isEmpty()) {
-            String pgnBook = selectedOpeningFileName == null ? "" : selectedOpeningFileName.trim();
+            String pgnBook = t.openingPgnFileName();
+            if (pgnBook == null || pgnBook.trim().isEmpty())
+                pgnBook = selectedOpeningFileName == null ? "" : selectedOpeningFileName.trim();
             if (pgnBook.isEmpty() || pgnBook.equals("No PGN file selected") || pgnBook.equals("Saved PGN book loaded"))
-                pgnBook = pgnBookNameFromContents(t.openingPgn());
+                pgnBook = "Selected PGN file name unavailable";
             int marker = pgnBook.indexOf(" · PGN book loaded");
             if (marker >= 0) pgnBook = pgnBook.substring(0, marker).trim();
             info.append("Opening PGN book in use: ").append(pgnBook).append("\n");
@@ -2596,8 +2697,8 @@ public final class TournamentActivity extends Activity {
                                     catch (Exception pgnError) { pgnSaveWarning = " · PGN export update failed: " + pgnError.getMessage(); }
                                     if (standingsText != null) standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
                                     refreshMirrorRanks();
-                                    if (isMirrorShowing() && !mirrorReplayMode && mirrorSelectedTab == 1) renderMirrorStandingsSection();
-                                    if (isMirrorShowing() && !mirrorReplayMode && mirrorSelectedTab == 2) renderMirrorScheduleSection();
+                                    invalidateMirrorSectionCache(1); invalidateMirrorSectionCache(2); invalidateMirrorSectionCache(3);
+                                    if (isMirrorShowing() && !mirrorReplayMode && (mirrorSelectedTab == 1 || mirrorSelectedTab == 2 || mirrorSelectedTab == 3)) renderMirrorSection();
                                     Toast.makeText(this, "Result corrected; standings, tournament JSON, and PGN result saved (moves unchanged)" + pgnSaveWarning, Toast.LENGTH_LONG).show();
                                     showStandingsDialog();
                                 } catch (Exception e) {
@@ -3681,7 +3782,7 @@ public final class TournamentActivity extends Activity {
                     String id = normalizeIconKey(selectedEngines.get(which).id);
                     if (enabled) updatedDisabledIds.remove(id); else updatedDisabledIds.add(id);
                 })
-                .setPositiveButton("Apply", (dialog, which) -> { engineIconDisabledIds.clear(); engineIconDisabledIds.addAll(updatedDisabledIds); saveSetup(); engineIconBitmaps.clear(); if (isMirrorShowing()) { updateMirrorRankedNames(); renderMirrorSection(); } })
+                .setPositiveButton("Apply", (dialog, which) -> { engineIconDisabledIds.clear(); engineIconDisabledIds.addAll(updatedDisabledIds); saveSetup(); engineIconBitmaps.clear(); invalidateAllMirrorSectionCaches(); clearMirrorSubCaches(); if (isMirrorShowing()) { updateMirrorRankedNames(); renderMirrorSection(); } })
                 .setNegativeButton(android.R.string.cancel, null).show();
     }
 
@@ -4214,6 +4315,7 @@ public final class TournamentActivity extends Activity {
                     TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart, swissRounds,
                     swissSeedingMode, swissRankOrderIds, cupSeedingMode, cupRankOrderIds);
             tournament.setOpeningBinPath(selectedOpeningBinPath);
+            tournament.setOpeningPgnFileName(selectedOpeningPgn.trim().isEmpty() ? "" : selectedOpeningFileName);
             launchTournament(tournament);
         } catch (Exception e) {
             TournamentRunner failedRunner = runner;
@@ -4240,6 +4342,7 @@ public final class TournamentActivity extends Activity {
             } catch (SecurityException ignored) { }
             engineIconFolderUri = tree;
             engineIconUris.clear(); engineIconBitmaps.clear(); engineIconFolderScanned = false;
+            invalidateAllMirrorSectionCaches(); clearMirrorSubCaches();
             if (engineIconFolderButton != null) engineIconFolderButton.setText("Icon folder selected · change folder");
             saveSetup();
             if (isMirrorShowing()) { updateMirrorRankedNames(); renderMirrorSection(); }
@@ -4772,13 +4875,21 @@ public final class TournamentActivity extends Activity {
                         int openingNumber = tournament.openingStartIndex() + Math.max(0, pairing.index / 2);
                         openingStartInput.setText(String.valueOf(openingNumber));
                     }
-                    stopMirrorAnalysis();
+                    if (mirrorAnalysisEngine != null) { try { mirrorAnalysisEngine.stopSearch(); } catch (RuntimeException ignored) { } }
                     mirrorReplayPgn = "";
                     currentPgnMoves = "";
+                    lastWhiteAnalysis = "Book."; lastBlackAnalysis = "Book."; mirrorLastMoveTimeMs = 0;
+                    mirrorLatestAnalysisOutput = "Select an engine, then turn analysis on.";
+                    mirrorLiveSanMoves.clear(); mirrorLiveAnalysisByPly.clear();
+                    invalidateAllMirrorSectionCaches();
+                    clearMirrorSubCaches();
                     mirrorPositions.clear();
                     mirrorLiveHistoryInitialized = false;
                     if (!mirrorReplayMode) mirrorPly = -1;
+                    latestPosition = new Position();
                     mirrorPositions.add(new Position(latestPosition));
+                    if (tournamentBoard != null) tournamentBoard.setPosition(new Position(latestPosition));
+                    if (mirrorBoard != null) mirrorBoard.setPosition(new Position(latestPosition));
                     whiteHintMove = null; blackHintMove = null;
                     if (tournamentBoard != null) { tournamentBoard.setMoveHints(null); tournamentBoard.setSelection(-1); }
                     if (mirrorBoard != null) mirrorBoard.setSelection(-1);
@@ -4793,9 +4904,7 @@ public final class TournamentActivity extends Activity {
                     updateTurnNameLabels();
                     if (mirrorEventTitleText != null) mirrorEventTitleText.setText(tournament.title());
                     refreshMirrorRanks();
-                    if (!mirrorReplayMode && mirrorSelectedTab == 0 && isMirrorShowing()) renderMirrorSection();
-                    else if (mirrorSelectedTab == 1 && mirrorStandingsSubTab == 1 && isMirrorShowing()) renderMirrorSection();
-                    else if (mirrorSelectedTab == 2 && isMirrorShowing()) renderMirrorScheduleSection();
+                    if (!mirrorReplayMode && isMirrorShowing()) renderMirrorSection();
                 });
             }
             @Override public void onPositionChanged(Position position, boolean whiteToMove,
@@ -4809,6 +4918,12 @@ public final class TournamentActivity extends Activity {
                                                     org.petero.droidfish.gamelogic.Move lastMove) {
                 final org.petero.droidfish.gamelogic.Move moveToHighlight = lastMove;
                 runOnUiThread(() -> {
+                    Position previousPosition = mirrorPositions.isEmpty() ? null : new Position(mirrorPositions.get(mirrorPositions.size() - 1));
+                    if (lastMove != null && previousPosition != null) {
+                        try { mirrorLiveSanMoves.add(TextIO.moveToString(previousPosition, lastMove, false, false)); }
+                        catch (RuntimeException ignored) { }
+                        mirrorLiveAnalysisByPly.add(whiteToMove ? lastWhiteAnalysis : lastBlackAnalysis);
+                    }
                     latestPosition = new Position(position);
                     whiteHintMove = null;
                     blackHintMove = null;
@@ -4821,10 +4936,15 @@ public final class TournamentActivity extends Activity {
                     ensureMirrorHistoryMatchesLivePgn(position, rebuildMirrorHistory);
                     mirrorLiveHistoryInitialized = true;
                     if (isMirrorShowing() && !mirrorReplayMode && mirrorPly < 0) syncMirrorFromLive();
-                    if (isMirrorShowing() && !mirrorReplayMode && mirrorSelectedTab == 0) {
-                        renderMirrorSection();
-                        if (mirrorMovesSubTab == 1 && mirrorAnalysisOn && mirrorPly < 0 && !mirrorBoardOnlyMode) startMirrorAnalysis();
-                    } else if (isMirrorShowing() && !mirrorReplayMode && mirrorSelectedTab == 1 && mirrorStandingsSubTab == 1) renderMirrorSection();
+                    invalidateMirrorMovesSubCache(0);
+                    invalidateMirrorSectionCache(0);
+                    if (mirrorScheduleList != null && mirrorScheduleList.getAdapter() instanceof android.widget.BaseAdapter)
+                        ((android.widget.BaseAdapter) mirrorScheduleList.getAdapter()).notifyDataSetChanged();
+                    invalidateMirrorStandingsSubCache(1);
+                    if (mirrorSelectedTab == 1 && mirrorStandingsSubTab == 1) invalidateMirrorSectionCache(1);
+                    if (isMirrorShowing() && !mirrorReplayMode && (mirrorSelectedTab == 0 ||
+                            (mirrorSelectedTab == 1 && mirrorStandingsSubTab == 1))) renderMirrorSection();
+                    if (!mirrorReplayMode && mirrorAnalysisOn && mirrorAnalysisEngineActive && mirrorPly < 0) startMirrorAnalysis();
                     if (tournamentBoard != null && !isMirrorShowing()) {
                         tournamentBoard.setPosition(position);
                         tournamentBoard.setSelection(tournamentBoard.highlightLastMove && moveToHighlight != null ? moveToHighlight.to : -1);
@@ -4896,6 +5016,7 @@ public final class TournamentActivity extends Activity {
             }
             @Override public void onMoveTime(boolean whiteMoved, long moveTimeMs, String openingName) {
                 runOnUiThread(() -> {
+                    mirrorLastMoveTimeMs = Math.max(0, moveTimeMs);
                     TextView target = whiteMoved ? whiteMoveTimeText : blackMoveTimeText;
                     if (target != null) target.setText(moveTimeMs <= 0 ? "—" : formatClockDuration(moveTimeMs));
                     if (openingText != null) openingText.setText("Opening: " + (openingName == null || openingName.isEmpty() ? "Starting position" : openingName));
@@ -4933,8 +5054,9 @@ public final class TournamentActivity extends Activity {
                             android.widget.Toast.LENGTH_LONG).show();
                     standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
                     refreshMirrorRanks();
-                    if (mirrorSelectedTab == 1 && isMirrorShowing()) renderMirrorStandingsSection();
-                    if (mirrorSelectedTab == 2 && isMirrorShowing()) renderMirrorScheduleSection();
+                    invalidateMirrorStandingsSubCache(0); invalidateMirrorStandingsSubCache(2);
+                    invalidateMirrorSectionCache(1); invalidateMirrorSectionCache(2); invalidateMirrorSectionCache(3);
+                    if (isMirrorShowing() && (mirrorSelectedTab == 1 || mirrorSelectedTab == 2 || mirrorSelectedTab == 3)) renderMirrorSection();
                     invalidateCachedSchedule(tournament);
                     if (cachedAnomalyDialog != null && cachedAnomalyDialog.isShowing() &&
                             cachedAnomalyTournament == tournament && cachedAnomalySummary != null && cachedAnomalyRows != null)
@@ -5334,7 +5456,7 @@ public final class TournamentActivity extends Activity {
 
     @Override protected void onPause() {
         activityVisible = false;
-        stopMirrorAnalysis();
+        if (mirrorAnalysisEngine != null) { try { mirrorAnalysisEngine.stopSearch(); } catch (RuntimeException ignored) { } }
         saveSetup();
         if (runner != null && !runner.isPaused()) {
             runner.pause();
@@ -5350,13 +5472,14 @@ public final class TournamentActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         activityVisible = true;
-        // Do not auto-resume when returning from Home/Recents. The user explicitly taps Play.
+        if (mirrorAnalysisOn && mirrorAnalysisEngineActive) startMirrorAnalysis();
+        // Do not auto-resume the tournament when returning from Home/Recents. The user explicitly taps Play.
         if (runner != null && runner.isPaused() && playPauseButton != null) playPauseButton.setText("Play");
     }
 
     @Override protected void onDestroy() {
         stopMirrorAutoPlay();
-        stopMirrorAnalysis();
+        stopMirrorAnalysisEngineOnly();
         stopGameViewerAnalysis();
         uiHandler.removeCallbacks(clockRefresh);
         if (runner != null) {
