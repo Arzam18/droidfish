@@ -1,0 +1,1074 @@
+package org.petero.droidfish.tournament;
+
+import android.util.Pair;
+import org.petero.droidfish.EngineOptions;
+import org.petero.droidfish.PGNOptions;
+import org.petero.droidfish.book.BookOptions;
+import org.petero.droidfish.book.TournamentBinBook;
+import org.petero.droidfish.gamelogic.TextIO;
+import org.petero.droidfish.engine.DroidComputerPlayer;
+import org.petero.droidfish.engine.UCIOptions;
+import org.petero.droidfish.gamelogic.Game;
+import org.petero.droidfish.gamelogic.GameTree;
+import org.petero.droidfish.gamelogic.Move;
+import org.petero.droidfish.gamelogic.PgnToken;
+import org.petero.droidfish.gamelogic.Position;
+import org.petero.droidfish.gamelogic.SearchListener;
+import org.petero.droidfish.gamelogic.TimeControlData;
+
+import java.io.IOException;
+import org.json.JSONException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * Runs a saved tournament with two independent UCI engine processes.
+ * Calls to Listener are made from the engine callback thread; marshal UI updates to the main thread.
+ */
+public final class TournamentRunner {
+    public interface Listener {
+        void onGameStarted(TournamentManager.Pairing pairing, String whiteName, String blackName);
+        /** Current tournament position, copied so the UI can safely render it. */
+        void onPositionChanged(Position position, boolean whiteToMove, long whiteTimeMs, long blackTimeMs,
+                               String whiteName, String blackName, String pgnMoves);
+        /** Current position plus the actual move that led to it, for last-move highlighting. */
+        default void onPositionChanged(Position position, boolean whiteToMove, long whiteTimeMs, long blackTimeMs,
+                                       String whiteName, String blackName, String pgnMoves, Move lastMove) {
+            onPositionChanged(position, whiteToMove, whiteTimeMs, blackTimeMs, whiteName, blackName, pgnMoves);
+        }
+        /** Persistent per-engine analysis text; each side retains its last line after moving. */
+        void onEngineAnalysis(boolean white, String analysis);
+        void onReviewPosition(Position position, int ply, int totalPlies, String whiteAnalysis, String blackAnalysis, long moveTimeMs);
+        void onMoveTime(boolean whiteMoved, long moveTimeMs, String openingName);
+        void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn);
+        /** Result plus the concrete rule/termination reason for the result announcement. */
+        default void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome,
+                                    String pgn, String reason) {
+            onGameFinished(pairing, outcome, pgn);
+        }
+        void onTournamentFinished();
+        void onError(String message, Throwable error);
+    }
+
+    private final TournamentManager tournament;
+    private final Listener listener;
+    private final EngineOptions engineOptions;
+    private final BookOptions bookOptions;
+    private final PGNOptions pgnOptions;
+    private final long baseTimeMs, incrementMs;
+    private final String openingPgn;
+    private final int openingPlies;
+    private final int openingStartIndex;
+    private final boolean repeatOpening;
+    private final double autoWinThreshold;
+    private final boolean fastWinEnabled;
+    private volatile double latestWhiteEvalPawns = Double.NaN;
+    private volatile double latestBlackEvalPawns = Double.NaN;
+    private final DroidComputerPlayer whitePlayer, blackPlayer;
+    private final EngineListener whiteAnalysisListener, blackAnalysisListener;
+    private Game game;
+    private volatile CetClock clock;
+    private TournamentManager.Pairing pairing;
+    private TournamentManager.Engine whiteEngine, blackEngine;
+    private final Map<String, Map<String, String>> tournamentUciOptionValues = new HashMap<>();
+    private int whiteSearchId, blackSearchId;
+    private volatile int activeWhiteId, activeBlackId;
+    private long turnGeneration;
+    private volatile boolean stopped, finished, paused;
+    private final ArrayList<Position> positionHistory = new ArrayList<>();
+    private final ArrayList<String> whiteAnalysisHistory = new ArrayList<>();
+    private final ArrayList<String> blackAnalysisHistory = new ArrayList<>();
+    private final ArrayList<Long> moveTimeHistory = new ArrayList<>();
+    private int reviewPly = -1;
+    private String currentOpeningName = "Starting position";
+    private String latestWhiteAnalysis = "WHITE analysis waiting…";
+    private String latestBlackAnalysis = "BLACK analysis waiting…";
+    private long lastMoveTimeMs;
+    private long currentTurnStartedNs;
+    private boolean humanAdjudication;
+    private boolean drawRulesEnabled = true;
+    private int drawMoveLimit = 50;
+    private int drawRepetitionLimit = 3;
+    private int drawMaximumFullMoves = 160;
+    private int ruleStartFullMove = 1;
+    private double evalDrawScore = 0.12;
+    private int evalDrawCondition = 6;
+    private int evalDrawConsecutive = 0;
+    private int evalDrawLastFullMove = -1;
+
+    /** Configure tournament-only automatic draw adjudication before start(). */
+    public synchronized void configureDrawRules(boolean enabled, int moveRule, int repetitionCount, int maximumFullMoves) {
+        configureDrawRules(enabled, moveRule, repetitionCount, maximumFullMoves, 1);
+    }
+    public synchronized void configureEvaluationDrawRule(double scorePawns, int conditionFullMoves) {
+        if (game != null || pairing != null) throw new IllegalStateException("Draw rules must be configured before starting the tournament");
+        evalDrawScore = Double.isFinite(scorePawns) && scorePawns >= 0 ? Math.min(100.0, scorePawns) : 0.12;
+        evalDrawCondition = Math.max(1, Math.min(10000, conditionFullMoves));
+    }
+
+    public synchronized void configureDrawRules(boolean enabled, int moveRule, int repetitionCount, int maximumFullMoves, int startFullMove) {
+        if (game != null || pairing != null) throw new IllegalStateException("Draw rules must be configured before starting the tournament");
+        drawRulesEnabled = enabled;
+        drawMoveLimit = Math.max(1, Math.min(10000, moveRule));
+        drawRepetitionLimit = Math.max(2, Math.min(100, repetitionCount));
+        drawMaximumFullMoves = Math.max(1, Math.min(10000, maximumFullMoves));
+        ruleStartFullMove = Math.max(1, Math.min(10000, startFullMove));
+    }
+
+    private boolean applyConfiguredDrawRules() {
+        if (!drawRulesEnabled || game == null) return false;
+        Position pos = game.currPos();
+        if (pos.fullMoveCounter < ruleStartFullMove) return false;
+        if (pos.halfMoveClock >= drawMoveLimit * 2) {
+            game.adjudicateTournament("1/2-1/2");
+            finishCurrentGame(TournamentManager.Outcome.DRAW, "50-move rule");
+            return true;
+        }
+        if (pos.fullMoveCounter > drawMaximumFullMoves) {
+            game.adjudicateTournament("1/2-1/2");
+            finishCurrentGame(TournamentManager.Outcome.DRAW, "maximum-move rule");
+            return true;
+        }
+        long hash = pos.zobristHash(); int occurrences = 0;
+        for (Position historic : positionHistory) if (historic.zobristHash() == hash) occurrences++;
+        if (occurrences >= drawRepetitionLimit) {
+            game.adjudicateTournament("1/2-1/2");
+            finishCurrentGame(TournamentManager.Outcome.DRAW, "threefold repetition");
+            return true;
+        }
+        return false;
+    }
+
+    public TournamentRunner(TournamentManager tournament, Listener listener,
+                            EngineOptions engineOptions, BookOptions bookOptions,
+                            long baseTimeMs, long incrementMs,
+                            String openingPgn, int openingPlies) {
+        this(tournament, listener, engineOptions, bookOptions, baseTimeMs, incrementMs, openingPgn, openingPlies, false);
+    }
+
+    public TournamentRunner(TournamentManager tournament, Listener listener,
+                            EngineOptions engineOptions, BookOptions bookOptions,
+                            long baseTimeMs, long incrementMs,
+                            String openingPgn, int openingPlies, boolean repeatOpening) {
+        this(tournament, listener, engineOptions, bookOptions, baseTimeMs, incrementMs, openingPgn, openingPlies, repeatOpening, tournament == null ? 1 : tournament.openingStartIndex());
+    }
+
+    public TournamentRunner(TournamentManager tournament, Listener listener,
+                            EngineOptions engineOptions, BookOptions bookOptions,
+                            long baseTimeMs, long incrementMs,
+                            String openingPgn, int openingPlies, boolean repeatOpening, int openingStartIndex) {
+        this(tournament, listener, engineOptions, bookOptions, baseTimeMs, incrementMs, openingPgn, openingPlies, repeatOpening, openingStartIndex, 10.0, false);
+    }
+
+    public TournamentRunner(TournamentManager tournament, Listener listener,
+                            EngineOptions engineOptions, BookOptions bookOptions,
+                            long baseTimeMs, long incrementMs,
+                            String openingPgn, int openingPlies, boolean repeatOpening, int openingStartIndex,
+                            double autoWinThreshold, boolean fastWinEnabled) {
+        if (tournament == null || listener == null) throw new IllegalArgumentException("Tournament and listener are required");
+        if (baseTimeMs < 1 || baseTimeMs > Integer.MAX_VALUE || incrementMs < 0 || incrementMs > Integer.MAX_VALUE)
+            throw new IllegalArgumentException("Time values are outside supported UCI millisecond range");
+        this.tournament = tournament;
+        this.listener = listener;
+        this.engineOptions = engineOptions == null ? new EngineOptions() : engineOptions;
+        this.bookOptions = bookOptions == null ? new BookOptions() : bookOptions;
+        this.baseTimeMs = baseTimeMs;
+        this.incrementMs = incrementMs;
+        this.openingPgn = openingPgn == null ? "" : openingPgn;
+        this.openingPlies = Math.max(0, openingPlies);
+        this.repeatOpening = repeatOpening;
+        this.openingStartIndex = Math.max(1, openingStartIndex);
+        this.autoWinThreshold = autoWinThreshold > 0.0 && !Double.isInfinite(autoWinThreshold) && !Double.isNaN(autoWinThreshold) ? autoWinThreshold : 10.0;
+        this.fastWinEnabled = fastWinEnabled;
+        pgnOptions = new PGNOptions();
+        // Tournament move comments are part of the exported record, not optional UI comments.
+        pgnOptions.exp.comments = true;
+        whiteAnalysisListener = new EngineListener(true);
+        blackAnalysisListener = new EngineListener(false);
+        whitePlayer = new DroidComputerPlayer(whiteAnalysisListener);
+        blackPlayer = new DroidComputerPlayer(blackAnalysisListener);
+        // Keep the final-info flush specific to tournament PGN capture; normal
+        // DroidFish analysis/search sessions retain their existing update cadence.
+        whitePlayer.setFlushAnalysisBeforeResult(true);
+        blackPlayer.setFlushAnalysisBeforeResult(true);
+        whitePlayer.setEngineOptions(this.engineOptions);
+        blackPlayer.setEngineOptions(this.engineOptions);
+        // A PGN opening book is authoritative for tournament starts. Do not let
+        // DroidFish's own Polyglot/CTG/ECO/internal book replace the selected line.
+        BookOptions tournamentBookOptions = new BookOptions(this.bookOptions);
+        if (!this.openingPgn.trim().isEmpty() || !tournament.openingBinPath().trim().isEmpty()) {
+            tournamentBookOptions.filename = "";
+            tournamentBookOptions.maxLength = 0;
+            tournamentBookOptions.preferMainLines = false;
+        }
+        whitePlayer.setBookOptions(tournamentBookOptions);
+        blackPlayer.setBookOptions(tournamentBookOptions);
+    }
+
+    public void start() {
+        synchronized (this) {
+            if (stopped) throw new IllegalStateException("Runner has been stopped");
+        }
+        // Opening playback deliberately waits 500 ms per ply. Never run that loop on
+        // the Android UI thread: queued board updates would otherwise all render at once.
+        Thread starter = new Thread(() -> {
+            synchronized (TournamentRunner.this) {
+                if (stopped || finished || paused) return;
+            }
+            startNextGame();
+        }, "Tournament-Game-Starter");
+        starter.setDaemon(true);
+        starter.start();
+    }
+
+    /** Pause without discarding the current game, position, or completed schedule. */
+    public synchronized void pause() {
+        if (stopped || finished || paused) return;
+        paused = true;
+        turnGeneration++;
+        if (clock != null) clock.pause();
+        // Keep both UCI processes loaded. Stop only their current searches; pause/resume
+        // should not pay the engine startup and NNUE-loading cost again.
+        whitePlayer.stopSearch();
+        blackPlayer.stopSearch();
+    }
+
+    /** Resume the same in-memory game position using the already-loaded UCI processes. */
+    public synchronized void resume() {
+        if (stopped || finished || !paused) return;
+        paused = false;
+        if (game == null || pairing == null) {
+            startNextGame();
+            return;
+        }
+        // The engines were deliberately not unloaded on pause. Re-queue their configured
+        // engine IDs (a no-op when the correct process is already loaded) and continue from
+        // the exact same Game position.
+        activeWhiteId = ++whiteSearchId;
+        activeBlackId = ++blackSearchId;
+        whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.executableId);
+        blackPlayer.queueStartEngine(activeBlackId, blackEngine.executableId);
+        // This is a continuation of the same in-memory game. Do not emit
+        // onGameStarted here: the UI treats that callback as a new-game reset.
+        notifyPosition();
+        requestMove(game.currPos().whiteMove);
+    }
+
+    public synchronized boolean isPaused() { return paused; }
+    public boolean isFinished() { return finished; }
+
+    /** Return the UCI options for the explicitly selected side, not the side to move. */
+    public synchronized UCIOptions getUciOptionsForTournamentEngine(boolean whiteSide, String engineId) {
+        TournamentManager.Engine engine = whiteSide ? whiteEngine : blackEngine;
+        if (engineId == null || engine == null || !engineId.equals(engine.id)) return null;
+        return (whiteSide ? whitePlayer : blackPlayer).getUCIOptions();
+    }
+
+    /** Apply edited values to the exact side and retain them across engine restarts. */
+    public synchronized void setUciOptionsForTournamentEngine(boolean whiteSide, String engineId,
+                                                                Map<String, String> options) {
+        TournamentManager.Engine engine = whiteSide ? whiteEngine : blackEngine;
+        if (engineId == null || engine == null || !engineId.equals(engine.id) || options == null) return;
+        Map<String, String> saved = tournamentUciOptionValues.get(engineId);
+        if (saved == null) {
+            saved = new HashMap<>();
+            tournamentUciOptionValues.put(engineId, saved);
+        }
+        saved.putAll(options);
+        (whiteSide ? whitePlayer : blackPlayer).setEngineUCIOptions(options);
+    }
+    public boolean isStopped() { return stopped; }
+    private boolean usesClock() {
+        TournamentManager.TimeMode mode = tournament.timeMode();
+        return mode == TournamentManager.TimeMode.CLOCK || mode == TournamentManager.TimeMode.MOVE_PERIOD;
+    }
+
+    public synchronized long remainingMs(boolean white) {
+        CetClock c = clock;
+        if (c == null || !usesClock()) return -1;
+        return c.remainingMs(white);
+    }
+    public synchronized boolean whiteToMove() { return game != null && game.currPos().whiteMove; }
+    public synchronized long activeMoveTimeMs() {
+        if(game==null || pairing==null || paused || finished || stopped || currentTurnStartedNs==0) return -1;
+        return Math.max(0,(System.nanoTime()-currentTurnStartedNs)/1_000_000L);
+    }
+
+    public synchronized void stop() {
+        stopped = true;
+        paused = false;
+        turnGeneration++;
+        if (clock != null) clock.pause();
+        whitePlayer.shutdownEngine();
+        blackPlayer.shutdownEngine();
+    }
+
+    /** Navigate completed plies while paused; -1 means return to live position. */
+    public synchronized void reviewPreviousMove() {
+        if (!paused || game == null || positionHistory.isEmpty()) return;
+        if (reviewPly < 0) reviewPly = Math.max(0, positionHistory.size() - 2);
+        else reviewPly = Math.max(0, reviewPly - 1);
+        publishReviewPosition();
+    }
+
+    public synchronized void reviewNextMove() {
+        if (!paused || game == null || positionHistory.isEmpty()) return;
+        if (reviewPly < 0) return;
+        if (reviewPly >= positionHistory.size() - 1) reviewPly = -1;
+        else reviewPly++;
+        publishReviewPosition();
+    }
+
+    public synchronized void adjudicate(String result) {
+        if (stopped || finished || paused == false || game == null || pairing == null) return;
+        if (!("1-0".equals(result) || "0-1".equals(result) || "1/2-1/2".equals(result))) return;
+        turnGeneration++;
+        clock.pause();
+        whitePlayer.stopSearch();
+        blackPlayer.stopSearch();
+        humanAdjudication = true;
+        game.adjudicateTournament(result);
+        TournamentManager.Outcome outcome = "1-0".equals(result) ? TournamentManager.Outcome.WHITE_WIN :
+                "0-1".equals(result) ? TournamentManager.Outcome.BLACK_WIN : TournamentManager.Outcome.DRAW;
+        finishCurrentGame(outcome, "manual adjudication");
+    }
+
+    private void publishReviewPosition() {
+        int index = reviewPly < 0 ? positionHistory.size() - 1 : reviewPly;
+        if (index < 0 || index >= positionHistory.size()) return;
+        listener.onReviewPosition(new Position(positionHistory.get(index)), index, positionHistory.size() - 1,
+                whiteAnalysisHistory.get(index), blackAnalysisHistory.get(index), moveTimeHistory.get(index));
+    }
+
+    private void recordPosition(long moveTimeMs) {
+        positionHistory.add(new Position(game.currPos()));
+        whiteAnalysisHistory.add(latestWhiteAnalysis);
+        blackAnalysisHistory.add(latestBlackAnalysis);
+        moveTimeHistory.add(Math.max(0, moveTimeMs));
+        reviewPly = -1;
+    }
+
+    /** Select a BIN line on a throwaway position so it can be persisted before replaying it. */
+    private ArrayList<String> selectBinOpeningLine(String path) {
+        ArrayList<String> selected = new ArrayList<>();
+        Game probe = new Game(new EmptyPgnReceiver(), new TimeControlData());
+        TournamentBinBook binBook = new TournamentBinBook(path);
+        int limit = openingPlies <= 0 ? 256 : openingPlies;
+        for (int ply = 0; ply < limit; ply++) {
+            Move move = binBook.choose(probe);
+            if (move == null) break;
+            String san = TextIO.moveToString(probe.currPos(), move, false, false);
+            Pair<Boolean, Move> result = probe.processString(san);
+            if (result == null || !Boolean.TRUE.equals(result.first) || result.second == null) break;
+            selected.add(san);
+            if (probe.getGameState() != Game.GameState.ALIVE) break;
+        }
+        return selected;
+    }
+
+    /** Apply the exact stored SAN line for this pairing and publish each opening ply. */
+    private int applyAssignedOpening(String sanLine) {
+        if (sanLine == null || sanLine.trim().isEmpty()) return 0;
+        int applied = 0;
+        int delayMs = currentOpeningName.toLowerCase(java.util.Locale.US).contains("polyglot") ? 250 : 500;
+        for (String san : sanLine.trim().split("\\s+")) {
+            Pair<Boolean, Move> result = game.processString(san);
+            if (result == null || !Boolean.TRUE.equals(result.first) || result.second == null) break;
+            applied++;
+            addCurrentMoveComment("Book.");
+            listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove, 0, 0,
+                    whiteEngine.displayName, blackEngine.displayName, currentPgnMoves(), game.getLastMove());
+            try { Thread.sleep(delayMs); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            if (game.getGameState() != Game.GameState.ALIVE) break;
+        }
+        return applied;
+    }
+
+    private void startNextGame() {
+        if (stopped || finished || paused) return;
+        pairing = tournament.current();
+        latestWhiteEvalPawns = Double.NaN;
+        latestBlackEvalPawns = Double.NaN;
+        evalDrawConsecutive = 0; evalDrawLastFullMove = -1;
+        if (pairing == null) {
+            finished = true;
+            whitePlayer.shutdownEngine();
+            blackPlayer.shutdownEngine();
+            listener.onTournamentFinished();
+            return;
+        }
+        try {
+            tournament.setActivePairing(pairing.index);
+        } catch (IOException | JSONException activeSaveError) {
+            listener.onError("Could not save active scheduled game", activeSaveError);
+            stop();
+            return;
+        }
+        whiteEngine = findEngine(pairing.whiteEngineId);
+        blackEngine = findEngine(pairing.blackEngineId);
+        TimeControlData tc = new TimeControlData();
+        if (tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD)
+            tc.setTimeControl((int)baseTimeMs, tournament.limitValue(), (int)baseTimeMs);
+        else
+            tc.setTimeControl((int)baseTimeMs, 0, (int)incrementMs);
+        game = new Game(new EmptyPgnReceiver(), tc);
+        game.tree.setPlayerNames(whiteEngine.displayName, blackEngine.displayName);
+        positionHistory.clear(); whiteAnalysisHistory.clear(); blackAnalysisHistory.clear(); moveTimeHistory.clear();
+        reviewPly = -1; lastMoveTimeMs = 0; humanAdjudication = false;
+        latestWhiteAnalysis = "WHITE analysis waiting…"; latestBlackAnalysis = "BLACK analysis waiting…";
+        currentOpeningName = "Starting position";
+        String eventType = tournament.format().name().toLowerCase(java.util.Locale.US).replace('_', ' ');
+        String pgnTimeControl = tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD
+                ? tournament.limitValue() + "/" + (baseTimeMs / 1000)
+                : (baseTimeMs / 1000) + "+" + String.format(java.util.Locale.US, "%g", incrementMs / 1000.0);
+        game.tree.setTournamentMetadata(tournament.pgnEventName(pairing), "DroidFish", pgnRoundNumber(pairing) + "." + gameNumberInRound(pairing),
+                eventType, pgnTimeControl);
+        try {
+            game.tree.setTournamentDate(tournament.ensurePairingPgnDate(pairing.index));
+        } catch (IOException | JSONException dateError) {
+            listener.onError("Could not save scheduled game date", dateError);
+            stop();
+            return;
+        }
+        clock = tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD
+                ? new CetClock(baseTimeMs, baseTimeMs, tournament.limitValue())
+                : new CetClock(baseTimeMs, incrementMs);
+
+        // Every pairing owns a persisted opening assignment. PGN assignments are
+        // prepared with the tournament; BIN lines are drawn once on first use and
+        // persisted before engines begin. Replay therefore cannot consume a new
+        // opening number or make a different random Polyglot selection.
+        try {
+            if (!pairing.openingAssigned) {
+                if (!tournament.openingBinPath().trim().isEmpty()) {
+                    ArrayList<String> selectedLine = selectBinOpeningLine(tournament.openingBinPath());
+                    tournament.setPairingOpeningIfMissing(pairing.index, selectedLine, "Polyglot BIN opening");
+                } else {
+                    tournament.prepareOpeningAssignments();
+                }
+            }
+        } catch (IOException | JSONException openingSaveError) {
+            listener.onError("Could not save scheduled opening assignment", openingSaveError);
+            stop();
+            return;
+        }
+        pairing = tournament.pairings().get(pairing.index);
+        currentOpeningName = pairing.openingName == null || pairing.openingName.trim().isEmpty()
+                ? "Starting position" : pairing.openingName;
+        game.tree.setTournamentOpening(currentOpeningName);
+        // Publish the new game before the opening callbacks. The Mirror Board
+        // clears its previous game's move history in onGameStarted.
+        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
+        int appliedPlies = applyAssignedOpening(pairing.openingSanLine);
+        if (appliedPlies == 0 && pairing.openingSanLine != null && !pairing.openingSanLine.trim().isEmpty()) {
+            listener.onError("The saved opening assignment for Game " + (pairing.index + 1) +
+                    " contains no legal moves from the starting position.", null);
+            stop();
+            return;
+        }
+        if (game.getGameState() != Game.GameState.ALIVE) {
+            finishCurrentGame(resultForState(game.getGameState()));
+            return;
+        }
+        if (tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD) {
+            // Opening PGN/BIN plies are already present on the board before the engines
+            // start. Count those completed moves toward each side's first time control.
+            Position openingPosition = game.currPos();
+            int completedBlackMoves = Math.max(0, openingPosition.fullMoveCounter - 1);
+            int completedWhiteMoves = completedBlackMoves + (openingPosition.whiteMove ? 0 : 1);
+            clock.setMovesPlayed(completedWhiteMoves, completedBlackMoves);
+        }
+        recordPosition(0);
+        listener.onMoveTime(false, 0, currentOpeningName);
+        whitePlayer.setEngineOptions(engineOptions);
+        blackPlayer.setEngineOptions(engineOptions);
+        whitePlayer.uciNewGame();
+        blackPlayer.uciNewGame();
+        activeWhiteId = ++whiteSearchId;
+        activeBlackId = ++blackSearchId;
+        whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.executableId);
+        blackPlayer.queueStartEngine(activeBlackId, blackEngine.executableId);
+        notifyPosition();
+        requestMove(game.currPos().whiteMove);
+    }
+
+    /**
+     * PGN metadata preserves the existing round-robin cycle convention.
+     * Swiss uses the manager's explicit round and per-round game number.
+     */
+    private int gamesPerPgnRound() {
+        if (tournament.format() == TournamentManager.Format.ROUND_ROBIN) {
+            int n = tournament.engines().size();
+            return Math.max(1, (n * (n - 1) / 2) * tournament.gamesPerPair());
+        }
+        return Math.max(1, tournament.pairings().size());
+    }
+
+    private int pgnRoundNumber(TournamentManager.Pairing target) {
+        if (tournament.format() == TournamentManager.Format.SWISS || tournament.format() == TournamentManager.Format.CUP) return Math.max(1, target.round);
+        return Math.max(1, target.index / gamesPerPgnRound() + 1);
+    }
+
+    /** Sequential game number inside the complete tournament round. */
+    private String gameNumberInRound(TournamentManager.Pairing target) {
+        if (tournament.format() == TournamentManager.Format.SWISS || tournament.format() == TournamentManager.Format.CUP) return Integer.toString(target.gameNumber);
+        return Integer.toString(target.index % gamesPerPgnRound() + 1);
+    }
+
+    private TournamentManager.Engine findEngine(String id) {
+        for (TournamentManager.Engine engine : tournament.engines()) if (engine.id.equals(id)) return engine;
+        throw new IllegalStateException("Tournament references unknown engine: " + id);
+    }
+
+    private synchronized void requestMove(boolean whiteToMove) {
+        if (stopped || finished || paused || game == null || game.getGameState() != Game.GameState.ALIVE) return;
+        if (usesClock() && clock.isExpired()) {
+            game.markTimeout(whiteToMove);
+            finishCurrentGame(resultForState(game.getGameState()));
+            return;
+        }
+        Pair<Position, ArrayList<Move>> history = game.getUCIHistory();
+        // Snapshot before starting the turn: DroidComputerPlayer subtracts the engine-start
+        // delay from the moving side's UCI clock, matching the independently running watchdog.
+        int wTime = (int)Math.max(1, Math.min(Integer.MAX_VALUE, clock.remainingMs(true)));
+        int bTime = (int)Math.max(1, Math.min(Integer.MAX_VALUE, clock.remainingMs(false)));
+        int inc = (int)Math.min(Integer.MAX_VALUE, clock.incrementMs());
+        clock.startTurn(whiteToMove);
+        currentTurnStartedNs = System.nanoTime();
+        final long turnToken = ++turnGeneration;
+        int id;
+        DroidComputerPlayer player;
+        if (whiteToMove) {
+            id = ++whiteSearchId;
+            activeWhiteId = id;
+            player = whitePlayer;
+        } else {
+            id = ++blackSearchId;
+            activeBlackId = id;
+            player = blackPlayer;
+        }
+        DroidComputerPlayer.SearchRequest request;
+        if (tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD) {
+            // Let UCI engines know how many of their moves remain before the next
+            // replenishment (for example: go wtime ... btime ... movestogo 40).
+            request = DroidComputerPlayer.SearchRequest.searchRequest(
+                    id, System.currentTimeMillis(), history.first, history.second,
+                    new Position(game.currPos()), game.haveDrawOffer(), wTime, bTime, 0, 0,
+                    clock.movesToNextPeriod(whiteToMove), false, null,
+                    whiteToMove ? whiteEngine.executableId : blackEngine.executableId, Integer.MAX_VALUE);
+        } else {
+            request = DroidComputerPlayer.SearchRequest.cetSearchRequest(
+                    id, System.currentTimeMillis(), history.first, history.second,
+                    new Position(game.currPos()), game.haveDrawOffer(), wTime, bTime, inc, inc,
+                    whiteToMove ? whiteEngine.executableId : blackEngine.executableId);
+        }
+        switch (tournament.timeMode()) {
+            case MOVE_TIME: request.tournamentGoCommand = "go movetime " + Math.max(1, tournament.limitValue()); break;
+            case DEPTH: request.tournamentGoCommand = "go depth " + Math.max(1, tournament.limitValue()); break;
+            case NODES: request.tournamentGoCommand = "go nodes " + Math.max(1, tournament.limitValue()); break;
+            case CLOCK: default: break;
+        }
+        (whiteToMove ? whiteAnalysisListener : blackAnalysisListener).beginSearch();
+        player.queueSearchRequest(request);
+        if (usesClock()) startClockWatchdog(whiteToMove, turnToken);
+    }
+
+    /** Adjudicate flag fall even if an engine hangs and never emits bestmove. */
+    private void startClockWatchdog(final boolean whiteToMove, final long turnToken) {
+        Thread watchdog = new Thread(() -> {
+            while (true) {
+                synchronized (TournamentRunner.this) {
+                    if (stopped || finished || paused || turnToken != turnGeneration || game == null ||
+                            game.getGameState() != Game.GameState.ALIVE || game.currPos().whiteMove != whiteToMove)
+                        return;
+                    if (usesClock() && clock.isExpired()) {
+                        game.markTimeout(whiteToMove);
+                        // A non-responsive engine may never answer stop; kill it so the next
+                        // pairing can start a clean process instead of inheriting a stuck search.
+                        (whiteToMove ? whitePlayer : blackPlayer).shutdownEngine();
+                        turnGeneration++;
+                        finishCurrentGame(resultForState(game.getGameState()));
+                        return;
+                    }
+                }
+                try { Thread.sleep(5); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            }
+        }, "CET-Clock-Watchdog");
+        watchdog.setDaemon(true);
+        watchdog.start();
+    }
+
+    private synchronized void onSearchResult(boolean whiteEngineSide, int id, String cmd,
+                                             boolean acceptedAtArrival, String analysisAtBestMove) {
+        if (stopped || finished || paused || game == null) return;
+        if (whiteEngineSide ? id != activeWhiteId : id != activeBlackId) return;
+        boolean whiteToMove = game.currPos().whiteMove;
+        if (whiteToMove != whiteEngineSide) return;
+        if (!acceptedAtArrival) {
+            game.markTimeout(whiteToMove);
+            turnGeneration++;
+            finishCurrentGame(resultForState(game.getGameState()));
+            return;
+        }
+        turnGeneration++; // Invalidate this turn's watchdog before changing the board.
+        Pair<Boolean, Move> result = game.processString(cmd);
+        if (result == null || !Boolean.TRUE.equals(result.first)) {
+            // Illegal engine output is a loss for the engine that produced it.
+            game.processString("resign");
+            finishCurrentGame(resultForState(game.getGameState()));
+            return;
+        }
+        lastMoveTimeMs = usesClock() ? clock.lastTurnElapsedMs() : Math.max(0, (System.nanoTime() - currentTurnStartedNs) / 1_000_000L);
+        addMoveAnalysisComment(whiteEngineSide, lastMoveTimeMs, analysisAtBestMove);
+        recordPosition(lastMoveTimeMs);
+        listener.onMoveTime(!game.currPos().whiteMove, lastMoveTimeMs, currentOpeningName);
+        notifyPosition();
+        if (applyConfiguredDrawRules()) return;
+        if (game.getGameState() != Game.GameState.ALIVE) {
+            finishCurrentGame(resultForState(game.getGameState()));
+            return;
+        }
+        if (result.second == null) {
+            listener.onError("Engine returned a non-move command without ending the game: " + cmd, null);
+            stop();
+            return;
+        }
+        requestMove(game.currPos().whiteMove);
+    }
+
+    private String currentPgnMoves() {
+        if (game == null || game.tree == null) return "";
+        try {
+            PGNOptions options = new PGNOptions();
+            options.exp.comments = true;
+            options.exp.nag = true;
+            options.exp.variations = false;
+            return game.tree.toPGN(options);
+        } catch (RuntimeException ignored) {
+            return "";
+        }
+    }
+
+    private String clockText(long ms) {
+        long safe = Math.max(0, ms);
+        if (safe < 60000) return String.format(java.util.Locale.US, "%.1f", safe / 1000.0);
+        long tenths = safe / 100;
+        return String.format(java.util.Locale.US, "%d:%02d.%d", tenths / 600, (tenths / 10) % 60, tenths % 10);
+    }
+
+    private String moveTimeText(long ms) {
+        long safe = Math.max(0, ms);
+        if (safe < 60000) return String.format(java.util.Locale.US, "%.2f", safe / 1000.0);
+        return String.format(java.util.Locale.US, "%d:%02d.%02d", safe / 60000, (safe / 1000) % 60, (safe % 1000) / 10);
+    }
+
+    private void addCurrentMoveComment(String comment) {
+        try {
+            android.util.Pair<java.util.List<GameTree.Node>, Integer> list = game.tree.getMoveList();
+            if (list != null && list.first != null && !list.first.isEmpty())
+                list.first.get(list.first.size() - 1).setPostComment(comment);
+        } catch (RuntimeException ignored) { }
+    }
+
+    private void addMoveAnalysisComment(boolean whiteMoved, long moveMs, String analysisAtBestMove) {
+        try {
+            android.util.Pair<java.util.List<GameTree.Node>, Integer> list = game.tree.getMoveList();
+            if (list == null || list.first == null || list.first.isEmpty()) return;
+            GameTree.Node node = list.first.get(list.first.size() - 1);
+            String analysis = analysisAtBestMove;
+            String eval = "n/a", depth = "n/a", nodes = "n/a", nps = "n/a", tbHits = "n/a", wdl = "";
+            if (analysis != null) {
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                        "Eval:\\s*(.*?)\\s+Depth:\\s*(.*?)\\s+Nodes:\\s*(.*?)\\s+NPS:\\s*(\\S+)")
+                        .matcher(analysis.replace('\n', ' '));
+                if (m.find()) {
+                    eval = m.group(1).trim(); depth = m.group(2).trim();
+                    nodes = m.group(3).trim(); nps = m.group(4).trim();
+                }
+                java.util.regex.Matcher tb = java.util.regex.Pattern.compile("TBHits:\\s*(\\S+)").matcher(analysis.replace('\n', ' '));
+                if (tb.find()) tbHits = tb.group(1).trim();
+                java.util.regex.Matcher w = java.util.regex.Pattern.compile(
+                        "W:\\s*(\\d+)%\\s+D:\\s*(\\d+)%\\s+L:\\s*(\\d+)%").matcher(analysis);
+                if (w.find()) wdl = " W:" + w.group(1) + "% D:" + w.group(2) + "% L:" + w.group(3) + "%";
+            }
+            long remaining = clock == null ? 0 : clock.remainingMs(whiteMoved);
+            String comment = "Eval: " + eval + " Depth: " + depth + " Nodes: " + nodes
+                    + " NPS: " + nps + " TBHits: " + tbHits + " Clock: " + clockText(remaining)
+                    + " Time: " + moveTimeText(moveMs) + wdl;
+            // Do not include the engine's PV/variation in the PGN comment.
+            node.setPostComment(comment);
+        } catch (RuntimeException ignored) { }
+    }
+
+    private void notifyPosition() {
+        if (game == null || pairing == null || whiteEngine == null || blackEngine == null) return;
+        // Keep each engine's most recent score across moves. Only the side to move is
+        // searching at a time, so clearing both scores here would make agreement
+        // impossible: the inactive engine cannot produce a fresh score for this ply.
+        CetClock activeClock = clock;
+        long whiteMs = activeClock == null || !usesClock() ? 0 : activeClock.remainingMs(true);
+        long blackMs = activeClock == null || !usesClock() ? 0 : activeClock.remainingMs(false);
+        listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove,
+                whiteMs, blackMs, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves(), game.getLastMove());
+    }
+
+    private String terminationForState(Game.GameState state) {
+        switch (state) {
+            case TIMEOUT_WHITE: case TIMEOUT_BLACK: return "time forfeit";
+            case WHITE_MATE: case BLACK_MATE: return "checkmate";
+            case RESIGN_WHITE: case RESIGN_BLACK: return "resignation";
+            case WHITE_STALEMATE: case BLACK_STALEMATE: return "stalemate";
+            case DRAW_REP: return "threefold repetition";
+            case DRAW_50: return "50-move rule";
+            case DRAW_NO_MATE: return "insufficient mating material";
+            case DRAW_AGREE: return "draw agreement";
+            default: return "adjudication";
+        }
+    }
+
+    private TournamentManager.Outcome resultForState(Game.GameState state) {
+        switch (state) {
+            case WHITE_MATE:
+            case RESIGN_BLACK:
+            case TIMEOUT_BLACK: return TournamentManager.Outcome.WHITE_WIN;
+            case BLACK_MATE:
+            case RESIGN_WHITE:
+            case TIMEOUT_WHITE: return TournamentManager.Outcome.BLACK_WIN;
+            case WHITE_STALEMATE:
+            case BLACK_STALEMATE:
+            case DRAW_REP:
+            case DRAW_50:
+            case DRAW_NO_MATE:
+            case DRAW_AGREE: return TournamentManager.Outcome.DRAW;
+            default: return TournamentManager.Outcome.UNFINISHED;
+        }
+    }
+
+    private void finishCurrentGame(TournamentManager.Outcome outcome) {
+        finishCurrentGame(outcome, null);
+    }
+
+    private synchronized void finishCurrentGame(TournamentManager.Outcome outcome, String explicitReason) {
+        if (stopped || finished || pairing == null || outcome == TournamentManager.Outcome.UNFINISHED) return;
+        turnGeneration++;
+        boolean wasHumanAdjudication = humanAdjudication;
+        String stateReason = terminationForState(game.getGameState());
+        String resultReason = explicitReason != null && !explicitReason.trim().isEmpty() ? explicitReason :
+                (wasHumanAdjudication ? "automatic evaluation adjudication" : stateReason);
+        game.tree.setTournamentTermination(wasHumanAdjudication ? "adjudication" : resultReason);
+        humanAdjudication = false;
+        String pgn = game.tree.toPGN(pgnOptions);
+        try {
+            tournament.recordResult(pairing.index, outcome, pgn, latestWhiteEvalPawns, latestBlackEvalPawns);
+        } catch (IOException | JSONException e) {
+            listener.onError("Could not save tournament result", e);
+            stop();
+            return;
+        } catch (RuntimeException e) {
+            if (tournament.format() != TournamentManager.Format.SWISS && tournament.format() != TournamentManager.Format.CUP) throw e;
+            listener.onError(tournament.format() == TournamentManager.Format.CUP
+                    ? "Could not update the next Cup match" : "Could not update the next Swiss round", e);
+            stop();
+            return;
+        }
+        TournamentManager.Pairing completed = pairing;
+        pairing = null;
+        listener.onGameFinished(completed, outcome, pgn, resultReason);
+        // Do not sleep on the caller: manual adjudication can originate on the UI thread.
+        // A separate continuation lets Android render the result for at least 500 ms.
+        Thread advance = new Thread(() -> {
+            try { Thread.sleep(500); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            synchronized (TournamentRunner.this) {
+                if (stopped || finished || paused) return;
+            }
+            startNextGame();
+        }, "Tournament-Next-Game");
+        advance.setDaemon(true);
+        advance.start();
+    }
+
+    private final class EngineListener implements SearchListener {
+        private final boolean white;
+        EngineListener(boolean white) { this.white = white; }
+        private volatile int lastDepth;
+        private volatile long lastNodes;
+        private volatile int lastNps;
+        private volatile long lastTbHits;
+        private volatile int lastTimeMs;
+        private volatile String lastPv = "";
+        private volatile boolean hasCurrentSearchInfo;
+        // Keep the newest raw PV and format it only when the UI snapshot is due.
+        // PV callbacks can arrive much faster than a human can read them.
+        private Position pendingPvPosition;
+        private SearchListener.PvInfo pendingPvInfo;
+        private boolean pendingPvNeedsFormatting;
+        private long lastPublishNs;
+        private static final long ANALYSIS_PUBLISH_INTERVAL_NS = 250_000_000L;
+
+        void beginSearch() {
+            lastDepth = 0;
+            lastNodes = 0;
+            lastNps = 0;
+            lastTbHits = 0;
+            lastTimeMs = 0;
+            lastPv = "";
+            pendingPvPosition = null;
+            pendingPvInfo = null;
+            pendingPvNeedsFormatting = false;
+            lastPublishNs = 0;
+            hasCurrentSearchInfo = false;
+            if (white) latestWhiteAnalysis = "WHITE analysis pending…";
+            else latestBlackAnalysis = "BLACK analysis pending…";
+        }
+
+        String snapshotForMove() {
+            if (!hasCurrentSearchInfo) return "Eval: n/a Depth: n/a Nodes: n/a NPS: n/a";
+            // Flush the most recent depth/PV/stats before writing the PGN comment.
+            publishAnalysis(true);
+            return white ? latestWhiteAnalysis : latestBlackAnalysis;
+        }
+
+        private boolean isCurrentSearch(int id) {
+            return !stopped && !finished && (white ? id == activeWhiteId : id == activeBlackId);
+        }
+        @Override public void notifyDepth(int id, int depth) {
+            if (!isCurrentSearch(id)) return;
+            lastDepth = depth;
+            hasCurrentSearchInfo = true;
+            publishAnalysis(false);
+        }
+        @Override public void notifyCurrMove(int id, Position pos, Move move, int moveNr) { }
+        @Override public void notifyPV(int id, Position pos, ArrayList<PvInfo> pvInfo, Move ponderMove) {
+            if (!isCurrentSearch(id)) return;
+            if (pvInfo != null && !pvInfo.isEmpty()) {
+                PvInfo pv = pvInfo.get(0);
+                if (pv == null) return;
+
+                // Retain every newest engine measurement and evaluation for rules
+                // and the final PGN snapshot, but defer expensive SAN formatting.
+                int whitePerspectiveScore = white ? pv.score : -pv.score;
+                if (!pv.isMate) {
+                    double evalPawns = whitePerspectiveScore / 100.0;
+                    if (white) latestWhiteEvalPawns = evalPawns; else latestBlackEvalPawns = evalPawns;
+                    checkFastWinRule();
+                    checkEvaluationDrawRule();
+                }
+                lastDepth = pv.depth;
+                lastNodes = pv.nodes;
+                lastNps = pv.nps;
+                lastTbHits = pv.tbHits;
+                lastTimeMs = pv.time;
+                // DroidComputerPlayer creates a fresh PvInfo snapshot for
+                // each UCI info line. Retain that object directly instead of cloning
+                // the Position and allocating another copy of every PV Move here.
+                // The final best-move snapshot is formatted synchronously below.
+                pendingPvPosition = pos;
+                pendingPvInfo = pv;
+                pendingPvNeedsFormatting = true;
+                hasCurrentSearchInfo = true;
+                publishAnalysis(false);
+            }
+        }
+        @Override public void notifyStats(int id, long nodes, int nps, long tbHits, int hash, int time, int seldepth) {
+            if (!isCurrentSearch(id)) return;
+            lastNodes = nodes; lastNps = nps; lastTbHits = tbHits; lastTimeMs = time;
+            hasCurrentSearchInfo = true;
+            publishAnalysis(false);
+        }
+        @Override public void notifyBookInfo(int id, String bookInfo, ArrayList<Move> moveList, String eco, int distToEcoTree) {
+            if (!isCurrentSearch(id)) return;
+            if (bookInfo != null && !bookInfo.isEmpty()) {
+                lastPv = "Book: " + bookInfo;
+                pendingPvNeedsFormatting = false;
+                hasCurrentSearchInfo = true;
+                publishAnalysis(false);
+            }
+        }
+        private void checkEvaluationDrawRule() {
+            if (!drawRulesEnabled || stopped || finished || paused || game == null || pairing == null) return;
+            double w = latestWhiteEvalPawns, b = latestBlackEvalPawns;
+            if (!Double.isFinite(w) || !Double.isFinite(b)) return;
+            int fullMove = game.currPos().fullMoveCounter;
+            if (fullMove < ruleStartFullMove || fullMove == evalDrawLastFullMove) return;
+            // Count one completed full move only when both independent engine evaluations are in range.
+            if (Math.abs(w) <= evalDrawScore && Math.abs(b) <= evalDrawScore) evalDrawConsecutive++;
+            else evalDrawConsecutive = 0;
+            evalDrawLastFullMove = fullMove;
+            if (evalDrawConsecutive < evalDrawCondition) return;
+            synchronized (TournamentRunner.this) {
+                if (stopped || finished || paused || game == null || pairing == null) return;
+                turnGeneration++; if (clock != null) clock.pause();
+                whitePlayer.stopSearch(); blackPlayer.stopSearch(); humanAdjudication = false;
+                game.adjudicateTournament("1/2-1/2");
+                finishCurrentGame(TournamentManager.Outcome.DRAW, String.format(java.util.Locale.US,
+                        "evaluation draw: both engines within ±%.2f for %d consecutive full moves", evalDrawScore, evalDrawConsecutive));
+            }
+        }
+
+        private void checkFastWinRule() {
+            if (!fastWinEnabled || stopped || finished || paused || game == null || pairing == null) return;
+            if (game.currPos().fullMoveCounter < ruleStartFullMove) return;
+            double whiteEval = latestWhiteEvalPawns;
+            double blackEval = latestBlackEvalPawns;
+            if (Double.isNaN(whiteEval) || Double.isNaN(blackEval)) return;
+            String result = null;
+            // The evaluations are converted to White's perspective above. Both engines
+            // must independently reach the configured threshold or exceed it (>= N).
+            if (whiteEval >= autoWinThreshold && blackEval >= autoWinThreshold) result = "1-0";
+            else if (whiteEval <= -autoWinThreshold && blackEval <= -autoWinThreshold) result = "0-1";
+            if (result == null) return;
+            synchronized (TournamentRunner.this) {
+                if (stopped || finished || paused || game == null || pairing == null) return;
+                turnGeneration++;
+                if (clock != null) clock.pause();
+                whitePlayer.stopSearch();
+                blackPlayer.stopSearch();
+                humanAdjudication = false;
+                game.adjudicateTournament(result);
+                TournamentManager.Outcome outcome = "1-0".equals(result) ? TournamentManager.Outcome.WHITE_WIN : TournamentManager.Outcome.BLACK_WIN;
+                finishCurrentGame(outcome, String.format(java.util.Locale.US,
+                        "both engines agree at %+.2f or better (threshold %+.2f)",
+                        "1-0".equals(result) ? Math.min(whiteEval, blackEval) : Math.max(whiteEval, blackEval),
+                        "1-0".equals(result) ? autoWinThreshold : -autoWinThreshold));
+            }
+        }
+        private String compactCount(long value) {
+            if (value >= 1_000_000) return String.format(java.util.Locale.US, "%.1fM", value / 1_000_000.0);
+            if (value >= 1_000) return String.format(java.util.Locale.US, "%.0fK", value / 1_000.0);
+            return Long.toString(value);
+        }
+        /** Approximate W/D/L from the displayed centipawn score; informational only. */
+        private String estimateWdl(String score) {
+            try {
+                String value = score.trim();
+                if (value.startsWith("+M") || value.startsWith("-M"))
+                    return value.startsWith("+") ? "99,1,0" : "0,1,99";
+                double cp = Double.parseDouble(value) * 100.0;
+                double expected = 1.0 / (1.0 + Math.exp(-cp * 0.004));
+                double draw = 0.32 * Math.exp(-Math.abs(cp) / 180.0);
+                double win = Math.max(0.0, expected - draw / 2.0);
+                int w = (int)Math.round(win * 100.0);
+                int d = (int)Math.round(draw * 100.0);
+                int l = Math.max(0, 100 - w - d);
+                return w + "," + d + "," + l;
+            } catch (RuntimeException ex) { return "33,34,33"; }
+        }
+        private void publishAnalysis(boolean force) {
+            if (stopped || finished) return;
+            long nowNs = System.nanoTime();
+            if (!force && lastPublishNs != 0 && nowNs - lastPublishNs < ANALYSIS_PUBLISH_INTERVAL_NS) return;
+            lastPublishNs = nowNs;
+            if (pendingPvNeedsFormatting) {
+                StringBuilder line = new StringBuilder();
+                SearchListener.PvInfo pv = pendingPvInfo;
+                if (pendingPvPosition != null && pv != null && pv.pv != null) {
+                    Position cursor = new Position(pendingPvPosition);
+                    for (Move move : pv.pv) {
+                        boolean whiteToMove = cursor.whiteMove;
+                        int moveNumber = cursor.fullMoveCounter;
+                        String san = TextIO.moveToString(cursor, move, false, false);
+                        if (line.length() > 0) line.append(' ');
+                        if (whiteToMove) line.append(moveNumber).append('.').append(san);
+                        else {
+                            if (line.length() == 0) line.append(moveNumber).append("...");
+                            line.append(san);
+                        }
+                        cursor.makeMove(move, new org.petero.droidfish.gamelogic.UndoInfo());
+                    }
+                }
+                int pvScore = pv == null ? 0 : (white ? pv.score : -pv.score);
+                boolean pvIsMate = pv != null && pv.isMate;
+                String scoreText = pvIsMate ?
+                        (pvScore >= 0 ? "+M" : "-M") + Math.abs(pvScore) :
+                        String.format(java.util.Locale.US, "%+.2f", pvScore / 100.0);
+                lastPv = "eval " + scoreText + (line.length() == 0 ? "" : "  " + line);
+                pendingPvNeedsFormatting = false;
+            }
+            String score = "—";
+            String pvLine = "";
+            if (lastPv.startsWith("eval ")) {
+                String body = lastPv.substring(5).trim();
+                int separator = body.indexOf("  ");
+                score = separator >= 0 ? body.substring(0, separator).trim() : body;
+                pvLine = separator >= 0 ? body.substring(separator).trim() : "";
+            } else if (!lastPv.isEmpty()) {
+                pvLine = lastPv;
+            }
+            String nodes = compactCount(lastNodes);
+            String nps = compactCount(lastNps);
+            String variation = pvLine == null ? "" : pvLine.trim();
+            String wdl = estimateWdl(score);
+            String header = "Eval: " + score + "    Depth: " + lastDepth + "    Nodes: " + nodes +
+                    "    NPS: " + nps + "    TBHits: " + compactCount(lastTbHits);
+            String text = header + "\nW: " + wdl.split(",")[0] + "%   D: " + wdl.split(",")[1] + "%   L: " + wdl.split(",")[2] + "%"
+                    + (variation.length() == 0 ? "" : "\n" + variation);
+            if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
+            if (!positionHistory.isEmpty() && reviewPly < 0) {
+                int last = positionHistory.size() - 1;
+                if (white) whiteAnalysisHistory.set(last, text); else blackAnalysisHistory.set(last, text);
+            }
+            listener.onEngineAnalysis(white, text);
+        }
+        @Override public void notifySearchResult(int id, String cmd, Move ponder) {
+            // Stop the clock at bestmove arrival, not when the deferred board update runs.
+            long arrivalNs = System.nanoTime();
+            int activeId = white ? activeWhiteId : activeBlackId;
+            CetClock activeClock = clock;
+            boolean acceptedAtArrival = !stopped && !finished && !paused && id == activeId && activeClock != null &&
+                    (!usesClock() || activeClock.acceptMove(white, arrivalNs));
+            // Freeze this search's final analysis on bestmove, before deferred result
+            // handling can start another turn or receive any late engine notifications.
+            final String analysisAtBestMove = snapshotForMove();
+            // DroidComputerPlayer invokes listeners before it returns its state to IDLE.
+            // Defer board/result handling so old-search cleanup cannot overwrite a new search.
+            DroidComputerPlayer player = white ? whitePlayer : blackPlayer;
+            Thread worker = new Thread(() -> {
+                try {
+                    while (player.computerBusy()) Thread.sleep(2);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                onSearchResult(white, id, cmd, acceptedAtArrival, analysisAtBestMove);
+            }, "CET-Tournament-Result");
+            worker.start();
+        }
+        @Override public void notifyEngineName(String engineName) { }
+        @Override public void reportEngineError(String errMsg) {
+            TournamentManager.Engine engine = white ? whiteEngine : blackEngine;
+            String side = white ? "White" : "Black";
+            String engineName = engine == null ? "unknown engine" : engine.displayName;
+            listener.onError(side + " engine '" + engineName + "': " + errMsg, null);
+        }
+        @Override public void notifyEngineInitialized() {
+            // UCI option discovery clears pending options, so re-apply the saved per-engine
+            // settings (with tournament defaults only for options the user has not changed).
+            TournamentManager.Engine engine = white ? whiteEngine : blackEngine;
+            if (engine == null) return;
+            Map<String, String> optionSnapshot;
+            synchronized (TournamentRunner.this) {
+                Map<String, String> options = tournamentUciOptionValues.get(engine.id);
+                if (options == null) {
+                    options = new HashMap<>();
+                    tournamentUciOptionValues.put(engine.id, options);
+                }
+                options.putIfAbsent("Threads", "1");
+                options.putIfAbsent("Hash", "16");
+                options.putIfAbsent("Ponder", "false");
+                optionSnapshot = new HashMap<>(options);
+            }
+            (white ? whitePlayer : blackPlayer).setEngineUCIOptions(optionSnapshot);
+        }
+    }
+
+    private static final class EmptyPgnReceiver implements PgnToken.PgnTokenReceiver {
+        @Override public boolean isUpToDate() { return true; }
+        @Override public void clear() { }
+        @Override public void processToken(GameTree.Node node, int type, String token) { }
+        @Override public void setCurrent(GameTree.Node node) { }
+    }
+}
