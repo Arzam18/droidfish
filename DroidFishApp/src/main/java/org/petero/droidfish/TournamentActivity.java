@@ -13,7 +13,6 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Paint;
-import android.graphics.Path;
 import android.graphics.drawable.BitmapDrawable;
 import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
@@ -109,12 +108,19 @@ public final class TournamentActivity extends Activity {
     private int mirrorMovesSubTab = 0, mirrorStandingsSubTab = 0, mirrorGraphMetric = 0;
     private ImageView mirrorWhiteIcon, mirrorBlackIcon;
     private Button mirrorAnalysisToggle, mirrorAnalysisChooseEngine, mirrorAnalysisEngineToggle;
-    private TextView mirrorAnalysisOutput, mirrorAnalysisEngineName;
+    private LinearLayout mirrorAnalysisOutput;
+    private TextView mirrorAnalysisEngineName;
     private DroidComputerPlayer mirrorAnalysisEngine;
     private String mirrorAnalysisEngineId = "";
     private boolean mirrorAnalysisOn, mirrorAnalysisEngineActive = true;
     private String mirrorLatestAnalysisOutput = "Select an engine, then turn analysis on.";
     private int mirrorAnalysisSearchId = 61000;
+    // These are updated for every requested position. The engine listener lives
+    // for the lifetime of the selected engine, so it must not capture the first
+    // position's ply or accept callbacks from an obsolete search.
+    private volatile int mirrorAnalysisTargetPly = -1;
+    private volatile int mirrorAnalysisRequestId = -1;
+    private long mirrorAnalysisGeneration;
     private final ArrayList<Move> mirrorAnalysisHints = new ArrayList<>();
     private final HashMap<Integer, ArrayList<Move>> mirrorAnalysisHintsByPly = new HashMap<>();
     private final java.util.TreeMap<Integer, String> mirrorAnalysisPvByDepth = new java.util.TreeMap<>();
@@ -1412,10 +1418,10 @@ public final class TournamentActivity extends Activity {
         mirrorAnalysisEngineName.setTextColor(0xFFFFFFFF);
         mirrorAnalysisEngineName.setPadding(dp(10), dp(9), dp(10), dp(4));
         mirrorSectionHost.addView(mirrorAnalysisEngineName, fullWidth());
-        mirrorAnalysisOutput = text(mirrorLatestAnalysisOutput);
-        mirrorAnalysisOutput.setTextSize(14);
-        mirrorAnalysisOutput.setTextColor(0xFFE0E0E0);
-        mirrorAnalysisOutput.setPadding(dp(10), dp(8), dp(10), dp(10));
+        mirrorAnalysisOutput = new LinearLayout(this);
+        mirrorAnalysisOutput.setOrientation(LinearLayout.VERTICAL);
+        mirrorAnalysisOutput.setPadding(dp(8), dp(6), dp(8), dp(8));
+        populateMirrorAnalysisOutput(mirrorLatestAnalysisOutput);
         ScrollView outputScroll = new MirrorSectionScrollView(this);
         outputScroll.setFillViewport(false);
         outputScroll.setVerticalScrollBarEnabled(true);
@@ -1425,6 +1431,47 @@ public final class TournamentActivity extends Activity {
             showMirrorAnalysisLongPressMenu(true, mirrorAnalysisEngineId, mirrorLatestAnalysisOutput, null);
             return true;
         });
+    }
+
+    /**
+     * Render each UCI variation as its own one-line horizontal scroller.
+     * A normal wrapping TextView lets a long PV steal the next depth row's
+     * vertical space, which made adjacent depth lines appear to collide.
+     */
+    private void populateMirrorAnalysisOutput(String output) {
+        if (mirrorAnalysisOutput == null) return;
+        mirrorAnalysisOutput.removeAllViews();
+        String value = output == null ? "" : output.trim();
+        if (value.isEmpty()) value = "Waiting for analysis…";
+        String[] lines = value.split("\\r?\\n", -1);
+        for (int i = 0; i < lines.length; i++) {
+            if (i == 3 && lines.length > 3) {
+                View spacer = new View(this);
+                mirrorAnalysisOutput.addView(spacer, new LinearLayout.LayoutParams(-1, dp(5)));
+            }
+            HorizontalScrollView rowScroll = new HorizontalScrollView(this);
+            rowScroll.setFillViewport(false);
+            rowScroll.setHorizontalScrollBarEnabled(false);
+            rowScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+
+            TextView rowText = text(lines[i].isEmpty() ? " " : lines[i]);
+            rowText.setTextSize(i == 0 ? 13 : 12);
+            rowText.setTextColor(i == 0 ? 0xFFF0F0F0 : 0xFFD8DEE2);
+            rowText.setSingleLine(true);
+            rowText.setMaxLines(1);
+            rowText.setHorizontallyScrolling(true);
+            rowText.setEllipsize(null);
+            rowText.setIncludeFontPadding(false);
+            rowText.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            rowText.setPadding(dp(2), dp(2), dp(10), dp(2));
+            rowScroll.addView(rowText, new HorizontalScrollView.LayoutParams(-2, dp(25)));
+            mirrorAnalysisOutput.addView(rowScroll, new LinearLayout.LayoutParams(-1, dp(26)));
+        }
+    }
+
+    private void setMirrorAnalysisOutput(String output) {
+        mirrorLatestAnalysisOutput = output == null ? "" : output;
+        populateMirrorAnalysisOutput(mirrorLatestAnalysisOutput);
     }
 
     private void chooseMirrorAnalysisEngine() {
@@ -1445,19 +1492,30 @@ public final class TournamentActivity extends Activity {
 
     private void startMirrorAnalysis() {
         if (!mirrorAnalysisOn || !mirrorAnalysisEngineActive || mirrorAnalysisEngineId.isEmpty()) return;
+        final long analysisGeneration = ++mirrorAnalysisGeneration;
         synchronized (mirrorAnalysisPvByDepth) { mirrorAnalysisPvByDepth.clear(); }
         if (mirrorAnalysisEngine != null) { try { mirrorAnalysisEngine.stopSearch(); } catch (RuntimeException ignored) { } }
         ArrayList<Position> positions = currentMirrorPositions();
-        if (positions.isEmpty()) return;
+        if (positions.isEmpty()) {
+            mirrorAnalysisTargetPly = -1;
+            mirrorAnalysisRequestId = -1;
+            return;
+        }
         int ply = Math.max(0, Math.min(mirrorDisplayedPly(), positions.size() - 1));
         final int analysisPlyForSearch = ply;
+        mirrorAnalysisTargetPly = analysisPlyForSearch;
+        mirrorAnalysisRequestId = -1;
         Position position = new Position(positions.get(ply));
         final String analysisEngineIdForSearch = mirrorAnalysisEngineId;
-        mirrorAnalysisOutput = mirrorAnalysisOutput == null ? text("Starting analysis…") : mirrorAnalysisOutput;
+        if (mirrorAnalysisOutput != null) populateMirrorAnalysisOutput("Starting analysis…");
         final DroidComputerPlayer analysisPlayer = mirrorAnalysisEngine != null ? mirrorAnalysisEngine : new DroidComputerPlayer(new SearchListener() {
             @Override public void notifyDepth(int id, int depth) { }
             @Override public void notifyCurrMove(int id, Position pos, Move move, int moveNr) { }
             @Override public void notifyPV(int id, Position pos, ArrayList<PvInfo> infos, Move ponderMove) {
+                // The listener is reused after navigation. Only the active
+                // request ID and its mutable target ply are authoritative.
+                if (id != mirrorAnalysisRequestId) return;
+                final int targetPly = mirrorAnalysisTargetPly;
                 if (infos == null || infos.isEmpty() || infos.get(0) == null) return;
                 PvInfo pv = infos.get(0);
                 String eval = pv.isMate ? ((pv.score >= 0 ? "+M" : "-M") + Math.abs(pv.score)) :
@@ -1483,26 +1541,26 @@ public final class TournamentActivity extends Activity {
                     StringBuilder depthText = new StringBuilder();
                     for (java.util.Map.Entry<Integer, String> entry : mirrorAnalysisPvByDepth.entrySet()) {
                         if (depthText.length() > 0) depthText.append('\n');
-                        depthText.append(indentationForMirrorDepth(entry.getKey())).append('d').append(entry.getKey()).append(' ').append(entry.getValue());
+                        depthText.append('d').append(entry.getKey()).append("  ").append(entry.getValue());
                     }
                     depthLines = depthText.toString();
                 }
                 String[] wdl = estimateMirrorWdl(eval);
                 String elapsed = String.format(java.util.Locale.US, "%.2f", Math.max(0, pv.time) / 1000.0);
-                String output = "Eval: " + eval + "    Depth: " + pv.depth + "    Nodes: " + compactViewerCount(pv.nodes) +
-                        "    NPS: " + compactViewerCount(pv.nps) + "    t:" + elapsed +
-                        "\nW: " + wdl[0] + "%   D: " + wdl[1] + "%   L: " + wdl[2] + "%" +
-                        (line.length() == 0 ? "" : "\n" + line) +
+                String output = "Eval: " + eval + "   Depth: " + pv.depth + "   Nodes: " + compactViewerCount(pv.nodes) +
+                        "   NPS: " + compactViewerCount(pv.nps) + "   Time: " + elapsed + "s" +
+                        "\nWDL: W " + wdl[0] + "%   D " + wdl[1] + "%   L " + wdl[2] + "%" +
+                        (line.length() == 0 ? "" : "\nPV 1  " + line) +
                         (depthLines.isEmpty() ? "" : "\n" + depthLines);
                 runOnUiThread(() -> {
                     if (!mirrorAnalysisOn || !mirrorAnalysisEngineActive ||
                             !analysisEngineIdForSearch.equals(mirrorAnalysisEngineId) ||
-                            analysisPlyForSearch != mirrorDisplayedPly()) return;
-                    mirrorLatestAnalysisOutput = output;
+                            id != mirrorAnalysisRequestId || targetPly != mirrorAnalysisTargetPly ||
+                            targetPly != mirrorDisplayedPly()) return;
+                    setMirrorAnalysisOutput(output);
                     if (mirrorAnalysisEngineName != null) mirrorAnalysisEngineName.setText(mirrorAnalysisEngineNameForId(analysisEngineIdForSearch));
-                    if (mirrorAnalysisOutput != null) mirrorAnalysisOutput.setText(output);
                     ArrayList<Move> savedHints = new ArrayList<>(hints);
-                    mirrorAnalysisHintsByPly.put(analysisPlyForSearch, savedHints);
+                    mirrorAnalysisHintsByPly.put(targetPly, savedHints);
                     mirrorAnalysisHints.clear();
                     mirrorAnalysisHints.addAll(savedHints);
                     applyMirrorBoardHighlights(mirrorNavigatedLastMove);
@@ -1533,21 +1591,18 @@ public final class TournamentActivity extends Activity {
         }
         final DroidComputerPlayer activePlayer = analysisPlayer;
         uiHandler.postDelayed(() -> {
-            if (mirrorAnalysisEngine != activePlayer || !mirrorAnalysisOn || !mirrorAnalysisEngineActive) return;
+            if (analysisGeneration != mirrorAnalysisGeneration ||
+                    mirrorAnalysisEngine != activePlayer || !mirrorAnalysisOn || !mirrorAnalysisEngineActive ||
+                    analysisPlyForSearch != mirrorAnalysisTargetPly || analysisPlyForSearch != mirrorDisplayedPly()) return;
             try {
+                int requestId = ++mirrorAnalysisSearchId;
+                mirrorAnalysisRequestId = requestId;
                 activePlayer.queueAnalyzeRequest(DroidComputerPlayer.SearchRequest.analyzeRequest(
-                        ++mirrorAnalysisSearchId, position, new ArrayList<Move>(), position, false, mirrorAnalysisEngineId, 1));
+                        requestId, position, new ArrayList<Move>(), position, false, mirrorAnalysisEngineId, 1));
             } catch (RuntimeException ex) {
                 Toast.makeText(this, "Unable to start analysis: " + ex.getMessage(), Toast.LENGTH_LONG).show();
             }
         }, startEngine ? 700 : 80);
-    }
-
-    private String indentationForMirrorDepth(int depth) {
-        StringBuilder spaces = new StringBuilder();
-        int count = Math.max(3, Math.min(24, depth + 2));
-        for (int i = 0; i < count; i++) spaces.append('\u00A0');
-        return spaces.toString();
     }
 
     private void showMirrorAnalysisLongPressMenu(boolean analysisEngine, String engineId, String output) {
@@ -1654,6 +1709,9 @@ public final class TournamentActivity extends Activity {
     }
 
     private void stopMirrorAnalysisEngineOnly() {
+        mirrorAnalysisGeneration++;
+        mirrorAnalysisTargetPly = -1;
+        mirrorAnalysisRequestId = -1;
         if (mirrorAnalysisEngine != null) {
             try { mirrorAnalysisEngine.stopSearch(); mirrorAnalysisEngine.shutdownEngine(); } catch (RuntimeException ignored) { }
             mirrorAnalysisEngine = null;
@@ -1665,6 +1723,9 @@ public final class TournamentActivity extends Activity {
 
     private void stopMirrorAnalysis() {
         mirrorAnalysisOn = false;
+        mirrorAnalysisGeneration++;
+        mirrorAnalysisTargetPly = -1;
+        mirrorAnalysisRequestId = -1;
         if (mirrorAnalysisEngine != null) { try { mirrorAnalysisEngine.stopSearch(); } catch (RuntimeException ignored) { } }
         if (mirrorAnalysisToggle != null) mirrorAnalysisToggle.setText("ANALYSIS OFF");
     }
@@ -2295,6 +2356,10 @@ public final class TournamentActivity extends Activity {
     private void renderMirrorGraphSection() {
         ArrayList<String> comments = new ArrayList<>();
         ArrayList<String> moves = currentMirrorSanMoves(comments);
+        // The first eight full moves are the tournament opening-book phase.
+        // Keep both engines' traces on the zero baseline during those moves;
+        // evaluation plotting begins with the first searched move (move 9).
+        final int bookOpeningPlies = 8 * 2;
         String[] labels = mirrorGraphMetricLabels();
         mirrorGraphMetric = Math.max(0, Math.min(labels.length - 1, mirrorGraphMetric));
         LinearLayout content = new LinearLayout(this);
@@ -2327,6 +2392,8 @@ public final class TournamentActivity extends Activity {
         double[] depthSum = {0, 0}, npsSum = {0, 0}, clockSum = {0, 0};
         int[] depthCount = {0, 0}, npsCount = {0, 0};
         int[] recorded = {0, 0};
+        double[] lastEvalBySide = {0.0, 0.0};
+        boolean[] hasEvalBySide = {false, false};
         for (int ply = 0; ply < moves.size(); ply++) {
             String raw = ply < comments.size() ? comments.get(ply) : "";
             String live = !mirrorReplayMode && ply < mirrorLiveAnalysisByPly.size() ? mirrorLiveAnalysisByPly.get(ply) : "";
@@ -2350,6 +2417,21 @@ public final class TournamentActivity extends Activity {
                 value = mirrorGraphValueForPly(live, mirrorGraphMetric, ply);
             double parsed = parseMirrorGraphValue(value, mirrorGraphMetric);
             boolean valid = Double.isFinite(parsed);
+            if (mirrorGraphMetric == 0) {
+                if (ply < bookOpeningPlies) {
+                    parsed = 0.0;
+                    valid = true;
+                } else if (valid) {
+                    lastEvalBySide[side] = parsed;
+                    hasEvalBySide[side] = true;
+                } else {
+                    // Preserve a continuous trace if a PGN move has no saved
+                    // sample for that engine. The trace resumes at its last
+                    // known score rather than creating a broken line segment.
+                    parsed = hasEvalBySide[side] ? lastEvalBySide[side] : 0.0;
+                    valid = true;
+                }
+            }
             if (valid) recorded[side]++;
             whiteValues.add(side == 0 && valid ? (float)parsed : Float.NaN);
             blackValues.add(side == 1 && valid ? (float)parsed : Float.NaN);
@@ -2361,6 +2443,19 @@ public final class TournamentActivity extends Activity {
             String value = mirrorGraphValueForPly(liveAnalysis, mirrorGraphMetric, livePly);
             double parsed = parseMirrorGraphValue(value, mirrorGraphMetric);
             boolean valid = Double.isFinite(parsed);
+            if (mirrorGraphMetric == 0) {
+                int side = livePly & 1;
+                if (livePly < bookOpeningPlies) {
+                    parsed = 0.0;
+                    valid = true;
+                } else if (valid) {
+                    lastEvalBySide[side] = parsed;
+                    hasEvalBySide[side] = true;
+                } else {
+                    parsed = hasEvalBySide[side] ? lastEvalBySide[side] : 0.0;
+                    valid = true;
+                }
+            }
             if (valid) recorded[livePly & 1]++;
             whiteValues.add((livePly & 1) == 0 && valid ? (float)parsed : Float.NaN);
             blackValues.add((livePly & 1) == 1 && valid ? (float)parsed : Float.NaN);
@@ -2388,6 +2483,9 @@ public final class TournamentActivity extends Activity {
         chartScroll.addView(new MirrorGraphView(this, whiteValues, blackValues, mirrorGraphMetric, graphCount),
                 new HorizontalScrollView.LayoutParams(chartWidth, dp(220)));
         content.addView(chartScroll, new LinearLayout.LayoutParams(-1, dp(220)));
+        // Open on the newest moves, like the reference graph. The user can
+        // still swipe horizontally back to the flat opening-book segment.
+        chartScroll.post(() -> chartScroll.fullScroll(View.FOCUS_RIGHT));
 
         LinearLayout legend = new LinearLayout(this);
         legend.setGravity(android.view.Gravity.CENTER);
@@ -2504,8 +2602,10 @@ public final class TournamentActivity extends Activity {
             }
             boolean hasData = (!Float.isNaN(min) && !Float.isInfinite(min) && !Float.isNaN(max) && !Float.isInfinite(max));
             if (metric == 0) {
-                float extent = hasData ? Math.max(Math.abs(min), Math.abs(max)) : 1.0f;
-                extent = Math.max(0.5f, extent * 1.12f);
+                // The evaluation axis starts at -2..+2 so the zero line and
+                // the first eight book moves have a stable, readable baseline.
+                // Expand only when a real score leaves that range.
+                float extent = hasData ? Math.max(2.0f, (float)Math.ceil(Math.max(Math.abs(min), Math.abs(max)))) : 2.0f;
                 min = -extent; max = extent;
             } else if (metric == 2 || metric == 3 || metric == 6) {
                 if (!hasData) { min = metric == 6 ? 0 : 3; max = metric == 6 ? 2 : 9; }
@@ -2600,25 +2700,25 @@ public final class TournamentActivity extends Activity {
                         canvas.drawLine(previousX, previousY, x, y, paint);
                     }
                 }
-                if (white) {
-                    float r = dp(4.5f);
-                    Path diamond = new Path();
-                    diamond.moveTo(x, y - r); diamond.lineTo(x + r, y);
-                    diamond.lineTo(x, y + r); diamond.lineTo(x - r, y); diamond.close();
-                    paint.setStyle(Paint.Style.FILL); paint.setColor(0xFFFFFFFF);
-                    canvas.drawPath(diamond, paint);
-                } else {
-                    paint.setStyle(Paint.Style.FILL); paint.setColor(0xFF080808);
-                    canvas.drawCircle(x, y, dp(4.5f), paint);
-                    paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(1.4f));
-                    paint.setColor(0xFFB8B8B8); canvas.drawCircle(x, y, dp(4.5f), paint);
-                }
+                float radius = dp(4.2f);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(white ? 0xFFFFFFFF : 0xFF080808);
+                canvas.drawCircle(x, y, radius, paint);
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(1.3f));
+                paint.setColor(white ? 0xFF555555 : 0xFFB8B8B8);
+                canvas.drawCircle(x, y, radius, paint);
                 previousX = x; previousY = y; previousValid = true;
             }
         }
 
         private String formatAxisLabel(float value) {
-            if (metric == 0) return Math.abs(value) < 0.005f ? "0" : String.format(java.util.Locale.US, "%+.1f", value);
+            if (metric == 0) {
+                if (Math.abs(value) < 0.005f) return "0";
+                if (Math.abs(value - Math.round(value)) < 0.05f)
+                    return Long.toString(Math.round(value));
+                return String.format(java.util.Locale.US, "%.1f", value);
+            }
             if (metric == 1) return String.format(java.util.Locale.US, "%.0f", value);
             if (metric == 2 || metric == 3 || metric == 6) return compactAxisCount(Math.max(0, (long)Math.round(Math.pow(10, value) - 1.0)));
             if (metric == 4) {
@@ -4318,13 +4418,21 @@ public final class TournamentActivity extends Activity {
         @Override protected void drawExtraSquares(Canvas canvas) {
             super.drawExtraSquares(canvas);
             if (lastMoveMarker == null || sqSize <= 0) return;
-            lastMovePaint.setStyle(Paint.Style.FILL);
+            // Draw an outline around the source/destination squares. A filled,
+            // translucent rectangle is painted after the pieces by ChessBoard
+            // and therefore tints the pieces too; the outline marks only the
+            // two squares while leaving their piece artwork unchanged.
+            lastMovePaint.setStyle(Paint.Style.STROKE);
+            lastMovePaint.setStrokeWidth(Math.max(2.0f * getResources().getDisplayMetrics().density, sqSize / 18.0f));
             XYCoord from = sqToPix(Position.getX(lastMoveMarker.from), Position.getY(lastMoveMarker.from));
             XYCoord to = sqToPix(Position.getX(lastMoveMarker.to), Position.getY(lastMoveMarker.to));
-            lastMovePaint.setColor(0x665BC0EB);
-            canvas.drawRect(from.x, from.y, from.x + sqSize, from.y + sqSize, lastMovePaint);
-            lastMovePaint.setColor(0x8865D66F);
-            canvas.drawRect(to.x, to.y, to.x + sqSize, to.y + sqSize, lastMovePaint);
+            float inset = lastMovePaint.getStrokeWidth() / 2.0f;
+            lastMovePaint.setColor(0xFF5BC0EB);
+            canvas.drawRect(from.x + inset, from.y + inset,
+                    from.x + sqSize - inset, from.y + sqSize - inset, lastMovePaint);
+            lastMovePaint.setColor(0xFF65D66F);
+            canvas.drawRect(to.x + inset, to.y + inset,
+                    to.x + sqSize - inset, to.y + sqSize - inset, lastMovePaint);
         }
         @Override protected int getMaxWidthPercentage() { return 100; }
         @Override protected int getMaxHeightPercentage() { return 100; }
