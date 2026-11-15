@@ -617,10 +617,11 @@ public final class TournamentActivity extends Activity {
 
         menu.setOnClickListener(v -> new AlertDialog.Builder(TournamentActivity.this)
                 .setTitle("Tournament menu")
-                .setItems(new String[]{"Adjudicate", "Setup", "Flip Board"}, (dialog, which) -> {
+                .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Schedule"}, (dialog, which) -> {
                     if (which == 0) showAdjudicationDialog();
                     else if (which == 1) setContentView(setupView);
-                    else toggleTournamentFlip();
+                    else if (which == 2) toggleTournamentFlip();
+                    else showScheduleDialog();
                 }).show());
         schedule.setOnClickListener(v -> switchTournamentAndMirror());
         page.addView(controls, fullWidth());
