@@ -108,6 +108,7 @@ public final class TournamentActivity extends Activity {
     private String mirrorLatestAnalysisOutput = "Select an engine, then turn analysis on.";
     private int mirrorAnalysisSearchId = 61000;
     private final ArrayList<Move> mirrorAnalysisHints = new ArrayList<>();
+    private final java.util.TreeMap<Integer, String> mirrorAnalysisPvByDepth = new java.util.TreeMap<>();
     private String mirrorReplayPgn = "";
     private CheckBox engineIconsCheck;
     private Button engineIconFolderButton, engineIconConfigureButton;
@@ -1258,6 +1259,7 @@ public final class TournamentActivity extends Activity {
 
     private void startMirrorAnalysis() {
         if (!mirrorAnalysisOn || !mirrorAnalysisEngineActive || mirrorAnalysisEngineId.isEmpty()) return;
+        synchronized (mirrorAnalysisPvByDepth) { mirrorAnalysisPvByDepth.clear(); }
         if (mirrorAnalysisEngine != null) { try { mirrorAnalysisEngine.stopSearch(); } catch (RuntimeException ignored) { } }
         ArrayList<Position> positions = currentMirrorPositions();
         if (positions.isEmpty()) return;
@@ -1279,15 +1281,31 @@ public final class TournamentActivity extends Activity {
                     if (hints.size() < 2) hints.add(move);
                     if (line.length() > 0) line.append(' ');
                     if (cursor.whiteMove) line.append(cursor.fullMoveCounter).append('.');
+                    else if (line.length() == 0) line.append(cursor.fullMoveCounter).append("...");
                     line.append(TextIO.moveToString(cursor, move, false, false));
                     cursor.makeMove(move, new org.petero.droidfish.gamelogic.UndoInfo());
+                }
+                String depthLines;
+                synchronized (mirrorAnalysisPvByDepth) {
+                    for (PvInfo depthPv : infos) {
+                        if (depthPv == null || depthPv.depth <= 0) continue;
+                        String variation = mirrorPvVariation(pos, depthPv);
+                        if (!variation.isEmpty()) mirrorAnalysisPvByDepth.put(depthPv.depth, variation);
+                    }
+                    StringBuilder depthText = new StringBuilder();
+                    for (java.util.Map.Entry<Integer, String> entry : mirrorAnalysisPvByDepth.entrySet()) {
+                        if (depthText.length() > 0) depthText.append('\n');
+                        depthText.append('d').append(entry.getKey()).append(' ').append(entry.getValue());
+                    }
+                    depthLines = depthText.toString();
                 }
                 String[] wdl = estimateMirrorWdl(eval);
                 String elapsed = String.format(java.util.Locale.US, "%.2f", Math.max(0, pv.time) / 1000.0);
                 String output = "Eval: " + eval + "    Depth: " + pv.depth + "    Nodes: " + compactViewerCount(pv.nodes) +
                         "    NPS: " + compactViewerCount(pv.nps) + "    t:" + elapsed +
                         "\nW: " + wdl[0] + "%   D: " + wdl[1] + "%   L: " + wdl[2] + "%" +
-                        (line.length() == 0 ? "" : "\n" + line);
+                        (line.length() == 0 ? "" : "\n" + line) +
+                        (depthLines.isEmpty() ? "" : "\n" + depthLines);
                 runOnUiThread(() -> {
                     if (!mirrorAnalysisOn || !mirrorAnalysisEngineActive) return;
                     mirrorLatestAnalysisOutput = output;
@@ -1322,6 +1340,21 @@ public final class TournamentActivity extends Activity {
                 Toast.makeText(this, "Unable to start analysis: " + ex.getMessage(), Toast.LENGTH_LONG).show();
             }
         }, startEngine ? 700 : 80);
+    }
+
+    /** Convert one iterative-deepening PV to a readable SAN variation. */
+    private String mirrorPvVariation(Position start, PvInfo pv) {
+        if (start == null || pv == null || pv.pv == null || pv.pv.isEmpty()) return "";
+        StringBuilder variation = new StringBuilder();
+        Position cursor = new Position(start);
+        for (Move move : pv.pv) {
+            if (variation.length() > 0) variation.append(' ');
+            if (cursor.whiteMove) variation.append(cursor.fullMoveCounter).append('.');
+            else if (variation.length() == 0) variation.append(cursor.fullMoveCounter).append("...");
+            variation.append(TextIO.moveToString(cursor, move, false, false));
+            cursor.makeMove(move, new org.petero.droidfish.gamelogic.UndoInfo());
+        }
+        return variation.toString();
     }
 
     private void stopMirrorAnalysisEngineOnly() {
@@ -1766,10 +1799,20 @@ public final class TournamentActivity extends Activity {
             engineName.setMaxLines(2);
             engineName.setEllipsize(android.text.TextUtils.TruncateAt.END);
             engineName.setTypeface(null, android.graphics.Typeface.BOLD);
-            TextView score = text(String.format(java.util.Locale.US, "%.1f/%s · %.1f%%",
+            String engineScoreText = String.format(java.util.Locale.US, "%.1f/%s · %.1f%%",
                     standing.points, (maxScore == Math.rint(maxScore) ? Integer.toString((int)maxScore) :
-                            String.format(java.util.Locale.US, "%.1f", maxScore)), scorePct));
-            score.setTextSize(12);
+                            String.format(java.util.Locale.US, "%.1f", maxScore)), scorePct);
+            android.text.SpannableString engineScoreStyled = new android.text.SpannableString(engineScoreText);
+            int percentageStart = engineScoreText.indexOf(" · ");
+            if (percentageStart >= 0) {
+                engineScoreStyled.setSpan(new android.text.style.RelativeSizeSpan(0.72f), percentageStart,
+                        engineScoreText.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                engineScoreStyled.setSpan(new android.text.style.ForegroundColorSpan(0xFF9EABB4), percentageStart,
+                        engineScoreText.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            TextView score = text("");
+            score.setText(engineScoreStyled);
+            score.setTextSize(14);
             score.setTextColor(0xFFB8C4CC);
             LinearLayout engineNameLine = new LinearLayout(this);
             engineNameLine.setGravity(android.view.Gravity.CENTER_VERTICAL);
@@ -1800,103 +1843,213 @@ public final class TournamentActivity extends Activity {
     }
 
     private String[] mirrorGraphMetricLabels() {
-        return new String[]{"EVALUATION", "DEPTH", "NODES", "NPS", "TIME PER MOVE"};
+        // Match the compact CCC graph selector: one metric per tab, with the
+        // two engine rows immediately underneath and one large chart below.
+        return new String[]{"Eval", "Depth", "Nodes", "Time", "NPS"};
+    }
+
+    private String mirrorGraphMetricKey(int metric) {
+        switch (metric) {
+            case 1: return "Depth|D";
+            case 2: return "Nodes|N";
+            case 3: return "Time|TimeUsed";
+            case 4: return "NPS|nps";
+            default: return "Eval|eval";
+        }
+    }
+
+    private String mirrorGraphRawValue(String comment, int metric) {
+        if (comment == null || comment.trim().isEmpty()) return "";
+        String value = findCommentValue(comment, mirrorGraphMetricKey(metric));
+        if (!value.isEmpty()) return value;
+        String field = metric == 0 ? "Eval" : metric == 1 ? "Depth" : metric == 2 ? "Nodes" : metric == 3 ? "Time" : "NPS";
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(
+                "(?i)(?:^|[\\s,;])" + field + "\\s*[:=]\\s*([^\\s,;]+)").matcher(comment);
+        return matcher.find() ? matcher.group(1) : "";
+    }
+
+    private void selectMirrorGraphMetric(int metric) {
+        mirrorGraphMetric = Math.max(0, Math.min(4, metric));
+        invalidateMirrorStandingsSubCache(1);
+        invalidateMirrorSectionCache(1);
+        renderMirrorSection();
+    }
+
+    private String formatMirrorGraphSummaryValue(String raw, int metric, int side) {
+        if (raw == null || raw.isEmpty() || raw.equalsIgnoreCase("n/a")) return "—";
+        double parsed = parseMirrorGraphValue(raw, metric);
+        if (Double.isNaN(parsed) || Double.isInfinite(parsed)) return raw;
+        if (metric == 0) {
+            // Tournament comments store evaluations from White's perspective;
+            // show each engine its own perspective in the two engine rows.
+            if (raw.toUpperCase(java.util.Locale.US).contains("M")) {
+                if (side == 1) return raw.startsWith("-") ? raw.substring(1) : "-" + raw;
+                return raw;
+            }
+            if (side == 1) parsed = -parsed;
+            return String.format(java.util.Locale.US, "%+.2f", parsed);
+        }
+        if (metric == 1) return String.format(java.util.Locale.US, "%.0f", parsed);
+        if (metric == 2 || metric == 4) return compactViewerCount((long) parsed);
+        if (metric == 3) {
+            if (parsed >= 60) {
+                long seconds = Math.max(0, (long)parsed);
+                return String.format(java.util.Locale.US, "%d:%02d", seconds / 60, seconds % 60);
+            }
+            return String.format(java.util.Locale.US, "%.2f", parsed);
+        }
+        return raw;
     }
 
     private void renderMirrorGraphSection() {
         ArrayList<String> comments = new ArrayList<>();
         ArrayList<String> moves = currentMirrorSanMoves(comments);
-        LinearLayout graphs = new LinearLayout(this);
-        graphs.setOrientation(LinearLayout.VERTICAL);
-        graphs.setPadding(dp(4), dp(4), dp(4), dp(12));
         String[] labels = mirrorGraphMetricLabels();
-        int screenWidth = getResources().getDisplayMetrics().widthPixels;
-        int chartWidth = Math.max(screenWidth, dp(62) + dp(42) * Math.max(1, moves.size() - 1));
-        for (int metric = 0; metric < labels.length; metric++) {
-            ArrayList<Float> values = new ArrayList<>();
-            ArrayList<Integer> moveNumbers = new ArrayList<>();
-            int available = 0;
-            for (int i = 0; i < moves.size(); i++) {
-                String raw = i < comments.size() ? comments.get(i) : "";
-                if (!mirrorReplayMode && (raw == null || raw.trim().isEmpty()) && i < mirrorLiveAnalysisByPly.size())
-                    raw = mirrorLiveAnalysisByPly.get(i);
-                String key;
-                switch (metric) {
-                    case 1: key = "Depth|D"; break;
-                    case 2: key = "Nodes|N"; break;
-                    case 3: key = "NPS|nps"; break;
-                    case 4: key = "Time|TimeUsed"; break;
-                    default: key = "Eval|eval"; break;
-                }
-                String graphValue = findCommentValue(raw, key);
-                if ((graphValue.isEmpty() || graphValue.equalsIgnoreCase("n/a")) &&
-                        !mirrorReplayMode && i < mirrorLiveAnalysisByPly.size()) {
-                    String liveRaw = mirrorLiveAnalysisByPly.get(i);
-                    graphValue = findCommentValue(liveRaw, key);
-                }
-                if (graphValue.isEmpty() && raw != null) {
-                    String field = metric == 0 ? "Eval" : metric == 1 ? "Depth" : metric == 2 ? "Nodes" : metric == 3 ? "NPS" : "Time";
-                    java.util.regex.Matcher am = java.util.regex.Pattern.compile("(?i)" + field + "\\s*:\\s*([^\\s]+)").matcher(raw);
-                    if (am.find()) graphValue = am.group(1);
-                }
-                double parsed = parseMirrorGraphValue(graphValue, metric);
-                // UCI engine scores are from the moving side's perspective; flip
-                // Black's score so Evaluation stays in White's perspective.
-                if (metric == 0 && (!Double.isNaN(parsed) && !Double.isInfinite(parsed)) && (i & 1) == 1) parsed = -parsed;
-                values.add((!Double.isNaN(parsed) && !Double.isInfinite(parsed)) ? (float)parsed : Float.NaN);
-                moveNumbers.add(i + 1);
-                if ((!Double.isNaN(parsed) && !Double.isInfinite(parsed))) available++;
-            }
+        mirrorGraphMetric = Math.max(0, Math.min(labels.length - 1, mirrorGraphMetric));
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(4), dp(4), dp(4), dp(12));
 
-            LinearLayout metricPanel = new LinearLayout(this);
-            metricPanel.setOrientation(LinearLayout.VERTICAL);
-            metricPanel.setPadding(dp(3), dp(6), dp(3), dp(8));
-            TextView title = text(labels[metric] + "  ·  " + available + "/" + moves.size() + " recorded");
-            title.setTextSize(14); title.setTypeface(null, android.graphics.Typeface.BOLD);
-            title.setTextColor(0xFFFFFFFF); title.setPadding(dp(6), dp(2), dp(6), dp(3));
-            metricPanel.addView(title, fullWidth());
-            android.text.SpannableString legendText = new android.text.SpannableString("WHITE  ━    BLACK  ━");
-            legendText.setSpan(new android.text.style.ForegroundColorSpan(0xFFFFFFFF), 0, 9, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            legendText.setSpan(new android.text.style.ForegroundColorSpan(0xFF111111), 11, legendText.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            TextView legend = text(""); legend.setText(legendText);
-            legend.setTextSize(10); legend.setTypeface(null, android.graphics.Typeface.BOLD);
-            legend.setBackgroundColor(0xFF62666A); legend.setPadding(dp(6), dp(2), dp(6), dp(4));
-            metricPanel.addView(legend, fullWidth());
-            if (available == 0) {
-                TextView empty = text("No per-move " + labels[metric].toLowerCase(java.util.Locale.US) + " data recorded yet.");
-                empty.setTextSize(12); empty.setTextColor(0xFFBBC6CE);
-                empty.setPadding(dp(8), dp(8), dp(8), dp(8));
-                metricPanel.addView(empty, fullWidth());
-            } else {
-                HorizontalScrollView horizontal = new HorizontalScrollView(this);
-                horizontal.setFillViewport(false);
-                horizontal.setHorizontalScrollBarEnabled(true);
-                MirrorGraphView graph = new MirrorGraphView(this, values, moveNumbers, metric);
-                horizontal.addView(graph, new HorizontalScrollView.LayoutParams(chartWidth, dp(196)));
-                metricPanel.addView(horizontal, new LinearLayout.LayoutParams(-1, dp(196)));
-            }
-            View separator = new View(this);
-            separator.setBackgroundColor(0xFF454545);
-            metricPanel.addView(separator, new LinearLayout.LayoutParams(-1, dp(1)));
-            graphs.addView(metricPanel, fullWidth());
+        final int engineCol = dp(62);
+        final int valueCol = dp(60);
+        LinearLayout metricTable = new LinearLayout(this);
+        metricTable.setOrientation(LinearLayout.VERTICAL);
+        metricTable.setBackgroundColor(0xFF262626);
+        LinearLayout metricHeader = new LinearLayout(this);
+        metricHeader.setOrientation(LinearLayout.HORIZONTAL);
+        TextView engineHeader = text("ENGINE");
+        engineHeader.setTextSize(11); engineHeader.setTypeface(null, android.graphics.Typeface.BOLD);
+        engineHeader.setTextColor(0xFFBFC6CC); engineHeader.setGravity(android.view.Gravity.CENTER);
+        engineHeader.setBackgroundColor(0xFF303030); engineHeader.setPadding(dp(3), dp(8), dp(3), dp(8));
+        metricHeader.addView(engineHeader, new LinearLayout.LayoutParams(engineCol, dp(42)));
+        for (int metric = 0; metric < labels.length; metric++) {
+            final int selectedMetric = metric;
+            Button tab = new Button(this);
+            tab.setText(labels[metric]);
+            tab.setAllCaps(false);
+            tab.setTextSize(12);
+            tab.setMinWidth(dp(0));
+            tab.setMinimumWidth(dp(0));
+            tab.setMinHeight(dp(42));
+            tab.setMinimumHeight(dp(42));
+            tab.setPadding(dp(1), 0, dp(1), 0);
+            tab.setTextColor(metric == mirrorGraphMetric ? 0xFFFFFFFF : 0xFFB0B0B0);
+            tab.setBackgroundColor(metric == mirrorGraphMetric ? 0xFF3A3A3A : 0xFF242424);
+            tab.setOnClickListener(v -> selectMirrorGraphMetric(selectedMetric));
+            metricHeader.addView(tab, new LinearLayout.LayoutParams(valueCol, dp(42)));
         }
-        TextView note = text("Source: existing PGN move annotations · no additional tournament analysis searches");
-        note.setTextSize(10); note.setTextColor(0xFF9AA7B0);
-        note.setPadding(dp(8), dp(6), dp(8), dp(2));
-        graphs.addView(note, fullWidth());
+        metricTable.addView(metricHeader, new LinearLayout.LayoutParams(-2, dp(42)));
+
+        String[][] latest = new String[][]{
+                {"", "", "", "", ""},
+                {"", "", "", "", ""}
+        };
+        for (int ply = 0; ply < moves.size(); ply++) {
+            String raw = ply < comments.size() ? comments.get(ply) : "";
+            if ((raw == null || raw.trim().isEmpty()) && !mirrorReplayMode && ply < mirrorLiveAnalysisByPly.size())
+                raw = mirrorLiveAnalysisByPly.get(ply);
+            int side = (ply & 1) == 0 ? 0 : 1;
+            for (int metric = 0; metric < labels.length; metric++) {
+                String value = mirrorGraphRawValue(raw, metric);
+                if (!value.isEmpty() && !value.equalsIgnoreCase("n/a")) latest[side][metric] = value;
+            }
+        }
+        if (!mirrorReplayMode) {
+            // Live engine analysis is a useful immediate fallback before the next
+            // move comment is written. The graph itself remains move-history only.
+            String whiteLive = lastWhiteAnalysis;
+            String blackLive = lastBlackAnalysis;
+            for (int metric = 0; metric < labels.length; metric++) {
+                if (latest[0][metric].isEmpty()) latest[0][metric] = mirrorGraphRawValue(whiteLive, metric);
+                if (latest[1][metric].isEmpty()) latest[1][metric] = mirrorGraphRawValue(blackLive, metric);
+            }
+        }
+        String[] sideNames = {"WHITE", "BLACK"};
+        for (int side = 0; side < 2; side++) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            int rowColor = side == 0 ? 0xFF202020 : 0xFFB7B7B7;
+            int textColor = side == 0 ? 0xFFFFFFFF : 0xFF111111;
+            TextView name = text(sideNames[side]);
+            name.setTextSize(11); name.setTypeface(null, android.graphics.Typeface.BOLD);
+            name.setTextColor(textColor); name.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            name.setMaxLines(2); name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            name.setPadding(dp(5), dp(4), dp(3), dp(4)); name.setBackgroundColor(rowColor);
+            row.addView(name, new LinearLayout.LayoutParams(engineCol, dp(46)));
+            for (int metric = 0; metric < labels.length; metric++) {
+                TextView value = text(formatMirrorGraphSummaryValue(latest[side][metric], metric, side));
+                value.setTextSize(metric == mirrorGraphMetric ? 13 : 11);
+                value.setTypeface(null, metric == mirrorGraphMetric ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+                value.setTextColor(textColor); value.setGravity(android.view.Gravity.CENTER);
+                value.setPadding(dp(1), dp(4), dp(1), dp(4)); value.setBackgroundColor(rowColor);
+                row.addView(value, new LinearLayout.LayoutParams(valueCol, dp(46)));
+            }
+            metricTable.addView(row, new LinearLayout.LayoutParams(-2, dp(46)));
+        }
+        HorizontalScrollView tableScroll = new HorizontalScrollView(this);
+        tableScroll.setFillViewport(false);
+        tableScroll.setHorizontalScrollBarEnabled(true);
+        tableScroll.addView(metricTable, new HorizontalScrollView.LayoutParams(-2, -2));
+        content.addView(tableScroll, fullWidth());
+
+        ArrayList<Float> whiteValues = new ArrayList<>();
+        ArrayList<Float> blackValues = new ArrayList<>();
+        int whiteRecorded = 0, blackRecorded = 0;
+        for (int ply = 0; ply < moves.size(); ply++) {
+            String raw = ply < comments.size() ? comments.get(ply) : "";
+            if ((raw == null || raw.trim().isEmpty()) && !mirrorReplayMode && ply < mirrorLiveAnalysisByPly.size())
+                raw = mirrorLiveAnalysisByPly.get(ply);
+            double parsed = parseMirrorGraphValue(mirrorGraphRawValue(raw, mirrorGraphMetric), mirrorGraphMetric);
+            boolean valid = !Double.isNaN(parsed) && !Double.isInfinite(parsed);
+            if (mirrorGraphMetric == 0 && valid && (ply & 1) == 1) parsed = -parsed;
+            if ((ply & 1) == 0) {
+                whiteValues.add(valid ? (float) parsed : Float.NaN);
+                if (valid) whiteRecorded++;
+                blackValues.add(Float.NaN);
+            } else {
+                whiteValues.add(Float.NaN);
+                blackValues.add(valid ? (float) parsed : Float.NaN);
+                if (valid) blackRecorded++;
+            }
+        }
+
+        String metricTitle = labels[mirrorGraphMetric].toUpperCase(java.util.Locale.US);
+        TextView chartTitle = text(metricTitle + "  ·  WHITE " + whiteRecorded + "  /  BLACK " + blackRecorded + " recorded");
+        chartTitle.setTextSize(13); chartTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        chartTitle.setTextColor(0xFFEAEAEA); chartTitle.setPadding(dp(8), dp(10), dp(8), dp(5));
+        content.addView(chartTitle, fullWidth());
+        TextView axisNote = text(mirrorGraphMetric == 0 ? "Positive scores rise above 0 · negative scores fall below 0" :
+                (mirrorGraphMetric == 2 ? "Nodes shown on a logarithmic scale" : "Move number →"));
+        axisNote.setTextSize(10); axisNote.setTextColor(0xFFB0B0B0);
+        axisNote.setPadding(dp(8), 0, dp(8), dp(4));
+        content.addView(axisNote, fullWidth());
+
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int chartWidth = Math.max(screenWidth - dp(12), dp(58) + dp(42) * Math.max(1, moves.size()));
+        HorizontalScrollView chartScroll = new HorizontalScrollView(this);
+        chartScroll.setFillViewport(false);
+        chartScroll.setHorizontalScrollBarEnabled(true);
+        MirrorGraphView graph = new MirrorGraphView(this, whiteValues, blackValues, mirrorGraphMetric, moves.size());
+        chartScroll.addView(graph, new HorizontalScrollView.LayoutParams(chartWidth, dp(280)));
+        content.addView(chartScroll, new LinearLayout.LayoutParams(-1, dp(280)));
+
+        TextView source = text("Source: existing PGN move annotations · no extra tournament engine searches");
+        source.setTextSize(10); source.setTextColor(0xFF9AA7B0);
+        source.setPadding(dp(8), dp(8), dp(8), dp(2));
+        content.addView(source, fullWidth());
         ScrollView vertical = new MirrorSectionScrollView(this);
         vertical.setFillViewport(false);
-        vertical.addView(graphs, new ScrollView.LayoutParams(-1, -2));
+        vertical.addView(content, new ScrollView.LayoutParams(-1, -2));
         mirrorSectionHost.addView(vertical, new LinearLayout.LayoutParams(-1, -1));
     }
 
     private double parseMirrorGraphValue(String value, int metric) {
         if (value == null || value.trim().isEmpty() || value.equalsIgnoreCase("n/a")) return Double.NaN;
         String v = value.trim().replace(",", "");
-        if (metric == 0 && v.toUpperCase(java.util.Locale.US).contains("M")) {
+        if (metric == 0 && v.toUpperCase(java.util.Locale.US).contains("M"))
             return v.startsWith("-") ? -10.0 : 10.0;
-        }
-        if (metric == 4 && v.contains(":")) {
+        if (metric == 3 && v.contains(":")) {
             try {
                 String[] parts = v.split(":");
                 return Double.parseDouble(parts[0]) * 60.0 + Double.parseDouble(parts[1]);
@@ -1912,96 +2065,168 @@ public final class TournamentActivity extends Activity {
     }
 
     private final class MirrorGraphView extends View {
-        private final ArrayList<Float> values;
-        private final ArrayList<Integer> moveNumbers;
+        private final ArrayList<Float> whiteValues;
+        private final ArrayList<Float> blackValues;
         private final int metric;
+        private final int moveCount;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
-        MirrorGraphView(android.content.Context context, ArrayList<Float> data, ArrayList<Integer> moves, int metric) {
+        MirrorGraphView(android.content.Context context, ArrayList<Float> white, ArrayList<Float> black,
+                        int metric, int moveCount) {
             super(context);
-            this.values = new ArrayList<>(data);
-            this.moveNumbers = new ArrayList<>(moves);
+            this.whiteValues = new ArrayList<>(white);
+            this.blackValues = new ArrayList<>(black);
             this.metric = metric;
-            setBackgroundColor(0xFF62666A);
+            this.moveCount = moveCount;
+            setBackgroundColor(0xFF242424);
         }
 
         @Override protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
-            float left = dp(46), right = getWidth() - dp(12), top = dp(14), bottom = getHeight() - dp(30);
-            if (right <= left || bottom <= top || values.isEmpty()) return;
+            canvas.drawColor(0xFF242424);
+            float left = dp(48), right = getWidth() - dp(12), top = dp(16), bottom = getHeight() - dp(34);
+            if (right <= left || bottom <= top) return;
             float min = Float.POSITIVE_INFINITY, max = Float.NEGATIVE_INFINITY;
-            for (float value : values) if ((!Float.isNaN(value) && !Float.isInfinite(value))) {
-                min = Math.min(min, value); max = Math.max(max, value);
+            for (Float value : whiteValues) if (value != null && (!Float.isNaN(value) && !Float.isInfinite(value))) {
+                float axis = axisValue(value);
+                if (Float.isNaN(axis) || Float.isInfinite(axis)) continue;
+                min = Math.min(min, axis); max = Math.max(max, axis);
             }
-            if (!(!Float.isNaN(min) && !Float.isInfinite(min)) || !(!Float.isNaN(max) && !Float.isInfinite(max))) return;
-            if (min == max) { min -= 1; max += 1; }
-            float pad = (max - min) * 0.12f;
-            min -= pad; max += pad;
+            for (Float value : blackValues) if (value != null && (!Float.isNaN(value) && !Float.isInfinite(value))) {
+                float axis = axisValue(value);
+                if (Float.isNaN(axis) || Float.isInfinite(axis)) continue;
+                min = Math.min(min, axis); max = Math.max(max, axis);
+            }
+            boolean hasData = (!Float.isNaN(min) && !Float.isInfinite(min) && !Float.isNaN(max) && !Float.isInfinite(max));
+            if (metric == 0) {
+                float extent = hasData ? Math.max(Math.abs(min), Math.abs(max)) : 1.0f;
+                extent = Math.max(0.5f, extent * 1.12f);
+                min = -extent; max = extent;
+            } else if (metric == 2) {
+                if (!hasData) { min = 6; max = 9; }
+                else {
+                    min = (float)Math.floor(min);
+                    max = (float)Math.ceil(max);
+                    if (min == max) { min -= 1; max += 1; }
+                }
+            } else {
+                if (!hasData || max <= 0) max = 1;
+                max = max * 1.12f;
+                min = 0;
+            }
+            if (max <= min) max = min + 1;
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(dp(1));
-            paint.setColor(0xFF858B90);
+            paint.setColor(0xFF555555);
             for (int i = 0; i <= 4; i++) {
                 float y = top + (bottom - top) * i / 4f;
                 canvas.drawLine(left, y, right, y, paint);
             }
+            if (metric == 0) {
+                float zeroY = mapY(0, min, max, top, bottom);
+                paint.setStrokeWidth(dp(1.5f)); paint.setColor(0xFF9A9A9A);
+                canvas.drawLine(left, zeroY, right, zeroY, paint);
+            }
             paint.setStyle(Paint.Style.FILL);
             paint.setTextSize(dp(10));
-            paint.setColor(0xFFFFFFFF);
-            canvas.drawText(formatGraphNumber(max), dp(3), top + dp(4), paint);
-            canvas.drawText(formatGraphNumber((min + max) / 2f), dp(3), (top + bottom) / 2f, paint);
-            canvas.drawText(formatGraphNumber(min), dp(3), bottom, paint);
-
-            float step = values.size() <= 1 ? 0 : (right - left) / (values.size() - 1f);
-            float previousX = 0, previousY = 0;
-            boolean previousValid = false;
-            for (int i = 0; i < values.size(); i++) {
-                float value = values.get(i);
-                boolean valid = (!Float.isNaN(value) && !Float.isInfinite(value));
-                float x = values.size() == 1 ? (left + right) / 2f : left + step * i;
-                float y = valid ? bottom - (value - min) / (max - min) * (bottom - top) : 0;
-                if (valid && previousValid) {
-                    paint.setStyle(Paint.Style.STROKE);
-                    paint.setStrokeWidth(dp(3));
-                    paint.setColor((i & 1) == 0 ? 0xFFFFFFFF : 0xFF101010);
-                    canvas.drawLine(previousX, previousY, x, y, paint);
-                }
-                if (valid) {
-                    paint.setStyle(Paint.Style.FILL);
-                    if ((i & 1) == 0) {
-                        paint.setColor(0xFF252525); canvas.drawCircle(x, y, dp(4), paint);
-                        paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(2));
-                        paint.setColor(0xFFFFFFFF); canvas.drawCircle(x, y, dp(4), paint);
-                    } else {
-                        paint.setColor(0xFF101010); canvas.drawCircle(x, y, dp(4), paint);
-                        paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(1));
-                        paint.setColor(0xFFE8E8E8); canvas.drawCircle(x, y, dp(4), paint);
-                    }
-                    paint.setStyle(Paint.Style.FILL);
-                }
-                previousValid = valid;
-                if (valid) { previousX = x; previousY = y; }
+            paint.setColor(0xFFD0D0D0);
+            for (int i = 0; i <= 4; i++) {
+                float axis = max - (max - min) * i / 4f;
+                String label = formatAxisLabel(axis);
+                float y = top + (bottom - top) * i / 4f;
+                canvas.drawText(label, dp(3), y + dp(4), paint);
             }
-
-            // Move-axis labels: 1w, 1b, 2w, 2b ...; omit labels at dense zoom levels.
-            paint.setTextSize(dp(9));
-            paint.setColor(0xFFFFFFFF);
-            int labelStep = Math.max(1, (int)(dp(62) / Math.max(dp(1), step)));
-            for (int i = 0; i < moveNumbers.size(); i += labelStep) {
-                float x = values.size() <= 1 ? (left + right) / 2f : left + step * i;
-                String label = ((moveNumbers.get(i) + 1) / 2) + ((moveNumbers.get(i) & 1) == 1 ? "w" : "b");
-                canvas.drawText(label, x - paint.measureText(label) / 2f, getHeight() - dp(8), paint);
+            if (hasData) {
+                float step = moveCount <= 1 ? 0 : (right - left) / Math.max(1, moveCount - 1f);
+                drawSeries(canvas, whiteValues, true, step, left, top, bottom, min, max);
+                drawSeries(canvas, blackValues, false, step, left, top, bottom, min, max);
+            } else {
+                paint.setStyle(Paint.Style.FILL); paint.setTextSize(dp(13)); paint.setColor(0xFFB0B0B0);
+                String empty = "No recorded move analysis yet";
+                canvas.drawText(empty, left + Math.max(0, (right - left - paint.measureText(empty)) / 2),
+                        (top + bottom) / 2, paint);
             }
-            if (!moveNumbers.isEmpty()) {
-                String end = "Ply " + moveNumbers.get(moveNumbers.size() - 1);
-                float width = paint.measureText(end);
-                canvas.drawText(end, right - width, getHeight() - dp(8), paint);
+            // Show the full move number at the White ply. The Black sample follows
+            // it halfway to the next number, as in the reference chart.
+            paint.setStyle(Paint.Style.FILL); paint.setTextSize(dp(10)); paint.setColor(0xFFE0E0E0);
+            float step = moveCount <= 1 ? 0 : (right - left) / Math.max(1, moveCount - 1f);
+            int labelStep = moveCount > 28 ? 4 : (moveCount > 14 ? 2 : 1);
+            for (int ply = 0; ply < moveCount; ply += 2 * labelStep) {
+                float x = left + step * ply;
+                String label = Integer.toString(ply / 2 + 1);
+                canvas.drawText(label, x - paint.measureText(label) / 2, getHeight() - dp(8), paint);
             }
         }
 
-        private String formatGraphNumber(float value) {
-            if (Math.abs(value) >= 1000000) return String.format(java.util.Locale.US, "%.1fM", value / 1000000f);
-            if (Math.abs(value) >= 1000) return String.format(java.util.Locale.US, "%.1fK", value / 1000f);
-            return String.format(java.util.Locale.US, "%.2f", value);
+        private float axisValue(float value) {
+            if (metric == 2) return value > 0 ? (float)Math.log10(value) : Float.NaN;
+            return value;
+        }
+
+        private float mapY(float value, float min, float max, float top, float bottom) {
+            float axis = axisValue(value);
+            if ((Float.isNaN(axis) || Float.isInfinite(axis))) return bottom;
+            return bottom - (axis - min) / (max - min) * (bottom - top);
+        }
+
+        private void drawSeries(Canvas canvas, ArrayList<Float> values, boolean white, float step,
+                                float left, float top, float bottom, float min, float max) {
+            float previousX = 0, previousY = 0;
+            boolean previousValid = false;
+            for (int i = 0; i < values.size(); i++) {
+                Float value = values.get(i);
+                boolean thisSidePly = white ? (i & 1) == 0 : (i & 1) == 1;
+                if (!thisSidePly) continue; // The other engine's turn is not a gap in this series.
+                boolean valid = value != null && (!Float.isNaN(value) && !Float.isInfinite(value)) && (metric != 2 || value > 0);
+                if (!valid) { previousValid = false; continue; }
+                float x = left + step * i;
+                float y = mapY(value, min, max, top, bottom);
+                if (previousValid) {
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(white ? dp(3) : dp(4));
+                    paint.setColor(white ? 0xFFFFFFFF : 0xFFB0B0B0);
+                    canvas.drawLine(previousX, previousY, x, y, paint);
+                    if (!white) {
+                        paint.setStrokeWidth(dp(2)); paint.setColor(0xFF090909);
+                        canvas.drawLine(previousX, previousY, x, y, paint);
+                    }
+                }
+                if (white) {
+                    float r = dp(4.5f);
+                    Path diamond = new Path();
+                    diamond.moveTo(x, y - r); diamond.lineTo(x + r, y);
+                    diamond.lineTo(x, y + r); diamond.lineTo(x - r, y); diamond.close();
+                    paint.setStyle(Paint.Style.FILL); paint.setColor(0xFFFFFFFF);
+                    canvas.drawPath(diamond, paint);
+                } else {
+                    paint.setStyle(Paint.Style.FILL); paint.setColor(0xFF080808);
+                    canvas.drawCircle(x, y, dp(4.5f), paint);
+                    paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(dp(1.4f));
+                    paint.setColor(0xFFB8B8B8); canvas.drawCircle(x, y, dp(4.5f), paint);
+                }
+                previousX = x; previousY = y; previousValid = true;
+            }
+        }
+
+        private String formatAxisLabel(float value) {
+            if (metric == 0) return Math.abs(value) < 0.005f ? "0" : String.format(java.util.Locale.US, "%+.1f", value);
+            if (metric == 1) return String.format(java.util.Locale.US, "%.0f", value);
+            if (metric == 2) return compactAxisCount((long)Math.pow(10, value));
+            if (metric == 3) {
+                if (value >= 60) {
+                    long seconds = Math.max(0, (long)value);
+                    return String.format(java.util.Locale.US, "%d:%02d", seconds / 60, seconds % 60);
+                }
+                return String.format(java.util.Locale.US, "%.1f", value);
+            }
+            return compactAxisCount((long)value);
+        }
+
+        private String compactAxisCount(long value) {
+            if (value >= 1_000_000_000L) return String.format(java.util.Locale.US, "%.0fB", value / 1_000_000_000.0);
+            if (value >= 1_000_000L) return String.format(java.util.Locale.US, "%.0fM", value / 1_000_000.0);
+            if (value >= 1_000L) return String.format(java.util.Locale.US, "%.0fK", value / 1_000.0);
+            return Long.toString(value);
         }
     }
 
@@ -2107,7 +2332,7 @@ public final class TournamentActivity extends Activity {
         cell.setPadding(dp(2), dp(7), dp(2), dp(7));
         cell.setBackgroundColor(background);
         TextView count = text(total + " (" + white + "/" + black + ")");
-        count.setTextSize(12);
+        count.setTextSize(15);
         count.setGravity(android.view.Gravity.CENTER);
         TextView pct = text(String.format(java.util.Locale.US, "%.1f%%", percent));
         pct.setTextSize(10);
@@ -5668,6 +5893,7 @@ public final class TournamentActivity extends Activity {
     }
 
     private int dp(int value) { return (int)(value * getResources().getDisplayMetrics().density + 0.5f); }
+    private float dp(float value) { return value * getResources().getDisplayMetrics().density; }
     private int positiveInt(EditText field, String name, int minimum) {
         int v = Integer.parseInt(field.getText().toString().trim()); if (v < minimum) throw new IllegalArgumentException(name + " must be at least " + minimum); return v;
     }
