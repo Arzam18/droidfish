@@ -1282,7 +1282,7 @@ public final class TournamentActivity extends Activity {
                     line.append(TextIO.moveToString(cursor, move, false, false));
                     cursor.makeMove(move, new org.petero.droidfish.gamelogic.UndoInfo());
                 }
-                String wdl = estimateMirrorWdl(eval);
+                String[] wdl = estimateMirrorWdl(eval);
                 String elapsed = String.format(java.util.Locale.US, "%.2f", Math.max(0, pv.time) / 1000.0);
                 String output = "Eval: " + eval + "    Depth: " + pv.depth + "    Nodes: " + compactViewerCount(pv.nodes) +
                         "    NPS: " + compactViewerCount(pv.nps) + "    t:" + elapsed +
