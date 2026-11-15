@@ -7,6 +7,7 @@ import org.petero.droidfish.book.BookOptions;
 import org.petero.droidfish.book.TournamentBinBook;
 import org.petero.droidfish.gamelogic.TextIO;
 import org.petero.droidfish.engine.DroidComputerPlayer;
+import org.petero.droidfish.engine.UCIOptions;
 import org.petero.droidfish.gamelogic.Game;
 import org.petero.droidfish.gamelogic.GameTree;
 import org.petero.droidfish.gamelogic.Move;
@@ -70,6 +71,7 @@ public final class TournamentRunner {
     private volatile CetClock clock;
     private TournamentManager.Pairing pairing;
     private TournamentManager.Engine whiteEngine, blackEngine;
+    private final Map<String, Map<String, String>> tournamentUciOptionValues = new HashMap<>();
     private int whiteSearchId, blackSearchId;
     private volatile int activeWhiteId, activeBlackId;
     private long turnGeneration;
@@ -255,6 +257,27 @@ public final class TournamentRunner {
 
     public synchronized boolean isPaused() { return paused; }
     public boolean isFinished() { return finished; }
+
+    /** Return the UCI options for the explicitly selected side, not the side to move. */
+    public synchronized UCIOptions getUciOptionsForTournamentEngine(boolean whiteSide, String engineId) {
+        TournamentManager.Engine engine = whiteSide ? whiteEngine : blackEngine;
+        if (engineId == null || engine == null || !engineId.equals(engine.id)) return null;
+        return (whiteSide ? whitePlayer : blackPlayer).getUCIOptions();
+    }
+
+    /** Apply edited values to the exact side and retain them across engine restarts. */
+    public synchronized void setUciOptionsForTournamentEngine(boolean whiteSide, String engineId,
+                                                                Map<String, String> options) {
+        TournamentManager.Engine engine = whiteSide ? whiteEngine : blackEngine;
+        if (engineId == null || engine == null || !engineId.equals(engine.id) || options == null) return;
+        Map<String, String> saved = tournamentUciOptionValues.get(engineId);
+        if (saved == null) {
+            saved = new HashMap<>();
+            tournamentUciOptionValues.put(engineId, saved);
+        }
+        saved.putAll(options);
+        (whiteSide ? whitePlayer : blackPlayer).setEngineUCIOptions(options);
+    }
     public boolean isStopped() { return stopped; }
     private boolean usesClock() {
         TournamentManager.TimeMode mode = tournament.timeMode();
@@ -656,7 +679,7 @@ public final class TournamentRunner {
             if (list == null || list.first == null || list.first.isEmpty()) return;
             GameTree.Node node = list.first.get(list.first.size() - 1);
             String analysis = analysisAtBestMove;
-            String eval = "n/a", depth = "n/a", nodes = "n/a", nps = "n/a", wdl = "";
+            String eval = "n/a", depth = "n/a", nodes = "n/a", nps = "n/a", tbHits = "n/a", wdl = "";
             if (analysis != null) {
                 java.util.regex.Matcher m = java.util.regex.Pattern.compile(
                         "Eval:\\s*(.*?)\\s+Depth:\\s*(.*?)\\s+Nodes:\\s*(.*?)\\s+NPS:\\s*(\\S+)")
@@ -665,13 +688,15 @@ public final class TournamentRunner {
                     eval = m.group(1).trim(); depth = m.group(2).trim();
                     nodes = m.group(3).trim(); nps = m.group(4).trim();
                 }
+                java.util.regex.Matcher tb = java.util.regex.Pattern.compile("TBHits:\\s*(\\S+)").matcher(analysis.replace('\n', ' '));
+                if (tb.find()) tbHits = tb.group(1).trim();
                 java.util.regex.Matcher w = java.util.regex.Pattern.compile(
                         "W:\\s*(\\d+)%\\s+D:\\s*(\\d+)%\\s+L:\\s*(\\d+)%").matcher(analysis);
                 if (w.find()) wdl = " W:" + w.group(1) + "% D:" + w.group(2) + "% L:" + w.group(3) + "%";
             }
             long remaining = clock == null ? 0 : clock.remainingMs(whiteMoved);
             String comment = "Eval: " + eval + " Depth: " + depth + " Nodes: " + nodes
-                    + " NPS: " + nps + " Clock: " + clockText(remaining)
+                    + " NPS: " + nps + " TBHits: " + tbHits + " Clock: " + clockText(remaining)
                     + " Time: " + moveTimeText(moveMs) + wdl;
             // Do not include the engine's PV/variation in the PGN comment.
             node.setPostComment(comment);
@@ -772,6 +797,7 @@ public final class TournamentRunner {
         private volatile int lastDepth;
         private volatile long lastNodes;
         private volatile int lastNps;
+        private volatile long lastTbHits;
         private volatile int lastTimeMs;
         private volatile String lastPv = "";
         private volatile boolean hasCurrentSearchInfo;
@@ -787,6 +813,7 @@ public final class TournamentRunner {
             lastDepth = 0;
             lastNodes = 0;
             lastNps = 0;
+            lastTbHits = 0;
             lastTimeMs = 0;
             lastPv = "";
             pendingPvPosition = null;
@@ -833,6 +860,7 @@ public final class TournamentRunner {
                 lastDepth = pv.depth;
                 lastNodes = pv.nodes;
                 lastNps = pv.nps;
+                lastTbHits = pv.tbHits;
                 lastTimeMs = pv.time;
                 // DroidComputerPlayer creates a fresh PvInfo snapshot for
                 // each UCI info line. Retain that object directly instead of cloning
@@ -847,7 +875,7 @@ public final class TournamentRunner {
         }
         @Override public void notifyStats(int id, long nodes, int nps, long tbHits, int hash, int time, int seldepth) {
             if (!isCurrentSearch(id)) return;
-            lastNodes = nodes; lastNps = nps; lastTimeMs = time;
+            lastNodes = nodes; lastNps = nps; lastTbHits = tbHits; lastTimeMs = time;
             hasCurrentSearchInfo = true;
             publishAnalysis(false);
         }
@@ -974,7 +1002,8 @@ public final class TournamentRunner {
             String nps = compactCount(lastNps);
             String variation = pvLine == null ? "" : pvLine.trim();
             String wdl = estimateWdl(score);
-            String header = "Eval: " + score + "    Depth: " + lastDepth + "    Nodes: " + nodes + "    NPS: " + nps;
+            String header = "Eval: " + score + "    Depth: " + lastDepth + "    Nodes: " + nodes +
+                    "    NPS: " + nps + "    TBHits: " + compactCount(lastTbHits);
             String text = header + "\nW: " + wdl.split(",")[0] + "%   D: " + wdl.split(",")[1] + "%   L: " + wdl.split(",")[2] + "%"
                     + (variation.length() == 0 ? "" : "\n" + variation);
             if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
@@ -1016,13 +1045,23 @@ public final class TournamentRunner {
             listener.onError(side + " engine '" + engineName + "': " + errMsg, null);
         }
         @Override public void notifyEngineInitialized() {
-            // UCI option discovery clears pending options, so apply the tournament baseline
-            // after each newly loaded engine has reported its supported options.
-            Map<String, String> options = new HashMap<>();
-            options.put("Threads", "1");
-            options.put("Hash", "16");
-            options.put("Ponder", "false");
-            (white ? whitePlayer : blackPlayer).setEngineUCIOptions(options);
+            // UCI option discovery clears pending options, so re-apply the saved per-engine
+            // settings (with tournament defaults only for options the user has not changed).
+            TournamentManager.Engine engine = white ? whiteEngine : blackEngine;
+            if (engine == null) return;
+            Map<String, String> optionSnapshot;
+            synchronized (TournamentRunner.this) {
+                Map<String, String> options = tournamentUciOptionValues.get(engine.id);
+                if (options == null) {
+                    options = new HashMap<>();
+                    tournamentUciOptionValues.put(engine.id, options);
+                }
+                options.putIfAbsent("Threads", "1");
+                options.putIfAbsent("Hash", "16");
+                options.putIfAbsent("Ponder", "false");
+                optionSnapshot = new HashMap<>(options);
+            }
+            (white ? whitePlayer : blackPlayer).setEngineUCIOptions(optionSnapshot);
         }
     }
 
