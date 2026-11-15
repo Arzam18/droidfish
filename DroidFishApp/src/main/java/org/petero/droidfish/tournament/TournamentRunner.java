@@ -247,7 +247,8 @@ public final class TournamentRunner {
         activeBlackId = ++blackSearchId;
         whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.executableId);
         blackPlayer.queueStartEngine(activeBlackId, blackEngine.executableId);
-        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
+        // This is a continuation of the same in-memory game. Do not emit
+        // onGameStarted here: the UI treats that callback as a new-game reset.
         notifyPosition();
         requestMove(game.currPos().whiteMove);
     }
@@ -434,6 +435,9 @@ public final class TournamentRunner {
         currentOpeningName = pairing.openingName == null || pairing.openingName.trim().isEmpty()
                 ? "Starting position" : pairing.openingName;
         game.tree.setTournamentOpening(currentOpeningName);
+        // Publish the new game before the opening callbacks. The Mirror Board
+        // clears its previous game's move history in onGameStarted.
+        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
         int appliedPlies = applyAssignedOpening(pairing.openingSanLine);
         if (appliedPlies == 0 && pairing.openingSanLine != null && !pairing.openingSanLine.trim().isEmpty()) {
             listener.onError("The saved opening assignment for Game " + (pairing.index + 1) +
@@ -463,7 +467,6 @@ public final class TournamentRunner {
         activeBlackId = ++blackSearchId;
         whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.executableId);
         blackPlayer.queueStartEngine(activeBlackId, blackEngine.executableId);
-        listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
         notifyPosition();
         requestMove(game.currPos().whiteMove);
     }
@@ -616,23 +619,14 @@ public final class TournamentRunner {
     private String currentPgnMoves() {
         if (game == null || game.tree == null) return "";
         try {
-            android.util.Pair<java.util.List<GameTree.Node>, Integer> list = game.tree.getMoveList();
-            StringBuilder out = new StringBuilder();
-            Position cursor = new Position();
-            for (GameTree.Node node : list.first) {
-                Move move = node.move;
-                if (move == null) continue;
-                if (out.length() > 0) out.append(' ');
-                if (cursor.whiteMove) out.append(cursor.fullMoveCounter).append('.');
-                else if (out.length() == 0) out.append(cursor.fullMoveCounter).append("...");
-                out.append(org.petero.droidfish.gamelogic.TextIO.moveToString(cursor, move, false, false));
-                String comment = node.getPostComment();
-                if (comment != null && !comment.trim().isEmpty())
-                    out.append(" {").append(comment.replace('}', '］')).append("}");
-                cursor.makeMove(move, new org.petero.droidfish.gamelogic.UndoInfo());
-            }
-            return out.toString();
-        } catch (RuntimeException ignored) { return ""; }
+            PGNOptions options = new PGNOptions();
+            options.exp.comments = true;
+            options.exp.nag = true;
+            options.exp.variations = false;
+            return game.tree.toPGN(options);
+        } catch (RuntimeException ignored) {
+            return "";
+        }
     }
 
     private String clockText(long ms) {
