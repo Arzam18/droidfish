@@ -775,6 +775,13 @@ public final class TournamentRunner {
         private volatile int lastTimeMs;
         private volatile String lastPv = "";
         private volatile boolean hasCurrentSearchInfo;
+        // Keep the newest raw PV and format it only when the UI snapshot is due.
+        // PV callbacks can arrive much faster than a human can read them.
+        private Position pendingPvPosition;
+        private SearchListener.PvInfo pendingPvInfo;
+        private boolean pendingPvNeedsFormatting;
+        private long lastPublishNs;
+        private static final long ANALYSIS_PUBLISH_INTERVAL_NS = 250_000_000L;
 
         void beginSearch() {
             lastDepth = 0;
@@ -782,6 +789,10 @@ public final class TournamentRunner {
             lastNps = 0;
             lastTimeMs = 0;
             lastPv = "";
+            pendingPvPosition = null;
+            pendingPvInfo = null;
+            pendingPvNeedsFormatting = false;
+            lastPublishNs = 0;
             hasCurrentSearchInfo = false;
             if (white) latestWhiteAnalysis = "WHITE analysis pending…";
             else latestBlackAnalysis = "BLACK analysis pending…";
@@ -789,6 +800,8 @@ public final class TournamentRunner {
 
         String snapshotForMove() {
             if (!hasCurrentSearchInfo) return "Eval: n/a Depth: n/a Nodes: n/a NPS: n/a";
+            // Flush the most recent depth/PV/stats before writing the PGN comment.
+            publishAnalysis(true);
             return white ? latestWhiteAnalysis : latestBlackAnalysis;
         }
 
@@ -799,34 +812,17 @@ public final class TournamentRunner {
             if (!isCurrentSearch(id)) return;
             lastDepth = depth;
             hasCurrentSearchInfo = true;
-            publishAnalysis();
+            publishAnalysis(false);
         }
         @Override public void notifyCurrMove(int id, Position pos, Move move, int moveNr) { }
         @Override public void notifyPV(int id, Position pos, ArrayList<PvInfo> pvInfo, Move ponderMove) {
             if (!isCurrentSearch(id)) return;
             if (pvInfo != null && !pvInfo.isEmpty()) {
                 PvInfo pv = pvInfo.get(0);
-                StringBuilder line = new StringBuilder();
-                if (pv.pv != null) {
-                    Position cursor = new Position(pos);
-                    for (Move m : pv.pv) {
-                        boolean whiteToMove = cursor.whiteMove;
-                        int moveNumber = cursor.fullMoveCounter;
-                        String san = org.petero.droidfish.gamelogic.TextIO.moveToString(cursor, m, false, false);
-                        if (line.length() > 0) line.append(' ');
-                        if (whiteToMove) {
-                            line.append(moveNumber).append('.').append(san);
-                        } else {
-                            // Standard PGN-style numbering: 1.e4 e5 2.Nf3 Nf6.
-                            // If a variation starts with Black to move, retain 1... notation.
-                            if (line.length() == 0) line.append(moveNumber).append("...");
-                            line.append(san);
-                        }
-                        cursor.makeMove(m, new org.petero.droidfish.gamelogic.UndoInfo());
-                    }
-                }
-                // UCI scores are from the engine's point of view. Convert both
-                // centipawn and mate scores to a consistent White-positive view.
+                if (pv == null) return;
+
+                // Retain every newest engine measurement and evaluation for rules
+                // and the final PGN snapshot, but defer expensive SAN formatting.
                 int whitePerspectiveScore = white ? pv.score : -pv.score;
                 if (!pv.isMate) {
                     double evalPawns = whitePerspectiveScore / 100.0;
@@ -834,29 +830,34 @@ public final class TournamentRunner {
                     checkFastWinRule();
                     checkEvaluationDrawRule();
                 }
-                String scoreText = pv.isMate ? (whitePerspectiveScore >= 0 ? "+M" : "-M") + Math.abs(whitePerspectiveScore) :
-                        String.format(java.util.Locale.US, "%+.2f", whitePerspectiveScore / 100.0);
-                lastPv = "eval " + scoreText + (line.length() == 0 ? "" : "  " + line);
                 lastDepth = pv.depth;
                 lastNodes = pv.nodes;
                 lastNps = pv.nps;
                 lastTimeMs = pv.time;
+                // DroidComputerPlayer creates a fresh PvInfo snapshot for
+                // each UCI info line. Retain that object directly instead of cloning
+                // the Position and allocating another copy of every PV Move here.
+                // The final best-move snapshot is formatted synchronously below.
+                pendingPvPosition = pos;
+                pendingPvInfo = pv;
+                pendingPvNeedsFormatting = true;
                 hasCurrentSearchInfo = true;
-                publishAnalysis();
+                publishAnalysis(false);
             }
         }
         @Override public void notifyStats(int id, long nodes, int nps, long tbHits, int hash, int time, int seldepth) {
             if (!isCurrentSearch(id)) return;
             lastNodes = nodes; lastNps = nps; lastTimeMs = time;
             hasCurrentSearchInfo = true;
-            publishAnalysis();
+            publishAnalysis(false);
         }
         @Override public void notifyBookInfo(int id, String bookInfo, ArrayList<Move> moveList, String eco, int distToEcoTree) {
             if (!isCurrentSearch(id)) return;
             if (bookInfo != null && !bookInfo.isEmpty()) {
                 lastPv = "Book: " + bookInfo;
+                pendingPvNeedsFormatting = false;
                 hasCurrentSearchInfo = true;
-                publishAnalysis();
+                publishAnalysis(false);
             }
         }
         private void checkEvaluationDrawRule() {
@@ -928,8 +929,37 @@ public final class TournamentRunner {
                 return w + "," + d + "," + l;
             } catch (RuntimeException ex) { return "33,34,33"; }
         }
-        private void publishAnalysis() {
+        private void publishAnalysis(boolean force) {
             if (stopped || finished) return;
+            long nowNs = System.nanoTime();
+            if (!force && lastPublishNs != 0 && nowNs - lastPublishNs < ANALYSIS_PUBLISH_INTERVAL_NS) return;
+            lastPublishNs = nowNs;
+            if (pendingPvNeedsFormatting) {
+                StringBuilder line = new StringBuilder();
+                SearchListener.PvInfo pv = pendingPvInfo;
+                if (pendingPvPosition != null && pv != null && pv.pv != null) {
+                    Position cursor = new Position(pendingPvPosition);
+                    for (Move move : pv.pv) {
+                        boolean whiteToMove = cursor.whiteMove;
+                        int moveNumber = cursor.fullMoveCounter;
+                        String san = TextIO.moveToString(cursor, move, false, false);
+                        if (line.length() > 0) line.append(' ');
+                        if (whiteToMove) line.append(moveNumber).append('.').append(san);
+                        else {
+                            if (line.length() == 0) line.append(moveNumber).append("...");
+                            line.append(san);
+                        }
+                        cursor.makeMove(move, new org.petero.droidfish.gamelogic.UndoInfo());
+                    }
+                }
+                int pvScore = pv == null ? 0 : (white ? pv.score : -pv.score);
+                boolean pvIsMate = pv != null && pv.isMate;
+                String scoreText = pvIsMate ?
+                        (pvScore >= 0 ? "+M" : "-M") + Math.abs(pvScore) :
+                        String.format(java.util.Locale.US, "%+.2f", pvScore / 100.0);
+                lastPv = "eval " + scoreText + (line.length() == 0 ? "" : "  " + line);
+                pendingPvNeedsFormatting = false;
+            }
             String score = "—";
             String pvLine = "";
             if (lastPv.startsWith("eval ")) {
