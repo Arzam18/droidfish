@@ -437,6 +437,7 @@ public abstract class ChessBoard extends View {
                 canvas.drawRect(xCrd, yCrd, xCrd+sqSize, yCrd+sqSize, paint);
 
                 int sq = Position.getSquare(x, y);
+                drawSquareUnderlay(canvas, sq, xCrd, yCrd);
                 if (!(animActive && anim.squareHidden(sq) || sq == dragSquare)) {
                     int p = pos.getPiece(sq);
                     drawPiece(canvas, xCrd, yCrd, p);
@@ -530,6 +531,9 @@ public abstract class ChessBoard extends View {
             canvas.drawPath(path, p);
         }
     }
+
+    /** Draw a square background overlay before pieces are painted. */
+    protected void drawSquareUnderlay(Canvas canvas, int square, int x, int y) { }
 
     abstract protected void drawExtraSquares(Canvas canvas);
 
