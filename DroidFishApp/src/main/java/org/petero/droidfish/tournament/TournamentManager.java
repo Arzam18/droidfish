@@ -72,6 +72,8 @@ public final class TournamentManager {
         public String openingSanLine = "";
         /** Original PGN date is retained so replay replaces the same archived record. */
         public String pgnDate = "";
+        /** Elo update order, assigned when this result is first recorded (or a replay replaces it). */
+        public long ratingSequence;
         /** Cup match metadata; zero means this is not a Cup game. */
         public int cupMatchNumber, cupPairNumber, cupGameInPair;
         /** Names actually used for this completed game, preserving version history in the schedule. */
@@ -169,6 +171,15 @@ public final class TournamentManager {
     private static final double ANOMALY_EVAL_THRESHOLD_PAWNS = 1.50;
     private final List<Engine> engines = new ArrayList<>();
     private final List<Pairing> pairings = new ArrayList<>();
+    // Elo is opt-in per tournament. Older saved tournaments therefore remain unrated.
+    private boolean ratingEnabled;
+    private boolean ratingShowDecimals;
+    // Only a manager created for a brand-new event may receive initial Elo settings.
+    // Managers reconstructed from saved JSON are permanently locked to their saved setting.
+    private boolean ratingConfigurationAllowed = true;
+    private double ratingKFactor = 20.0;
+    private long nextRatingSequence = 1L;
+    private final Map<String, Double> initialRatings = new HashMap<>();
     private final List<SwissBye> swissByes = new ArrayList<>();
     private final List<SwissMatch> swissMatches = new ArrayList<>();
     /** Game indices in operator-selected priority order. */
@@ -358,7 +369,13 @@ public final class TournamentManager {
         return seeded;
     }
 
+    private static boolean containsEngineId(List<Engine> engines, String engineId) {
+        for (Engine engine : engines) if (engine.id.equals(engineId)) return true;
+        return false;
+    }
+
     private TournamentManager(Context context, JSONObject root, String fileName) throws JSONException {
+        ratingConfigurationAllowed = false;
         this.context = context.getApplicationContext(); this.fileName = fileName == null || fileName.isEmpty() ? "cet_tournament.json" : fileName;
         title = root.optString("title", "CET Tournament"); format = Format.valueOf(root.getString("format"));
         gamesPerPair = root.optInt("gamesPerPair", 2);
@@ -390,6 +407,31 @@ public final class TournamentManager {
         timeMode = TimeMode.valueOf(root.optString("timeMode", "CLOCK")); limitValue = root.optInt("limitValue", 30);
         JSONArray ea = root.getJSONArray("engines");
         for (int i = 0; i < ea.length(); i++) { JSONObject e = ea.getJSONObject(i); String id = e.getString("id"); engines.add(new Engine(id, e.optString("name"), e.optString("executableId", id))); }
+        ratingEnabled = root.optBoolean("ratingEnabled", false);
+        ratingShowDecimals = ratingEnabled && root.optBoolean("ratingShowDecimals", false);
+        double savedK = root.optDouble("ratingKFactor", 20.0);
+        ratingKFactor = Double.isFinite(savedK) && savedK > 0.0 && savedK <= 100.0 ? savedK : 20.0;
+        JSONArray initialRatingArray = root.optJSONArray("initialRatings");
+        boolean completeInitialRatings = initialRatingArray != null;
+        if (initialRatingArray != null) {
+            for (int i = 0; i < initialRatingArray.length(); i++) {
+                JSONObject rating = initialRatingArray.optJSONObject(i);
+                if (rating == null) { completeInitialRatings = false; continue; }
+                String engineId = rating.optString("engineId", "");
+                double value = rating.optDouble("rating", Double.NaN);
+                if (engineId.isEmpty() || !Double.isFinite(value) || value < 0.0 || value > 10000.0 ||
+                        !containsEngineId(engines, engineId) || initialRatings.containsKey(engineId)) {
+                    completeInitialRatings = false;
+                    continue;
+                }
+                initialRatings.put(engineId, value);
+            }
+        }
+        if (ratingEnabled && (!completeInitialRatings || initialRatings.size() != engines.size())) {
+            ratingEnabled = false;
+            ratingShowDecimals = false;
+            initialRatings.clear();
+        }
         JSONArray strengthArray = root.optJSONArray("swissStrengthOrder");
         if (strengthArray != null) {
             for (int i = 0; i < strengthArray.length(); i++) swissStrengthOrder.add(strengthArray.optString(i, ""));
@@ -411,6 +453,8 @@ public final class TournamentManager {
             pairing.openingName = p.optString("openingName", "");
             pairing.openingSanLine = p.optString("openingSanLine", "");
             pairing.pgnDate = p.optString("pgnDate", pgnTagValue(pairing.pgn, "Date"));
+            pairing.ratingSequence = Math.max(0L, p.optLong("ratingSequence", 0L));
+            nextRatingSequence = Math.max(nextRatingSequence, pairing.ratingSequence + 1L);
             pairing.cupMatchNumber = p.optInt("cupMatchNumber", 0);
             pairing.cupPairNumber = p.optInt("cupPairNumber", 0);
             pairing.cupGameInPair = p.optInt("cupGameInPair", 0);
@@ -469,6 +513,20 @@ public final class TournamentManager {
             if (swissRoundsTotal < 1) swissRoundsTotal = recommendedSwissRounds(engines.size());
             if (swissCurrentRound < 1 && !swissMatches.isEmpty()) {
                 for (SwissMatch match : swissMatches) swissCurrentRound = Math.max(swissCurrentRound, match.round);
+            }
+        }
+        nextRatingSequence = Math.max(nextRatingSequence, root.optLong("nextRatingSequence", 1L));
+        if (ratingEnabled) {
+            // An enabled rating history must have one unique sequence for every recorded game.
+            HashSet<Long> usedRatingSequences = new HashSet<>();
+            for (Pairing pairing : pairings) {
+                if (pairing.isComplete() && (pairing.ratingSequence <= 0L ||
+                        pairing.ratingSequence == Long.MAX_VALUE || !usedRatingSequences.add(pairing.ratingSequence))) {
+                    ratingEnabled = false;
+                    ratingShowDecimals = false;
+                    initialRatings.clear();
+                    break;
+                }
             }
         }
         activePairingIndex = root.optInt("activePairingIndex", -1);
@@ -1888,6 +1946,8 @@ public final class TournamentManager {
         if (outcome == null || outcome == Outcome.UNFINISHED) throw new IllegalArgumentException("A final result is required");
         Pairing p = pairings.get(index);
         if (p.isComplete() && !p.replayPending) throw new IllegalStateException("Pairing already has a result");
+        boolean replacingReplay = p.replayPending;
+        if (ratingEnabled && (!p.isComplete() || replacingReplay)) p.ratingSequence = nextRatingSequence++;
         p.outcome = outcome; p.pgn = pgn == null ? "" : pgn;
         p.whiteEvalPawns = Double.isFinite(whiteEvalPawns) ? whiteEvalPawns : Double.NaN;
         p.blackEvalPawns = Double.isFinite(blackEvalPawns) ? blackEvalPawns : Double.NaN;
@@ -2236,19 +2296,107 @@ public final class TournamentManager {
     }
     private Standing find(List<Standing> list, String id) { for (Standing s : list) if (s.engineId.equals(id)) return s; throw new IllegalStateException("Unknown engine " + id); }
 
+    /** True only when Elo was explicitly enabled when this tournament was created. */
+    public synchronized boolean ratingEnabled() { return ratingEnabled; }
+    public synchronized boolean ratingShowDecimals() { return ratingShowDecimals; }
+    public synchronized double ratingKFactor() { return ratingKFactor; }
+    public synchronized void setRatingShowDecimals(boolean show) throws IOException, JSONException {
+        if (!ratingEnabled) throw new IllegalStateException("Elo rating is disabled for this tournament");
+        if (ratingShowDecimals == show) return;
+        ratingShowDecimals = show;
+        save();
+    }
+    public synchronized Map<String, Double> initialRatings() {
+        return Collections.unmodifiableMap(new HashMap<>(initialRatings));
+    }
+
+    /**
+     * Configure Elo for a newly-created tournament before its first game.
+     * The creation-only guard prevents changing the Elo policy of any saved/legacy event.
+     */
+    public synchronized void setRatingSettings(boolean enabled, Map<String, Double> startingRatings,
+                                               boolean showDecimals) {
+        if (!ratingConfigurationAllowed)
+            throw new IllegalStateException("Elo settings are fixed when a tournament is created and cannot be changed on a saved tournament");
+        if (completedGamesCount() != 0)
+            throw new IllegalStateException("Elo settings can only be configured before the first completed game");
+        if (!enabled) {
+            ratingConfigurationAllowed = false;
+            ratingEnabled = false;
+            ratingShowDecimals = false;
+            initialRatings.clear();
+            return;
+        }
+        if (startingRatings == null || startingRatings.size() != engines.size())
+            throw new IllegalArgumentException("An initial Elo rating is required for every selected engine");
+        HashMap<String, Double> validated = new HashMap<>();
+        for (Engine engine : engines) {
+            Double value = startingRatings.get(engine.id);
+            if (value == null || !Double.isFinite(value) || value < 0.0 || value > 10000.0)
+                throw new IllegalArgumentException("Invalid initial Elo rating for " + engine.displayName + " (use 0–10000)");
+            validated.put(engine.id, value);
+        }
+        ratingConfigurationAllowed = false;
+        initialRatings.clear();
+        initialRatings.putAll(validated);
+        ratingEnabled = true;
+        ratingShowDecimals = showDecimals;
+        ratingKFactor = 20.0;
+        nextRatingSequence = 1L;
+        for (Pairing pairing : pairings) pairing.ratingSequence = 0L;
+    }
+
+    /** Current Elo values recalculated in actual result-completion order. */
+    public synchronized Map<String, Double> ratings() {
+        if (!ratingEnabled) return Collections.emptyMap();
+        HashMap<String, Double> current = new HashMap<>(initialRatings);
+        ArrayList<Pairing> ordered = new ArrayList<>();
+        for (Pairing pairing : pairings)
+            if (pairing.isComplete() && pairing.ratingSequence > 0L) ordered.add(pairing);
+        Collections.sort(ordered, (a, b) -> {
+            int sequence = Long.compare(a.ratingSequence, b.ratingSequence);
+            return sequence != 0 ? sequence : Integer.compare(a.index, b.index);
+        });
+        for (Pairing pairing : ordered) {
+            Double whiteRating = current.get(pairing.whiteEngineId);
+            Double blackRating = current.get(pairing.blackEngineId);
+            if (whiteRating == null || blackRating == null) continue;
+            double whiteActual = pairing.outcome == Outcome.WHITE_WIN ? 1.0 :
+                    pairing.outcome == Outcome.DRAW ? 0.5 : 0.0;
+            double blackActual = 1.0 - whiteActual;
+            double expectedWhite = 1.0 / (1.0 + Math.pow(10.0, (blackRating - whiteRating) / 400.0));
+            double expectedBlack = 1.0 - expectedWhite;
+            current.put(pairing.whiteEngineId, whiteRating + ratingKFactor * (whiteActual - expectedWhite));
+            current.put(pairing.blackEngineId, blackRating + ratingKFactor * (blackActual - expectedBlack));
+        }
+        return Collections.unmodifiableMap(current);
+    }
+
     public synchronized String externalSaveError() { return externalSaveError; }
 
     public synchronized void save() throws IOException, JSONException {
         JSONObject root = new JSONObject(); root.put("title", title); root.put("format", format.name()); root.put("gamesPerPair", gamesPerPair);
         root.put("baseTimeMs", baseTimeMs); root.put("incrementMs", incrementMs);
         root.put("timeMode", timeMode.name()); root.put("limitValue", limitValue);
+        // Omit all rating metadata when disabled. Legacy/current tournaments therefore
+        // retain their old schema and load as unrated without a rating migration.
+        if (ratingEnabled) {
+            root.put("ratingEnabled", true); root.put("ratingShowDecimals", ratingShowDecimals);
+            root.put("ratingKFactor", ratingKFactor); root.put("nextRatingSequence", nextRatingSequence);
+            JSONArray initialRatingArray = new JSONArray();
+            for (Engine engine : engines) {
+                JSONObject rating = new JSONObject(); rating.put("engineId", engine.id);
+                rating.put("rating", initialRatings.get(engine.id)); initialRatingArray.put(rating);
+            }
+            root.put("initialRatings", initialRatingArray);
+        }
         root.put("openingPgn", openingPgn); root.put("openingPgnFileName", openingPgnFileName); root.put("openingBinPath", openingBinPath); root.put("openingPlies", openingPlies); root.put("openingStartIndex", openingStartIndex); root.put("repeatOpening", repeatOpening); root.put("tournamentElapsedMs", tournamentElapsedMs);
         root.put("startPositionMode", startPositionMode.name()); root.put("chess960Enabled", startPositionMode == StartPositionMode.CHESS960);
         root.put("chess960StartId", chess960StartId); root.put("startingPositionSeed", startingPositionSeed); root.put("openingFen", openingFen);
         root.put("anomalyRuleSettingsSaved", anomalyRuleSettingsSaved); root.put("anomalyRulesEnabled", anomalyRulesEnabled);
         root.put("anomalyRuleStartFullMove", anomalyRuleStartFullMove); root.put("anomalyMaximumFullMoves", anomalyMaximumFullMoves);
         JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); o.put("executableId", e.executableId); ea.put(o); } root.put("engines", ea);
-        JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); o.put("whiteEvalPawns", Double.isFinite(p.whiteEvalPawns) ? p.whiteEvalPawns : JSONObject.NULL); o.put("blackEvalPawns", Double.isFinite(p.blackEvalPawns) ? p.blackEvalPawns : JSONObject.NULL); o.put("anomalyReviewed", p.anomalyReviewed); o.put("replayPending", p.replayPending); o.put("openingAssigned", p.openingAssigned); o.put("openingIndex", p.openingIndex); o.put("openingName", p.openingName); o.put("openingSanLine", p.openingSanLine); o.put("pgnDate", p.pgnDate); o.put("cupMatchNumber", p.cupMatchNumber); o.put("cupPairNumber", p.cupPairNumber); o.put("cupGameInPair", p.cupGameInPair); o.put("whiteNameAtPlay", p.whiteNameAtPlay); o.put("blackNameAtPlay", p.blackNameAtPlay); pa.put(o); } root.put("pairings", pa);
+        JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); o.put("whiteEvalPawns", Double.isFinite(p.whiteEvalPawns) ? p.whiteEvalPawns : JSONObject.NULL); o.put("blackEvalPawns", Double.isFinite(p.blackEvalPawns) ? p.blackEvalPawns : JSONObject.NULL); o.put("anomalyReviewed", p.anomalyReviewed); o.put("replayPending", p.replayPending); o.put("openingAssigned", p.openingAssigned); o.put("openingIndex", p.openingIndex); o.put("openingName", p.openingName); o.put("openingSanLine", p.openingSanLine); o.put("pgnDate", p.pgnDate); o.put("cupMatchNumber", p.cupMatchNumber); o.put("cupPairNumber", p.cupPairNumber); o.put("cupGameInPair", p.cupGameInPair); if (ratingEnabled) o.put("ratingSequence", p.ratingSequence); o.put("whiteNameAtPlay", p.whiteNameAtPlay); o.put("blackNameAtPlay", p.blackNameAtPlay); pa.put(o); } root.put("pairings", pa);
         if (format == Format.SWISS) {
             root.put("swissRoundsTotal", swissRoundsTotal);
             root.put("swissCurrentRound", swissCurrentRound);
