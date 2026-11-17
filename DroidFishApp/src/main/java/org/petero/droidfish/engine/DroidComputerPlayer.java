@@ -647,6 +647,15 @@ public class DroidComputerPlayer {
             }
         }
 
+        // Chess960 requires the UCI_Chess960 protocol option. Do not silently send
+        // rook-square castling moves to an engine that only understands orthodox UCI.
+        if (sr.prevPos.isChess960() && !uciEngine.setOption("UCI_Chess960", "true")) {
+            searchRequest = null;
+            listener.reportEngineError("This engine does not advertise UCI_Chess960 and cannot play Chess960. Select an engine with Chess960 support.");
+            return;
+        }
+        if (!sr.prevPos.isChess960()) uciEngine.setOption("UCI_Chess960", "false");
+
         // Set strength and MultiPV parameters
         clearInfo();
         uciEngine.setEloStrength(searchRequest.elo);
