@@ -80,27 +80,15 @@ public class MoveGen {
                     if (         y > 0 && addDirection(moveList, pos, sq, 1, -8)) return moveList;
                     if (x < 7 && y > 0 && addDirection(moveList, pos, sq, 1, -7)) return moveList;
 
-                    int k0 = wtm ? Position.getSquare(4,0) : Position.getSquare(4,7);
+                    int k0 = pos.getKingStartSquare(wtm);
                     if (Position.getSquare(x,y) == k0) {
-                        int aCastle = wtm ? Position.A1_CASTLE : Position.A8_CASTLE;
-                        int hCastle = wtm ? Position.H1_CASTLE : Position.H8_CASTLE;
-                        int rook = wtm ? Piece.WROOK : Piece.BROOK;
-                        if (((pos.getCastleMask() & (1 << hCastle)) != 0) &&
-                                (pos.getPiece(k0 + 1) == Piece.EMPTY) &&
-                                (pos.getPiece(k0 + 2) == Piece.EMPTY) &&
-                                (pos.getPiece(k0 + 3) == rook) &&
-                                !sqAttacked(pos, k0) &&
-                                !sqAttacked(pos, k0 + 1)) {
-                            moveList.add(getMoveObj(k0, k0 + 2, Piece.EMPTY));
+                        if (canCastleChess960(pos, wtm, true)) {
+                            int to = pos.isChess960() ? pos.getCastleRookStartSquare(wtm, true) : pos.getCastleKingTarget(wtm, true);
+                            moveList.add(getMoveObj(k0, to, Piece.EMPTY));
                         }
-                        if (((pos.getCastleMask() & (1 << aCastle)) != 0) &&
-                                (pos.getPiece(k0 - 1) == Piece.EMPTY) &&
-                                (pos.getPiece(k0 - 2) == Piece.EMPTY) &&
-                                (pos.getPiece(k0 - 3) == Piece.EMPTY) &&
-                                (pos.getPiece(k0 - 4) == rook) &&
-                                !sqAttacked(pos, k0) &&
-                                !sqAttacked(pos, k0 - 1)) {
-                            moveList.add(getMoveObj(k0, k0 - 2, Piece.EMPTY));
+                        if (canCastleChess960(pos, wtm, false)) {
+                            int to = pos.isChess960() ? pos.getCastleRookStartSquare(wtm, false) : pos.getCastleKingTarget(wtm, false);
+                            moveList.add(getMoveObj(k0, to, Piece.EMPTY));
                         }
                     }
                 }
@@ -151,6 +139,48 @@ public class MoveGen {
             }
         }
         return moveList;
+    }
+
+    private static boolean canCastleChess960(Position pos, boolean white, boolean kingSide) {
+        if (!pos.hasCastleRight(white, kingSide)) return false;
+        int kingFrom = pos.getKingStartSquare(white);
+        int rookFrom = pos.getCastleRookStartSquare(white, kingSide);
+        int kingTo = pos.getCastleKingTarget(white, kingSide);
+        int rookTo = pos.getCastleRookTarget(white, kingSide);
+        int kingPiece = white ? Piece.WKING : Piece.BKING;
+        int rookPiece = white ? Piece.WROOK : Piece.BROOK;
+        if (pos.getPiece(kingFrom) != kingPiece || pos.getPiece(rookFrom) != rookPiece) return false;
+        if (Position.getY(kingFrom) != Position.getY(rookFrom)) return false;
+        // Every square traversed by either piece must be vacant after lifting the
+        // original king and rook; this handles the Chess960 crossing/overlap cases.
+        if (!castlePathClear(pos, kingFrom, kingTo, kingFrom, rookFrom) ||
+                !castlePathClear(pos, rookFrom, rookTo, kingFrom, rookFrom)) return false;
+        Position lifted = new Position(pos);
+        lifted.setPiece(kingFrom, Piece.EMPTY);
+        lifted.setPiece(rookFrom, Piece.EMPTY);
+        int step = Integer.compare(kingTo, kingFrom);
+        if (step == 0) step = 1;
+        for (int sq = kingFrom;; sq += step) {
+            Position transit = new Position(lifted);
+            transit.setPiece(sq, kingPiece);
+            if (sqAttacked(transit, sq)) return false;
+            if (sq == kingTo) break;
+        }
+        // Confirm the simultaneous final placement is not check.
+        Position finalPos = new Position(lifted);
+        finalPos.setPiece(kingTo, kingPiece);
+        finalPos.setPiece(rookTo, rookPiece);
+        return !sqAttacked(finalPos, kingTo);
+    }
+
+    private static boolean castlePathClear(Position pos, int from, int to, int kingFrom, int rookFrom) {
+        int step = Integer.compare(to, from);
+        if (step == 0) return true;
+        for (int sq = from + step; ; sq += step) {
+            if (sq != kingFrom && sq != rookFrom && pos.getPiece(sq) != Piece.EMPTY) return false;
+            if (sq == to) break;
+        }
+        return true;
     }
 
     /**

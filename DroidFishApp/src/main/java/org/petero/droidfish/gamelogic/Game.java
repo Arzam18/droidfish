@@ -95,7 +95,7 @@ public class Game {
     }
 
     /** Sets start position and discards the whole game tree. */
-    final void setPos(Position pos) {
+    public final void setPos(Position pos) {
         tree.setStartPos(new Position(pos));
         updateTimeControl(false);
     }

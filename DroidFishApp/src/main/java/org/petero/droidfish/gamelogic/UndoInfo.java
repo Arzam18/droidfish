@@ -27,4 +27,9 @@ public class UndoInfo {
     int castleMask;
     int epSquare;
     int halfMoveClock;
+    boolean chess960;
+    int whiteKingStart, blackKingStart;
+    int whiteQueenRookStart, whiteKingRookStart, blackQueenRookStart, blackKingRookStart;
+    boolean chess960Castle;
+    int castleKingFrom, castleRookFrom, castleKingTo, castleRookTo;
 }

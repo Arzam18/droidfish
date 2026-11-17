@@ -107,6 +107,11 @@ public class GameTree {
         updateListener();
     }
 
+    /** Mark a tournament PGN as Fischer Random while retaining its explicit FEN. */
+    public final void setTournamentVariant(String variant) {
+        if (variant != null && !variant.trim().isEmpty()) setTagPair("Variant", variant.trim());
+    }
+
     /** Add/update a final-game metadata tag before exporting tournament PGN. */
     public final void setTournamentTermination(String termination) {
         if (termination != null && !termination.trim().isEmpty()) setTagPair("Termination", termination.trim());
@@ -587,7 +592,14 @@ public class GameTree {
                 fen = tagPairs.get(i).tagValue;
             }
         }
-        setStartPos(TextIO.readFEN(fen));
+        Position parsedStart = TextIO.readFEN(fen);
+        for (TagPair pair : tagPairs) {
+            if (pair.tagName.equalsIgnoreCase("Variant") && pair.tagValue.toLowerCase(Locale.US).contains("960")) {
+                parsedStart.setChess960(true);
+                break;
+            }
+        }
+        setStartPos(parsedStart);
 
         String result = "";
         for (int i = 0; i < nTags; i++) {
@@ -712,6 +724,16 @@ public class GameTree {
             tp.tagName = dis.readUTF();
             tp.tagValue = dis.readUTF();
             tagPairs.add(tp);
+        }
+        // A completed Chess960 game may have lost all four castling rights, so
+        // its serialized FEN alone no longer identifies the variant. Restore it
+        // from the persisted PGN Variant tag before replaying any stored moves.
+        for (TagPair pair : tagPairs) {
+            if (pair.tagName.equalsIgnoreCase("Variant") && pair.tagValue.toLowerCase(Locale.US).contains("960")) {
+                startPos.setChess960(true);
+                currentPos = new Position(startPos);
+                break;
+            }
         }
         rootNode = new Node();
         Node.readFromStream(dis, rootNode);

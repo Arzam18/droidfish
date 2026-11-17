@@ -40,6 +40,10 @@ public class Position {
     public static final int H8_CASTLE = 3; /** Black short castle. */
 
     private int castleMask;
+    private boolean chess960;
+    private int whiteKingStart = 4, blackKingStart = 60;
+    private int whiteQueenRookStart = 0, whiteKingRookStart = 7;
+    private int blackQueenRookStart = 56, blackKingRookStart = 63;
 
     private int epSquare;
 
@@ -59,6 +63,7 @@ public class Position {
             squares[i] = Piece.EMPTY;
         whiteMove = true;
         castleMask = 0;
+        chess960 = false;
         epSquare = -1;
         halfMoveClock = 0;
         fullMoveCounter = 1;
@@ -71,6 +76,10 @@ public class Position {
         System.arraycopy(other.squares, 0, squares, 0, 64);
         whiteMove = other.whiteMove;
         castleMask = other.castleMask;
+        chess960 = other.chess960;
+        whiteKingStart = other.whiteKingStart; blackKingStart = other.blackKingStart;
+        whiteQueenRookStart = other.whiteQueenRookStart; whiteKingRookStart = other.whiteKingRookStart;
+        blackQueenRookStart = other.blackQueenRookStart; blackKingRookStart = other.blackKingRookStart;
         epSquare = other.epSquare;
         halfMoveClock = other.halfMoveClock;
         fullMoveCounter = other.fullMoveCounter;
@@ -122,6 +131,9 @@ public class Position {
             return false;
         if (epSquare != other.epSquare)
             return false;
+        if (chess960 != other.chess960 || whiteKingStart != other.whiteKingStart || blackKingStart != other.blackKingStart ||
+                whiteQueenRookStart != other.whiteQueenRookStart || whiteKingRookStart != other.whiteKingRookStart ||
+                blackQueenRookStart != other.blackQueenRookStart || blackKingRookStart != other.blackKingRookStart) return false;
         return true;
     }
 
@@ -190,9 +202,70 @@ public class Position {
     public final int getCastleMask() {
         return castleMask;
     }
+
+    public final boolean isChess960() { return chess960; }
+    public final void setChess960(boolean enabled) {
+        if (chess960 != enabled) { hashKey ^= chess960HashKey; chess960 = enabled; }
+    }
+    public final int getKingStartSquare(boolean white) { return white ? whiteKingStart : blackKingStart; }
+    public final int getCastleRookStartSquare(boolean white, boolean kingSide) {
+        if (white) return kingSide ? whiteKingRookStart : whiteQueenRookStart;
+        return kingSide ? blackKingRookStart : blackQueenRookStart;
+    }
+    public final int getCastleKingTarget(boolean white, boolean kingSide) { return Position.getSquare(kingSide ? 6 : 2, white ? 0 : 7); }
+    public final int getCastleRookTarget(boolean white, boolean kingSide) { return Position.getSquare(kingSide ? 5 : 3, white ? 0 : 7); }
+    public final boolean hasCastleRight(boolean white, boolean kingSide) {
+        int bit = white ? (kingSide ? H1_CASTLE : A1_CASTLE) : (kingSide ? H8_CASTLE : A8_CASTLE);
+        return (castleMask & (1 << bit)) != 0;
+    }
+    public final void setCastleLayout(boolean frc, int whiteKing, int whiteQueenRook, int whiteKingRook,
+                                      int blackKing, int blackQueenRook, int blackKingRook) {
+        long before = extraCastleHash(castleMask);
+        boolean variantChanged = chess960 != frc;
+        whiteKingStart = whiteKing; whiteQueenRookStart = whiteQueenRook; whiteKingRookStart = whiteKingRook;
+        blackKingStart = blackKing; blackQueenRookStart = blackQueenRook; blackKingRookStart = blackKingRook;
+        hashKey ^= before ^ extraCastleHash(castleMask);
+        if (variantChanged) hashKey ^= chess960HashKey;
+        chess960 = frc;
+    }
+    public final boolean isCastleMove(Move move) {
+        if (move == null) return false;
+        boolean white = whiteMove;
+        if (move.from != getKingStartSquare(white) || getPiece(move.from) != (white ? Piece.WKING : Piece.BKING)) return false;
+        for (boolean kingSide : new boolean[]{true, false}) {
+            if (!hasCastleRight(white, kingSide)) continue;
+            int rookFrom = getCastleRookStartSquare(white, kingSide);
+            int kingTo = getCastleKingTarget(white, kingSide);
+            if (chess960 ? move.to == rookFrom : move.to == kingTo) return true;
+        }
+        return false;
+    }
+    public final boolean isCastleKingSide(Move move) {
+        if (move == null) return false;
+        boolean white = whiteMove;
+        return hasCastleRight(white, true) && move.from == getKingStartSquare(white) &&
+                (chess960 ? move.to == getCastleRookStartSquare(white, true) : move.to == getCastleKingTarget(white, true));
+    }
+    private long extraCastleHash(int mask) {
+        long h = 0;
+        if ((mask & (1 << A1_CASTLE)) != 0) h ^= castleRookHashKeys[0][whiteQueenRookStart] ^ kingStartHashKeys[0][whiteKingStart];
+        if ((mask & (1 << H1_CASTLE)) != 0) h ^= castleRookHashKeys[1][whiteKingRookStart] ^ kingStartHashKeys[0][whiteKingStart];
+        if ((mask & (1 << A8_CASTLE)) != 0) h ^= castleRookHashKeys[2][blackQueenRookStart] ^ kingStartHashKeys[1][blackKingStart];
+        if ((mask & (1 << H8_CASTLE)) != 0) h ^= castleRookHashKeys[3][blackKingRookStart] ^ kingStartHashKeys[1][blackKingStart];
+        return h;
+    }
+    final void saveCastleState(UndoInfo ui) {
+        ui.chess960 = chess960; ui.whiteKingStart = whiteKingStart; ui.blackKingStart = blackKingStart;
+        ui.whiteQueenRookStart = whiteQueenRookStart; ui.whiteKingRookStart = whiteKingRookStart;
+        ui.blackQueenRookStart = blackQueenRookStart; ui.blackKingRookStart = blackKingRookStart;
+    }
+    final void restoreCastleState(UndoInfo ui) {
+        setCastleLayout(ui.chess960, ui.whiteKingStart, ui.whiteQueenRookStart, ui.whiteKingRookStart,
+                ui.blackKingStart, ui.blackQueenRookStart, ui.blackKingRookStart);
+    }
     public final void setCastleMask(int castleMask) {
-        hashKey ^= castleHashKeys[this.castleMask];
-        hashKey ^= castleHashKeys[castleMask];
+        hashKey ^= castleHashKeys[this.castleMask] ^ extraCastleHash(this.castleMask);
+        hashKey ^= castleHashKeys[castleMask] ^ extraCastleHash(castleMask);
         this.castleMask = castleMask;
     }
 
@@ -237,138 +310,111 @@ public class Position {
         ui.castleMask = castleMask;
         ui.epSquare = epSquare;
         ui.halfMoveClock = halfMoveClock;
+        saveCastleState(ui);
+        ui.chess960Castle = false;
         boolean wtm = whiteMove;
-
         int p = squares[move.from];
-        int capP = squares[move.to];
-
         boolean nullMove = (move.from == 0) && (move.to == 0);
+        boolean castle = !nullMove && isCastleMove(move);
+        int capP = castle ? Piece.EMPTY : squares[move.to];
+        if (nullMove || capP != Piece.EMPTY || p == (wtm ? Piece.WPAWN : Piece.BPAWN)) halfMoveClock = 0;
+        else halfMoveClock++;
+        if (!wtm) fullMoveCounter++;
 
-        if (nullMove || (capP != Piece.EMPTY) || (p == (wtm ? Piece.WPAWN : Piece.BPAWN))) {
-            halfMoveClock = 0;
-        } else {
-            halfMoveClock++;
-        }
-        if (!wtm) {
-            fullMoveCounter++;
+        if (castle) {
+            boolean kingSide = isCastleKingSide(move);
+            int kingFrom = getKingStartSquare(wtm);
+            int rookFrom = getCastleRookStartSquare(wtm, kingSide);
+            int kingTo = getCastleKingTarget(wtm, kingSide);
+            int rookTo = getCastleRookTarget(wtm, kingSide);
+            ui.chess960Castle = true; ui.castleKingFrom = kingFrom; ui.castleRookFrom = rookFrom;
+            ui.castleKingTo = kingTo; ui.castleRookTo = rookTo;
+            int king = wtm ? Piece.WKING : Piece.BKING;
+            int rook = wtm ? Piece.WROOK : Piece.BROOK;
+            setEpSquare(-1);
+            // Lift both pieces first; this also handles Chess960 overlap cases where
+            // a king/rook begins on the other's final square.
+            setPiece(kingFrom, Piece.EMPTY);
+            setPiece(rookFrom, Piece.EMPTY);
+            setPiece(kingTo, king);
+            setPiece(rookTo, rook);
+            int ownRights = wtm ? ((1 << A1_CASTLE) | (1 << H1_CASTLE)) : ((1 << A8_CASTLE) | (1 << H8_CASTLE));
+            setCastleMask(castleMask & ~ownRights);
+            setWhiteMove(!wtm);
+            return;
         }
 
-        // Handle castling
         int king = wtm ? Piece.WKING : Piece.BKING;
-        int k0 = move.from;
         if (p == king) {
-            if (move.to == k0 + 2) { // O-O
-                setPiece(k0 + 1, squares[k0 + 3]);
-                setPiece(k0 + 3, Piece.EMPTY);
-            } else if (move.to == k0 - 2) { // O-O-O
-                setPiece(k0 - 1, squares[k0 - 4]);
-                setPiece(k0 - 4, Piece.EMPTY);
-            }
-            if (wtm) {
-                setCastleMask(castleMask & ~(1 << Position.A1_CASTLE));
-                setCastleMask(castleMask & ~(1 << Position.H1_CASTLE));
-            } else {
-                setCastleMask(castleMask & ~(1 << Position.A8_CASTLE));
-                setCastleMask(castleMask & ~(1 << Position.H8_CASTLE));
-            }
+            int ownRights = wtm ? ((1 << A1_CASTLE) | (1 << H1_CASTLE)) : ((1 << A8_CASTLE) | (1 << H8_CASTLE));
+            setCastleMask(castleMask & ~ownRights);
         }
         if (!nullMove) {
             int rook = wtm ? Piece.WROOK : Piece.BROOK;
-            if (p == rook) {
-                removeCastleRights(move.from);
-            }
+            if (p == rook) removeCastleRights(move.from);
             int oRook = wtm ? Piece.BROOK : Piece.WROOK;
-            if (capP == oRook) {
-                removeCastleRights(move.to);
-            }
+            if (capP == oRook) removeCastleRights(move.to);
         }
 
-        // Handle en passant and epSquare
         int prevEpSquare = epSquare;
         setEpSquare(-1);
         if (p == Piece.WPAWN) {
             if (move.to - move.from == 2 * 8) {
                 int x = Position.getX(move.to);
-                if (    ((x > 0) && (squares[move.to - 1] == Piece.BPAWN)) ||
-                        ((x < 7) && (squares[move.to + 1] == Piece.BPAWN))) {
+                if (((x > 0) && (squares[move.to - 1] == Piece.BPAWN)) || ((x < 7) && (squares[move.to + 1] == Piece.BPAWN)))
                     setEpSquare(move.from + 8);
-                }
-            } else if (move.to == prevEpSquare) {
-                setPiece(move.to - 8, Piece.EMPTY);
-            }
+            } else if (move.to == prevEpSquare) setPiece(move.to - 8, Piece.EMPTY);
         } else if (p == Piece.BPAWN) {
             if (move.to - move.from == -2 * 8) {
                 int x = Position.getX(move.to);
-                if (    ((x > 0) && (squares[move.to - 1] == Piece.WPAWN)) ||
-                        ((x < 7) && (squares[move.to + 1] == Piece.WPAWN))) {
+                if (((x > 0) && (squares[move.to - 1] == Piece.WPAWN)) || ((x < 7) && (squares[move.to + 1] == Piece.WPAWN)))
                     setEpSquare(move.from - 8);
-                }
-            } else if (move.to == prevEpSquare) {
-                setPiece(move.to + 8, Piece.EMPTY);
-            }
+            } else if (move.to == prevEpSquare) setPiece(move.to + 8, Piece.EMPTY);
         }
-
-        // Perform move
         setPiece(move.from, Piece.EMPTY);
-        // Handle promotion
-        if (move.promoteTo != Piece.EMPTY) {
-            setPiece(move.to, move.promoteTo);
-        } else {
-            setPiece(move.to, p);
-        }
+        setPiece(move.to, move.promoteTo != Piece.EMPTY ? move.promoteTo : p);
         setWhiteMove(!wtm);
     }
 
     public final void unMakeMove(Move move, UndoInfo ui) {
         setWhiteMove(!whiteMove);
+        boolean wtm = whiteMove;
+        if (ui.chess960Castle) {
+            int king = wtm ? Piece.WKING : Piece.BKING;
+            int rook = wtm ? Piece.WROOK : Piece.BROOK;
+            setPiece(ui.castleKingTo, Piece.EMPTY);
+            setPiece(ui.castleRookTo, Piece.EMPTY);
+            setPiece(ui.castleKingFrom, king);
+            setPiece(ui.castleRookFrom, rook);
+            setCastleMask(ui.castleMask);
+            restoreCastleState(ui);
+            setEpSquare(ui.epSquare);
+            halfMoveClock = ui.halfMoveClock;
+            if (!wtm) fullMoveCounter--;
+            return;
+        }
         int p = squares[move.to];
         setPiece(move.from, p);
         setPiece(move.to, ui.capturedPiece);
         setCastleMask(ui.castleMask);
+        restoreCastleState(ui);
         setEpSquare(ui.epSquare);
         halfMoveClock = ui.halfMoveClock;
-        boolean wtm = whiteMove;
-        if (move.promoteTo != Piece.EMPTY) {
-            p = wtm ? Piece.WPAWN : Piece.BPAWN;
-            setPiece(move.from, p);
-        }
-        if (!wtm) {
-            fullMoveCounter--;
-        }
-
-        // Handle castling
-        int king = wtm ? Piece.WKING : Piece.BKING;
-        int k0 = move.from;
-        if (p == king) {
-            if (move.to == k0 + 2) { // O-O
-                setPiece(k0 + 3, squares[k0 + 1]);
-                setPiece(k0 + 1, Piece.EMPTY);
-            } else if (move.to == k0 - 2) { // O-O-O
-                setPiece(k0 - 4, squares[k0 - 1]);
-                setPiece(k0 - 1, Piece.EMPTY);
-            }
-        }
-
-        // Handle en passant
+        if (move.promoteTo != Piece.EMPTY) setPiece(move.from, wtm ? Piece.WPAWN : Piece.BPAWN);
+        if (!wtm) fullMoveCounter--;
         if (move.to == epSquare) {
-            if (p == Piece.WPAWN) {
-                setPiece(move.to - 8, Piece.BPAWN);
-            } else if (p == Piece.BPAWN) {
-                setPiece(move.to + 8, Piece.WPAWN);
-            }
+            if (p == Piece.WPAWN) setPiece(move.to - 8, Piece.BPAWN);
+            else if (p == Piece.BPAWN) setPiece(move.to + 8, Piece.WPAWN);
         }
     }
 
     private void removeCastleRights(int square) {
-        if (square == Position.getSquare(0, 0)) {
-            setCastleMask(castleMask & ~(1 << Position.A1_CASTLE));
-        } else if (square == Position.getSquare(7, 0)) {
-            setCastleMask(castleMask & ~(1 << Position.H1_CASTLE));
-        } else if (square == Position.getSquare(0, 7)) {
-            setCastleMask(castleMask & ~(1 << Position.A8_CASTLE));
-        } else if (square == Position.getSquare(7, 7)) {
-            setCastleMask(castleMask & ~(1 << Position.H8_CASTLE));
-        }
+        int mask = castleMask;
+        if (square == whiteQueenRookStart) mask &= ~(1 << Position.A1_CASTLE);
+        if (square == whiteKingRookStart) mask &= ~(1 << Position.H1_CASTLE);
+        if (square == blackQueenRookStart) mask &= ~(1 << Position.A8_CASTLE);
+        if (square == blackKingRookStart) mask &= ~(1 << Position.H8_CASTLE);
+        if (mask != castleMask) setCastleMask(mask);
     }
 
     /* ------------- Hashing code ------------------ */
@@ -376,11 +422,16 @@ public class Position {
     private static long[][] psHashKeys;    // [piece][square]
     private static long whiteHashKey;
     private static long[] castleHashKeys;  // [castleMask]
+    private static long[][] castleRookHashKeys; // [right][rook origin square]
+    private static long[][] kingStartHashKeys;  // [color][king origin square]
+    private static long chess960HashKey;
     private static long[] epHashKeys;      // [epFile + 1] (epFile==-1 for no ep)
 
     static {
         psHashKeys = new long[Piece.nPieceTypes][64];
         castleHashKeys = new long[16];
+        castleRookHashKeys = new long[4][64];
+        kingStartHashKeys = new long[2][64];
         epHashKeys = new long[9];
         int rndNo = 0;
         for (int p = 0; p < Piece.nPieceTypes; p++) {
@@ -391,6 +442,9 @@ public class Position {
         whiteHashKey = getRandomHashVal(rndNo++);
         for (int cm = 0; cm < castleHashKeys.length; cm++)
             castleHashKeys[cm] = getRandomHashVal(rndNo++);
+        for (int i = 0; i < 4; i++) for (int sq = 0; sq < 64; sq++) castleRookHashKeys[i][sq] = getRandomHashVal(rndNo++);
+        for (int i = 0; i < 2; i++) for (int sq = 0; sq < 64; sq++) kingStartHashKeys[i][sq] = getRandomHashVal(rndNo++);
+        chess960HashKey = getRandomHashVal(rndNo++);
         for (int f = 0; f < epHashKeys.length; f++)
             epHashKeys[f] = getRandomHashVal(rndNo++);
     }
@@ -406,7 +460,8 @@ public class Position {
         }
         if (whiteMove)
             hash ^= whiteHashKey;
-        hash ^= castleHashKeys[castleMask];
+        hash ^= castleHashKeys[castleMask] ^ extraCastleHash(castleMask);
+        if (chess960) hash ^= chess960HashKey;
         hash ^= epHashKeys[(epSquare >= 0) ? getX(epSquare) + 1 : 0];
         return hash;
     }

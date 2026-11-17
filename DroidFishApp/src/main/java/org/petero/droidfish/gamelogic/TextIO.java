@@ -94,31 +94,38 @@ public class TextIO {
             throw new ChessParseError(R.string.err_invalid_side, pos);
         }
 
-        // Castling rights
+        // Castling rights: accept orthodox KQkq and Shredder-FEN file letters A-H/a-h.
         int castleMask = 0;
-        if (words.length > 2) {
-            for (int i = 0; i < words[2].length(); i++) {
-                char c = words[2].charAt(i);
-                switch (c) {
-                    case 'K':
-                        castleMask |= (1 << Position.H1_CASTLE);
-                        break;
-                    case 'Q':
-                        castleMask |= (1 << Position.A1_CASTLE);
-                        break;
-                    case 'k':
-                        castleMask |= (1 << Position.H8_CASTLE);
-                        break;
-                    case 'q':
-                        castleMask |= (1 << Position.A8_CASTLE);
-                        break;
-                    case '-':
-                        break;
-                    default:
-                        throw new ChessParseError(R.string.err_invalid_castling_flags, pos);
-                }
-            }
+        int wk = pos.getKingSq(true), bk = pos.getKingSq(false);
+        int wq = 0, wh = 7, bq = 56, bh = 63;
+        boolean frc = false;
+        String rights = words.length > 2 ? words[2] : "-";
+        for (int i = 0; i < rights.length(); i++) {
+            char c = rights.charAt(i);
+            if (c == '-') continue;
+            boolean white = Character.isUpperCase(c);
+            int kingSq = white ? wk : bk;
+            int kingFile = Position.getX(kingSq);
+            int rookFile = -1;
+            boolean kingSide;
+            if (c == 'K' || c == 'k') {
+                kingSide = true;
+                rookFile = findCastleRookFile(pos, white, kingFile, true);
+            } else if (c == 'Q' || c == 'q') {
+                kingSide = false;
+                rookFile = findCastleRookFile(pos, white, kingFile, false);
+            } else if ((white && c >= 'A' && c <= 'H') || (!white && c >= 'a' && c <= 'h')) {
+                frc = true; rookFile = Character.toLowerCase(c) - 'a';
+                if (rookFile == kingFile) throw new ChessParseError(R.string.err_invalid_castling_flags, pos);
+                kingSide = rookFile > kingFile;
+            } else { throw new ChessParseError(R.string.err_invalid_castling_flags, pos); }
+            if (rookFile < 0 || kingSq < 0) continue;
+            int rookSq = Position.getSquare(rookFile, white ? 0 : 7);
+            if (white) { if (kingSide) { castleMask |= 1 << Position.H1_CASTLE; wh = rookSq; } else { castleMask |= 1 << Position.A1_CASTLE; wq = rookSq; } }
+            else { if (kingSide) { castleMask |= 1 << Position.H8_CASTLE; bh = rookSq; } else { castleMask |= 1 << Position.A8_CASTLE; bq = rookSq; } }
         }
+        if (wk != Position.getSquare(4, 0) || bk != Position.getSquare(4, 7)) frc = true;
+        pos.setCastleLayout(frc, wk < 0 ? 4 : wk, wq, wh, bk < 0 ? 60 : bk, bq, bh);
         pos.setCastleMask(castleMask);
         removeBogusCastleFlags(pos);
 
@@ -197,19 +204,26 @@ public class TextIO {
         return pos;
     }
 
+    private static int findCastleRookFile(Position pos, boolean white, int kingFile, boolean kingSide) {
+        int rank = white ? 0 : 7;
+        int found = -1;
+        for (int file = 0; file < 8; file++) {
+            if (kingSide ? file <= kingFile : file >= kingFile) continue;
+            if (pos.getPiece(Position.getSquare(file, rank)) != (white ? Piece.WROOK : Piece.BROOK)) continue;
+            if (found < 0 || (kingSide ? file < found : file > found)) found = file;
+        }
+        return found;
+    }
+
     public static void removeBogusCastleFlags(Position pos) {
-        int castleMask = pos.getCastleMask();
-        int validCastle = 0;
-        if (pos.getPiece(4) == Piece.WKING) {
-            if (pos.getPiece(0) == Piece.WROOK) validCastle |= (1 << Position.A1_CASTLE);
-            if (pos.getPiece(7) == Piece.WROOK) validCastle |= (1 << Position.H1_CASTLE);
-        }
-        if (pos.getPiece(60) == Piece.BKING) {
-            if (pos.getPiece(56) == Piece.BROOK) validCastle |= (1 << Position.A8_CASTLE);
-            if (pos.getPiece(63) == Piece.BROOK) validCastle |= (1 << Position.H8_CASTLE);
-        }
-        castleMask &= validCastle;
-        pos.setCastleMask(castleMask);
+        int mask = pos.getCastleMask();
+        if (pos.getPiece(pos.getKingStartSquare(true)) != Piece.WKING) mask &= ~((1 << Position.A1_CASTLE) | (1 << Position.H1_CASTLE));
+        if (pos.getPiece(pos.getKingStartSquare(false)) != Piece.BKING) mask &= ~((1 << Position.A8_CASTLE) | (1 << Position.H8_CASTLE));
+        if (pos.getPiece(pos.getCastleRookStartSquare(true, false)) != Piece.WROOK) mask &= ~(1 << Position.A1_CASTLE);
+        if (pos.getPiece(pos.getCastleRookStartSquare(true, true)) != Piece.WROOK) mask &= ~(1 << Position.H1_CASTLE);
+        if (pos.getPiece(pos.getCastleRookStartSquare(false, false)) != Piece.BROOK) mask &= ~(1 << Position.A8_CASTLE);
+        if (pos.getPiece(pos.getCastleRookStartSquare(false, true)) != Piece.BROOK) mask &= ~(1 << Position.H8_CASTLE);
+        pos.setCastleMask(mask);
     }
 
     /** Remove pseudo-legal EP square if it is not legal, ie would leave king in check. */
@@ -282,27 +296,21 @@ public class TextIO {
         }
         ret.append(pos.whiteMove ? " w " : " b ");
 
-        // Castling rights
+        // Castling rights. Use Shredder-FEN file letters for Chess960 so engine
+        // and PGN consumers retain the original rook files.
         boolean anyCastle = false;
-        if (pos.h1Castle()) {
-            ret.append('K');
-            anyCastle = true;
+        if (pos.isChess960()) {
+            if (pos.hasCastleRight(true, true)) { ret.append((char)('A' + Position.getX(pos.getCastleRookStartSquare(true, true)))); anyCastle = true; }
+            if (pos.hasCastleRight(true, false)) { ret.append((char)('A' + Position.getX(pos.getCastleRookStartSquare(true, false)))); anyCastle = true; }
+            if (pos.hasCastleRight(false, true)) { ret.append((char)('a' + Position.getX(pos.getCastleRookStartSquare(false, true)))); anyCastle = true; }
+            if (pos.hasCastleRight(false, false)) { ret.append((char)('a' + Position.getX(pos.getCastleRookStartSquare(false, false)))); anyCastle = true; }
+        } else {
+            if (pos.h1Castle()) { ret.append('K'); anyCastle = true; }
+            if (pos.a1Castle()) { ret.append('Q'); anyCastle = true; }
+            if (pos.h8Castle()) { ret.append('k'); anyCastle = true; }
+            if (pos.a8Castle()) { ret.append('q'); anyCastle = true; }
         }
-        if (pos.a1Castle()) {
-            ret.append('Q');
-            anyCastle = true;
-        }
-        if (pos.h8Castle()) {
-            ret.append('k');
-            anyCastle = true;
-        }
-        if (pos.a8Castle()) {
-            ret.append('q');
-            anyCastle = true;
-        }
-        if (!anyCastle) {
-            ret.append('-');
-        }
+        if (!anyCastle) ret.append('-');
 
         // En passant target square
         {
@@ -343,16 +351,19 @@ public class TextIO {
         if ((move == null) || move.equals(new Move(0, 0, 0)))
             return "--";
         StringBuilder ret = new StringBuilder();
+        if (pos.isCastleMove(move)) {
+            ret.append(pos.isCastleKingSide(move) ? "O-O" : "O-O-O");
+        }
         int wKingOrigPos = Position.getSquare(4, 0);
         int bKingOrigPos = Position.getSquare(4, 7);
-        if (move.from == wKingOrigPos && pos.getPiece(wKingOrigPos) == Piece.WKING) {
+        if (ret.length() == 0 && move.from == wKingOrigPos && pos.getPiece(wKingOrigPos) == Piece.WKING) {
             // Check white castle
             if (move.to == Position.getSquare(6, 0)) {
                     ret.append("O-O");
             } else if (move.to == Position.getSquare(2, 0)) {
                 ret.append("O-O-O");
             }
-        } else if (move.from == bKingOrigPos && pos.getPiece(bKingOrigPos) == Piece.BKING) {
+        } else if (ret.length() == 0 && move.from == bKingOrigPos && pos.getPiece(bKingOrigPos) == Piece.BKING) {
             // Check black castle
             if (move.to == Position.getSquare(6, 7)) {
                 ret.append("O-O");
@@ -486,6 +497,14 @@ public class TextIO {
                                     ArrayList<Move> moves) {
         if (strMove.equals("--"))
             return new Move(0, 0, 0);
+        if (strMove.equals("O-O") || strMove.equals("0-0") || strMove.equals("o-o") ||
+                strMove.equals("O-O-O") || strMove.equals("0-0-0") || strMove.equals("o-o-o")) {
+            boolean kingSide = strMove.length() <= 3;
+            ArrayList<Move> candidates = moves == null ? MoveGen.instance.legalMoves(pos) : moves;
+            for (Move candidate : candidates)
+                if (pos.isCastleMove(candidate) && pos.isCastleKingSide(candidate) == kingSide) return candidate;
+            return null;
+        }
 
         strMove = strMove.replaceAll("=", "");
         strMove = strMove.replaceAll("\\+", "");
