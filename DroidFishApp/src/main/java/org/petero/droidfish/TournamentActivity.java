@@ -171,6 +171,8 @@ public final class TournamentActivity extends Activity {
     private int currentGameNumber = 0, currentGameTotal = 0;
     private boolean mirrorHeaderShowsTitle;
     private TournamentManager activeTournamentManager;
+    /** True while a saved tournament is being browsed without a live runner. */
+    private boolean savedTournamentReviewMode;
     private String mirrorTcLabel = "—";
     private final ArrayList<Position> mirrorPositions = new ArrayList<>();
     private final ArrayList<String> mirrorLiveSanMoves = new ArrayList<>();
@@ -312,7 +314,7 @@ public final class TournamentActivity extends Activity {
         choose.setOnClickListener(v -> chooseEngines());
 
         engineIconsCheck = new CheckBox(this);
-        engineIconsCheck.setText("Show engine icons on Mirror Board");
+        engineIconsCheck.setText("Show engine icons on Mirror Board and engine lists");
         root.addView(engineIconsCheck, fullWidth());
         engineIconsCheck.setOnCheckedChangeListener((button, checked) -> {
             if (restoringSetup) return;
@@ -609,7 +611,7 @@ public final class TournamentActivity extends Activity {
         blackClockRow.addView(blackMoveTimeText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(blackClockRow, fullWidth());
 
-        int mainBoardSize = Math.round(getResources().getDisplayMetrics().widthPixels * 0.94f);
+        int mainBoardSize = getResources().getDisplayMetrics().widthPixels;
         FrameLayout boardFrame = new FrameLayout(this) {
             @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
                 int width = MeasureSpec.getSize(widthMeasureSpec);
@@ -674,14 +676,22 @@ public final class TournamentActivity extends Activity {
         controls.addView(menu, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(schedule, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
-        menu.setOnClickListener(v -> new AlertDialog.Builder(TournamentActivity.this)
-                .setTitle("Tournament menu")
-                .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Schedule"}, (dialog, which) -> {
-                    if (which == 0) showAdjudicationDialog();
-                    else if (which == 1) setContentView(setupView);
-                    else if (which == 2) toggleTournamentFlip();
-                    else showScheduleDialog();
-                }).show());
+        menu.setOnClickListener(v -> {
+            if (savedTournamentReviewMode) {
+                new AlertDialog.Builder(TournamentActivity.this).setTitle("Saved tournament review")
+                        .setItems(new String[]{"Tournament list", "Flip Board"}, (dialog, which) -> {
+                            if (which == 0) chooseSavedTournament(); else toggleTournamentFlip();
+                        }).show();
+            } else {
+                new AlertDialog.Builder(TournamentActivity.this).setTitle("Tournament menu")
+                        .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Schedule"}, (dialog, which) -> {
+                            if (which == 0) showAdjudicationDialog();
+                            else if (which == 1) setContentView(setupView);
+                            else if (which == 2) toggleTournamentFlip();
+                            else showScheduleDialog();
+                        }).show();
+            }
+        });
         schedule.setOnClickListener(v -> switchTournamentAndMirror());
         page.addView(controls, fullWidth());
         playPauseButton.setOnClickListener(v -> togglePauseResume());
@@ -937,14 +947,22 @@ public final class TournamentActivity extends Activity {
             mirrorPrimaryControls.addView(b, new LinearLayout.LayoutParams(0, -2, 1));
         mirrorPauseButton.setOnClickListener(v -> togglePauseResume());
         back.setOnClickListener(v -> switchTournamentAndMirror());
-        menu.setOnClickListener(v -> new AlertDialog.Builder(TournamentActivity.this)
-                .setTitle("Tournament menu")
-                .setItems(new String[]{"Adjudicate", "Temporary variation", "Setup", "Flip Board"}, (dialog, which) -> {
-                    if (which == 0) showAdjudicationDialog();
-                    else if (which == 1) toggleMirrorBranchMode();
-                    else if (which == 2) setContentView(setupView);
-                    else toggleTournamentFlip();
-                }).show());
+        menu.setOnClickListener(v -> {
+            if (savedTournamentReviewMode) {
+                new AlertDialog.Builder(TournamentActivity.this).setTitle("Saved tournament review")
+                        .setItems(new String[]{"Tournament list", "Flip Board"}, (dialog, which) -> {
+                            if (which == 0) chooseSavedTournament(); else toggleTournamentFlip();
+                        }).show();
+            } else {
+                new AlertDialog.Builder(TournamentActivity.this).setTitle("Tournament menu")
+                        .setItems(new String[]{"Adjudicate", "Temporary variation", "Setup", "Flip Board"}, (dialog, which) -> {
+                            if (which == 0) showAdjudicationDialog();
+                            else if (which == 1) toggleMirrorBranchMode();
+                            else if (which == 2) setContentView(setupView);
+                            else toggleTournamentFlip();
+                        }).show();
+            }
+        });
         mirrorControlBar.addView(mirrorPrimaryControls, new LinearLayout.LayoutParams(-1, -2));
 
         mirrorNavigationControls = new LinearLayout(this);
@@ -1994,8 +2012,11 @@ public final class TournamentActivity extends Activity {
     private void chooseMirrorAnalysisEngine() {
         if (availableEngines.isEmpty()) loadEngineChoices();
         if (availableEngines.isEmpty()) { Toast.makeText(this, "No installed engines found", Toast.LENGTH_LONG).show(); return; }
-        String[] labels = new String[availableEngines.size()];
-        for (int i = 0; i < labels.length; i++) labels[i] = availableEngines.get(i).name;
+        CharSequence[] labels = new CharSequence[availableEngines.size()];
+        for (int i = 0; i < labels.length; i++) {
+            EngineChoice choice = availableEngines.get(i);
+            labels[i] = engineLabelWithIcon(choice.id, choice.name, choice.name, 24);
+        }
         new AlertDialog.Builder(this).setTitle("Choose engine to analyse this position")
                 .setItems(labels, (dialog, which) -> {
                     if (which < 0 || which >= availableEngines.size()) return;
@@ -3595,6 +3616,10 @@ public final class TournamentActivity extends Activity {
                 int previous = mirrorSchedulePendingPosition;
                 mirrorSchedulePendingPosition = -1;
                 if (previous == position) {
+                    if (savedTournamentReviewMode) {
+                        Toast.makeText(this, "Completed tournament review is read-only", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
                     int pairingIndex = mirrorSchedulePairingIndexes.get(position);
                     if (pairingIndex >= 0) showMirrorScheduleAdjudication(tournament, pairingIndex);
                     return;
@@ -3618,6 +3643,7 @@ public final class TournamentActivity extends Activity {
         });
         list.setOnItemLongClickListener((parent, view, position, id) -> {
             cancelMirrorSchedulePendingClick();
+            if (savedTournamentReviewMode) return true;
             if (position >= 0 && position < mirrorSchedulePairingIndexes.size()) {
                 int pairingIndex = mirrorSchedulePairingIndexes.get(position);
                 if (pairingIndex >= 0) showMirrorScheduleContextMenu(tournament, pairingIndex);
@@ -3635,6 +3661,7 @@ public final class TournamentActivity extends Activity {
     }
 
     private void showMirrorScheduleContextMenu(TournamentManager tournament, int pairingIndex) {
+        if (blockSavedTournamentReviewEdit()) return;
         new AlertDialog.Builder(this).setTitle("Schedule actions · Game " + (pairingIndex + 1))
                 .setItems(new String[]{"Anomalies", "Play Queue", "Replay Game", "Adjudicate / Re-adjudicate"}, (dialog, which) -> {
                     if (which == 0) showAnomaliesDialog(tournament);
@@ -3645,6 +3672,7 @@ public final class TournamentActivity extends Activity {
     }
 
     private void showMirrorScheduleAdjudication(TournamentManager tournament, int pairingIndex) {
+        if (blockSavedTournamentReviewEdit()) return;
         TournamentManager.Pairing pairing = findMirrorPairing(tournament, pairingIndex);
         if (pairing == null) return;
         if (!pairing.isComplete() || pairing.replayPending) {
@@ -3851,9 +3879,15 @@ public final class TournamentActivity extends Activity {
     }
 
     private void renderMirrorInfoSection() {
+        Button tournamentShortcut = new Button(this);
+        tournamentShortcut.setText("TOURNAMENT · BROWSE / RESUME SAVED EVENTS");
+        tournamentShortcut.setOnClickListener(v -> chooseSavedTournament());
+        mirrorSectionHost.addView(tournamentShortcut, fullWidth());
         TournamentManager t = activeTournamentManager;
         if (t == null) {
-            TextView empty = text("No tournament loaded.");
+            TextView empty = text("No tournament loaded. Select Tournament above to browse, resume, or review a saved event.");
+            empty.setTextColor(0xFFE0E0E0);
+            empty.setPadding(dp(10), dp(12), dp(10), dp(8));
             mirrorSectionHost.addView(empty, fullWidth());
             return;
         }
@@ -3920,10 +3954,33 @@ public final class TournamentActivity extends Activity {
         engineHeading.setTextColor(0xFFBFCBD2); engineHeading.setPadding(dp(10), dp(10), dp(10), dp(4));
         content.addView(engineHeading, fullWidth());
         for (int i = 0; i < t.engines().size(); i++) {
-            TextView engineLine = text((i + 1) + ". " + t.engines().get(i).displayName);
+            TournamentManager.Engine engine = t.engines().get(i);
+            LinearLayout engineRow = new LinearLayout(this);
+            engineRow.setOrientation(LinearLayout.HORIZONTAL);
+            engineRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            engineRow.setPadding(dp(12), dp(4), dp(10), dp(4));
+            if (engineIconEnabledFor(engine.id)) {
+                Bitmap engineBitmap = mirrorEngineIcon(engine.id, engine.displayName);
+                if (engineBitmap != null) {
+                    ImageView icon = new ImageView(this);
+                    icon.setImageDrawable(new BitmapDrawable(getResources(), engineBitmap));
+                    icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                    engineRow.addView(icon, new LinearLayout.LayoutParams(dp(30), dp(30)));
+                } else {
+                    TextView fallbackIcon = text("♟");
+                    fallbackIcon.setTextSize(23);
+                    fallbackIcon.setTextColor(0xFFBFCBD2);
+                    fallbackIcon.setGravity(android.view.Gravity.CENTER);
+                    engineRow.addView(fallbackIcon, new LinearLayout.LayoutParams(dp(30), dp(30)));
+                }
+            }
+            TextView engineLine = text((i + 1) + ". " + engine.displayName);
             engineLine.setTextSize(16); engineLine.setTypeface(null, android.graphics.Typeface.BOLD);
-            engineLine.setTextColor(0xFFFFFFFF); engineLine.setPadding(dp(12), dp(5), dp(10), dp(5));
-            content.addView(engineLine, fullWidth());
+            engineLine.setTextColor(0xFFFFFFFF);
+            LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(0, -2, 1);
+            nameParams.leftMargin = dp(8);
+            engineRow.addView(engineLine, nameParams);
+            content.addView(engineRow, fullWidth());
         }
         TextView elapsed = text("Tournament elapsed: " + formatElapsedSeconds(
                 t == activeTournamentManager ? currentTournamentElapsedMs() : t.tournamentElapsedMs()));
@@ -4127,7 +4184,11 @@ public final class TournamentActivity extends Activity {
     }
     private void selectGameViewerAnalysisEngine() {
         if (availableEngines.isEmpty()) loadEngineChoices();
-        String[] labels = new String[availableEngines.size()]; for (int i=0;i<labels.length;i++) labels[i]=availableEngines.get(i).name;
+        CharSequence[] labels = new CharSequence[availableEngines.size()];
+        for (int i = 0; i < labels.length; i++) {
+            EngineChoice choice = availableEngines.get(i);
+            labels[i] = engineLabelWithIcon(choice.id, choice.name, choice.name, 24);
+        }
         new AlertDialog.Builder(this).setTitle("Select engine for live analysis")
             .setItems(labels,(d,w)->{ if(w>=0 && w<availableEngines.size()) { stopGameViewerAnalysis(); gameViewerEngineId=availableEngines.get(w).id; gameViewerSelectedWhite=true; Toast.makeText(this,"Selected "+availableEngines.get(w).name,Toast.LENGTH_SHORT).show(); if(gameViewerAnalysisOn) startGameViewerAnalysis(); } })
             .setNegativeButton("Cancel",null).show();
@@ -4262,24 +4323,29 @@ public final class TournamentActivity extends Activity {
     private void showStandingsResultPicker(TournamentManager tournament) {
         List<TournamentManager.Pairing> pairings = tournament.pairings();
         ArrayList<Integer> completed = new ArrayList<>();
-        ArrayList<String> labels = new ArrayList<>();
+        ArrayList<CharSequence> labels = new ArrayList<>();
         List<TournamentManager.Engine> engines = tournament.engines();
         for (TournamentManager.Pairing pairing : pairings) if (pairing.isComplete()) {
             completed.add(pairing.index);
-            labels.add("Game " + (pairing.index + 1) + ": " + engineDisplayName(engines, pairing.whiteEngineId) +
-                    " - " + engineDisplayName(engines, pairing.blackEngineId) + " (" + pairingResultLabel(pairing.outcome) + ")");
+            TournamentManager.Engine white = findTournamentEngine(engines, pairing.whiteEngineId);
+            TournamentManager.Engine black = findTournamentEngine(engines, pairing.blackEngineId);
+            labels.add(android.text.TextUtils.concat("Game " + (pairing.index + 1) + ": ",
+                    engineLabelWithIcon(white.id, white.displayName, white.displayName, 20), " - ",
+                    engineLabelWithIcon(black.id, black.displayName, black.displayName, 20),
+                    " (" + pairingResultLabel(pairing.outcome) + ")"));
         }
         if (completed.isEmpty()) {
             Toast.makeText(this, "No completed game results to edit", Toast.LENGTH_SHORT).show();
             return;
         }
         new AlertDialog.Builder(this).setTitle("Choose result to correct")
-                .setItems(labels.toArray(new String[0]), (dialog, which) ->
+                .setItems(labels.toArray(new CharSequence[0]), (dialog, which) ->
                         showPairingResultEditor(tournament, completed.get(which)))
                 .setNegativeButton("CANCEL", null).show();
     }
 
     private void showPairingResultEditor(TournamentManager tournament, int pairingIndex) {
+        if (blockSavedTournamentReviewEdit()) return;
         TournamentManager.Pairing pairing = tournament.pairings().get(pairingIndex);
         String[] results = {"White wins (1-0)", "Draw (1/2-1/2)", "Black wins (0-1)"};
         new AlertDialog.Builder(this).setTitle("Correct Game " + (pairingIndex + 1) + " result")
@@ -4675,6 +4741,7 @@ public final class TournamentActivity extends Activity {
 
     /** Mirror-board entry point: use the same queue editor but return to the Mirror Schedule. */
     private void showMirrorPlayQueueEditor(TournamentManager tournament) {
+        if (blockSavedTournamentReviewEdit()) return;
         showPlayQueueEditor(tournament, true);
     }
 
@@ -4686,15 +4753,17 @@ public final class TournamentActivity extends Activity {
     /** Multi-select unfinished scheduled games in the operator's chosen execution order. */
     private void showPlayQueueEditor(TournamentManager tournament, boolean returnToMirrorSchedule) {
         ArrayList<Integer> gameIndices = new ArrayList<>();
-        ArrayList<String> labels = new ArrayList<>();
+        ArrayList<CharSequence> labels = new ArrayList<>();
         List<TournamentManager.Engine> engines = tournament.engines();
         List<TournamentManager.Pairing> pairings = tournament.pairings();
         for (TournamentManager.Pairing pairing : pairings) {
             if (pairing.isComplete() || pairing.replayPending || pairing.index == tournament.activePairingIndex()) continue;
-            String white = engineDisplayName(engines, pairing.whiteEngineId);
-            String black = engineDisplayName(engines, pairing.blackEngineId);
+            TournamentManager.Engine white = findTournamentEngine(engines, pairing.whiteEngineId);
+            TournamentManager.Engine black = findTournamentEngine(engines, pairing.blackEngineId);
             gameIndices.add(pairing.index);
-            labels.add("Game " + (pairing.index + 1) + ": " + white + " - " + black);
+            labels.add(android.text.TextUtils.concat("Game " + (pairing.index + 1) + ": ",
+                    engineLabelWithIcon(white.id, white.displayName, white.displayName, 20), " - ",
+                    engineLabelWithIcon(black.id, black.displayName, black.displayName, 20)));
         }
         if (gameIndices.isEmpty()) {
             Toast.makeText(this, "No unfinished games available for the play queue", Toast.LENGTH_SHORT).show();
@@ -4703,7 +4772,7 @@ public final class TournamentActivity extends Activity {
         boolean[] checked = new boolean[gameIndices.size()];
         for (int i = 0; i < gameIndices.size(); i++) checked[i] = tournament.isQueued(gameIndices.get(i));
         new AlertDialog.Builder(this).setTitle("Play queue · Select games")
-                .setMultiChoiceItems(labels.toArray(new String[0]), checked, (dialog, which, isChecked) -> {
+                .setMultiChoiceItems(labels.toArray(new CharSequence[0]), checked, (dialog, which, isChecked) -> {
                     int gameIndex = gameIndices.get(which);
                     try {
                         tournament.setQueued(gameIndex, isChecked);
@@ -4733,29 +4802,32 @@ public final class TournamentActivity extends Activity {
 
     /** Select a completed schedule entry to replay with its persisted original opening. */
     private void showReplayGamePicker(TournamentManager tournament) {
+        if (blockSavedTournamentReviewEdit()) return;
         if (tournament.format() == TournamentManager.Format.CUP) {
             Toast.makeText(this, "Cup results are locked to preserve the knockout bracket. A future Cup correction tool can handle controlled match corrections.", Toast.LENGTH_LONG).show();
             return;
         }
         ArrayList<Integer> gameIndices = new ArrayList<>();
-        ArrayList<String> labels = new ArrayList<>();
+        ArrayList<CharSequence> labels = new ArrayList<>();
         List<TournamentManager.Engine> engines = tournament.engines();
         for (TournamentManager.Pairing pairing : tournament.pairings()) {
             if (!pairing.isComplete() || pairing.replayPending) continue;
-            String white = engineDisplayName(engines, pairing.whiteEngineId);
-            String black = engineDisplayName(engines, pairing.blackEngineId);
+            TournamentManager.Engine white = findTournamentEngine(engines, pairing.whiteEngineId);
+            TournamentManager.Engine black = findTournamentEngine(engines, pairing.blackEngineId);
             String opening = pairing.openingName == null || pairing.openingName.trim().isEmpty()
                     ? "Starting position" : pairing.openingName;
             gameIndices.add(pairing.index);
-            labels.add("Game " + (pairing.index + 1) + ": " + white + " - " + black +
-                    " (" + pairingResultLabel(pairing.outcome) + ") · " + opening);
+            labels.add(android.text.TextUtils.concat("Game " + (pairing.index + 1) + ": ",
+                    engineLabelWithIcon(white.id, white.displayName, white.displayName, 20), " - ",
+                    engineLabelWithIcon(black.id, black.displayName, black.displayName, 20),
+                    " (" + pairingResultLabel(pairing.outcome) + ") · " + opening));
         }
         if (gameIndices.isEmpty()) {
             Toast.makeText(this, "No completed games available to replay", Toast.LENGTH_SHORT).show();
             return;
         }
         new AlertDialog.Builder(this).setTitle("Choose a game to replay")
-                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                .setItems(labels.toArray(new CharSequence[0]), (dialog, which) -> {
                     int gameIndex = gameIndices.get(which);
                     TournamentManager.Pairing selected = tournament.pairings().get(gameIndex);
                     String opening = selected.openingName == null || selected.openingName.trim().isEmpty()
@@ -4782,6 +4854,7 @@ public final class TournamentActivity extends Activity {
 
     /** Lists pending anomalies with direct, per-game result controls. */
     private void showAnomaliesDialog(TournamentManager tournament) {
+        if (blockSavedTournamentReviewEdit()) return;
         try {
             LinearLayout root = new LinearLayout(this);
             root.setOrientation(LinearLayout.VERTICAL);
@@ -4935,15 +5008,17 @@ public final class TournamentActivity extends Activity {
     }
 
     private void showTournamentEnginePicker(TournamentManager tournament) {
+        if (blockSavedTournamentReviewEdit()) return;
         List<TournamentManager.Engine> engines = tournament.engines();
         if (engines.isEmpty()) {
             Toast.makeText(this, "No tournament engines are available to edit", Toast.LENGTH_SHORT).show();
             return;
         }
-        String[] labels = new String[engines.size()];
+        CharSequence[] labels = new CharSequence[engines.size()];
         for (int i = 0; i < engines.size(); i++) {
             TournamentManager.Engine engine = engines.get(i);
-            labels[i] = engine.displayName + " · " + tournament.completedGamesForEngine(engine.id) + " completed";
+            String detail = engine.displayName + " · " + tournament.completedGamesForEngine(engine.id) + " completed";
+            labels[i] = engineLabelWithIcon(engine.id, engine.displayName, detail, 24);
         }
         new AlertDialog.Builder(this).setTitle("Choose tournament engine to edit")
                 .setItems(labels, (dialog, which) -> {
@@ -4985,18 +5060,19 @@ public final class TournamentActivity extends Activity {
         chooseExecutable.setEnabled(executableCanChange && !availableEngines.isEmpty());
         chooseExecutable.setOnClickListener(v -> {
             ArrayList<EngineChoice> choices = new ArrayList<>();
-            ArrayList<String> choiceLabels = new ArrayList<>();
+            ArrayList<CharSequence> choiceLabels = new ArrayList<>();
             for (EngineChoice choice : availableEngines) {
                 if (choice.id == null || choice.id.trim().isEmpty()) continue;
                 choices.add(choice);
-                choiceLabels.add(choice.name + "\n" + choice.id);
+                choiceLabels.add(engineLabelWithIcon(choice.id, choice.name,
+                        choice.name + "\n" + choice.id, 24));
             }
             if (choices.isEmpty()) {
                 Toast.makeText(this, "No installed replacement engines were found", Toast.LENGTH_SHORT).show();
                 return;
             }
             new AlertDialog.Builder(this).setTitle("Select replacement executable")
-                    .setItems(choiceLabels.toArray(new String[0]), (d, selected) -> {
+                    .setItems(choiceLabels.toArray(new CharSequence[0]), (d, selected) -> {
                         if (selected < 0 || selected >= choices.size()) return;
                         EngineChoice choice = choices.get(selected);
                         selectedExecutableId[0] = choice.id;
@@ -5055,6 +5131,7 @@ public final class TournamentActivity extends Activity {
 
     /** Edit future pairings only; an in-flight runner owns its current pairing. */
     private void showScheduleEditor(TournamentManager tournament) {
+        if (blockSavedTournamentReviewEdit()) return;
         List<TournamentManager.Pairing> pairings = tournament.pairings();
         int lockedIndex = -1;
         if (runner != null) {
@@ -5062,21 +5139,24 @@ public final class TournamentActivity extends Activity {
             if (current != null) lockedIndex = current.index;
         }
         ArrayList<Integer> editable = new ArrayList<>();
-        ArrayList<String> labels = new ArrayList<>();
+        ArrayList<CharSequence> labels = new ArrayList<>();
         List<TournamentManager.Engine> engines = tournament.engines();
         for (TournamentManager.Pairing pairing : pairings) {
-            String white = engineDisplayName(engines, pairing.whiteEngineId);
-            String black = engineDisplayName(engines, pairing.blackEngineId);
+            TournamentManager.Engine white = findTournamentEngine(engines, pairing.whiteEngineId);
+            TournamentManager.Engine black = findTournamentEngine(engines, pairing.blackEngineId);
             String gameLabel = tournament.format() == TournamentManager.Format.SWISS
                     ? "Round " + pairing.round + " · Game " + pairing.gameNumber
                     : "Game " + (pairing.index + 1);
-            String label = gameLabel + ": " + white + " - " + black + " (" + pairingResultLabel(pairing.outcome) + ")";
+            CharSequence label = android.text.TextUtils.concat(gameLabel + ": ",
+                    engineLabelWithIcon(white.id, white.displayName, white.displayName, 20), " - ",
+                    engineLabelWithIcon(black.id, black.displayName, black.displayName, 20),
+                    " (" + pairingResultLabel(pairing.outcome) + ")");
             if (pairing.replayPending) {
                 // The replacement game owns this record until it finishes.
             } else if (pairing.isComplete()) {
-                editable.add(pairing.index); labels.add(label + " · correct result");
+                editable.add(pairing.index); labels.add(android.text.TextUtils.concat(label, " · correct result"));
             } else if (runner == null || pairing.index > lockedIndex) {
-                editable.add(pairing.index); labels.add(label + " · edit pairing");
+                editable.add(pairing.index); labels.add(android.text.TextUtils.concat(label, " · edit pairing"));
             }
         }
         if (editable.isEmpty()) {
@@ -5084,7 +5164,7 @@ public final class TournamentActivity extends Activity {
             return;
         }
         new AlertDialog.Builder(this).setTitle("Choose a scheduled game")
-                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                .setItems(labels.toArray(new CharSequence[0]), (dialog, which) -> {
                     int index = editable.get(which);
                     TournamentManager.Pairing pairing = tournament.pairings().get(index);
                     if (pairing.isComplete()) showPairingResultEditor(tournament, index);
@@ -5095,11 +5175,11 @@ public final class TournamentActivity extends Activity {
     private void showPairingEnginesEditor(TournamentManager tournament, int pairingIndex) {
         TournamentManager.Pairing pairing = tournament.pairings().get(pairingIndex);
         List<TournamentManager.Engine> engines = tournament.engines();
-        ArrayList<String> names = new ArrayList<>();
+        ArrayList<CharSequence> names = new ArrayList<>();
         int whiteSelection = 0, blackSelection = Math.min(1, engines.size() - 1);
         for (int i = 0; i < engines.size(); i++) {
             TournamentManager.Engine engine = engines.get(i);
-            names.add(engine.displayName);
+            names.add(engineLabelWithIcon(engine.id, engine.displayName, engine.displayName, 24));
             if (engine.id.equals(pairing.whiteEngineId)) whiteSelection = i;
             if (engine.id.equals(pairing.blackEngineId)) blackSelection = i;
         }
@@ -5138,6 +5218,12 @@ public final class TournamentActivity extends Activity {
                         Toast.makeText(this, "Could not update schedule: " + e.getMessage(), Toast.LENGTH_LONG).show();
                     }
                 }).show();
+    }
+
+    private TournamentManager.Engine findTournamentEngine(List<TournamentManager.Engine> engines, String id) {
+        for (TournamentManager.Engine engine : engines) if (engine.id.equals(id)) return engine;
+        String fallbackName = id == null || id.isEmpty() ? "Unknown engine" : id;
+        return new TournamentManager.Engine(fallbackName, fallbackName);
     }
 
     private String engineDisplayName(List<TournamentManager.Engine> engines, String id) {
@@ -5320,8 +5406,8 @@ public final class TournamentActivity extends Activity {
         syncCupRankedEngines();
         if (cupRankedEngines.size() < 2) { Toast.makeText(this, "Select at least two engines first", Toast.LENGTH_LONG).show(); return; }
         final ArrayList<EngineChoice> working = new ArrayList<>(cupRankedEngines);
-        final ArrayList<String> labels = new ArrayList<>();
-        final ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_single_choice, labels);
+        final ArrayList<CharSequence> labels = new ArrayList<>();
+        final ArrayAdapter<CharSequence> adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_single_choice, labels);
         final int[] selectedIndex = {0};
         LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL); content.setPadding(dp(12), dp(8), dp(12), dp(8));
         content.addView(text("Move engines into strength order. #1 is strongest. The top eight are distributed across the bracket; remaining engines fill the vacant seed positions."), fullWidth());
@@ -5331,7 +5417,10 @@ public final class TournamentActivity extends Activity {
         Button up = new Button(this); up.setText("Move up"); Button down = new Button(this); down.setText("Move down");
         controls.addView(up, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         controls.addView(down, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1)); content.addView(controls, fullWidth());
-        Runnable refresh = () -> { labels.clear(); for (int i=0;i<working.size();i++) labels.add("#"+(i+1)+"  "+working.get(i).name); adapter.notifyDataSetChanged();
+        Runnable refresh = () -> { labels.clear(); for (int i=0;i<working.size();i++) {
+                EngineChoice engine = working.get(i);
+                labels.add(engineLabelWithIcon(engine.id, engine.name, "#"+(i+1)+"  "+engine.name, 24));
+            } adapter.notifyDataSetChanged();
             if (!working.isEmpty()) { selectedIndex[0]=Math.max(0,Math.min(selectedIndex[0],working.size()-1)); list.setItemChecked(selectedIndex[0],true); list.setSelection(selectedIndex[0]); } };
         list.setOnItemClickListener((parent, view, position, id) -> selectedIndex[0]=position);
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Cup engine ranking").setView(content)
@@ -5368,8 +5457,8 @@ public final class TournamentActivity extends Activity {
             return;
         }
         final ArrayList<EngineChoice> working = new ArrayList<>(swissRankedEngines);
-        final ArrayList<String> labels = new ArrayList<>();
-        final ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_single_choice, labels);
+        final ArrayList<CharSequence> labels = new ArrayList<>();
+        final ArrayAdapter<CharSequence> adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_single_choice, labels);
         final int[] selectedIndex = {0};
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -5390,7 +5479,10 @@ public final class TournamentActivity extends Activity {
         content.addView(controls, fullWidth());
         Runnable refresh = () -> {
             labels.clear();
-            for (int i = 0; i < working.size(); i++) labels.add("#" + (i + 1) + "  " + working.get(i).name);
+            for (int i = 0; i < working.size(); i++) {
+                EngineChoice engine = working.get(i);
+                labels.add(engineLabelWithIcon(engine.id, engine.name, "#" + (i + 1) + "  " + engine.name, 24));
+            }
             adapter.notifyDataSetChanged();
             if (!working.isEmpty()) {
                 selectedIndex[0] = Math.max(0, Math.min(selectedIndex[0], working.size() - 1));
@@ -5450,12 +5542,13 @@ public final class TournamentActivity extends Activity {
             Toast.makeText(this, "Select tournament engines first", Toast.LENGTH_SHORT).show();
             return;
         }
-        String[] labels = new String[selectedEngines.size()];
+        CharSequence[] labels = new CharSequence[selectedEngines.size()];
         boolean[] checked = new boolean[selectedEngines.size()];
         Set<String> updatedDisabledIds = new HashSet<>(engineIconDisabledIds);
         for (int i = 0; i < selectedEngines.size(); i++) {
             EngineChoice engine = selectedEngines.get(i);
-            labels[i] = engine.name + " · " + iconFileNameForEngine(engine.id, engine.name);
+            labels[i] = engineLabelWithIcon(engine.id, engine.name,
+                    engine.name + " · " + iconFileNameForEngine(engine.id, engine.name), 24);
             checked[i] = !updatedDisabledIds.contains(normalizeIconKey(engine.id));
         }
         new AlertDialog.Builder(this).setTitle("Engine icons · check to enable")
@@ -5555,8 +5648,13 @@ public final class TournamentActivity extends Activity {
         return bitmap;
     }
 
+    private boolean engineIconEnabledFor(String engineId) {
+        return engineIconsCheck != null && engineIconsCheck.isChecked() &&
+                !engineIconDisabledIds.contains(normalizeIconKey(engineId));
+    }
+
     private Bitmap mirrorEngineIcon(String engineId, String displayName) {
-        if (engineIconsCheck == null || !engineIconsCheck.isChecked() || engineIconDisabledIds.contains(normalizeIconKey(engineId))) return null;
+        if (!engineIconEnabledFor(engineId)) return null;
         scanEngineIconFolder();
         Uri uri = null;
         for (String key : engineIconLookupKeys(engineId, displayName)) {
@@ -5567,23 +5665,47 @@ public final class TournamentActivity extends Activity {
         return decodeMirrorIcon(uri);
     }
 
-    private void addMirrorEngineIcon(LinearLayout row, String engineId, String displayName, int size) {
+    /** Build a list label with the configured engine PNG or a visible fallback mark. */
+    private CharSequence engineLabelWithIcon(String engineId, String displayName, String label, int iconSizeDp) {
+        if (!engineIconEnabledFor(engineId)) return label;
         Bitmap bitmap = mirrorEngineIcon(engineId, displayName);
-        if (bitmap == null) return;
-        ImageView icon = new ImageView(this);
-        icon.setImageDrawable(new BitmapDrawable(getResources(), bitmap));
-        icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        if (bitmap == null) return "♟  " + label;
+        android.graphics.drawable.BitmapDrawable drawable = new BitmapDrawable(getResources(), bitmap);
+        int size = dp(iconSizeDp);
+        drawable.setBounds(0, 0, size, size);
+        String value = "\uFFFC  " + label;
+        android.text.SpannableString result = new android.text.SpannableString(value);
+        result.setSpan(new android.text.style.ImageSpan(drawable, android.text.style.ImageSpan.ALIGN_BOTTOM),
+                0, 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return result;
+    }
+
+    private void addMirrorEngineIcon(LinearLayout row, String engineId, String displayName, int size) {
+        if (!engineIconEnabledFor(engineId)) return;
+        Bitmap bitmap = mirrorEngineIcon(engineId, displayName);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(size), dp(size));
         lp.leftMargin = dp(3); lp.rightMargin = dp(4);
-        row.addView(icon, lp);
+        if (bitmap != null) {
+            ImageView icon = new ImageView(this);
+            icon.setImageDrawable(new BitmapDrawable(getResources(), bitmap));
+            icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            row.addView(icon, lp);
+        } else {
+            TextView fallback = text("♟");
+            fallback.setGravity(android.view.Gravity.CENTER);
+            fallback.setTextSize(Math.max(16, size * 0.72f));
+            fallback.setTextColor(0xFFBFCBD2);
+            row.addView(fallback, lp);
+        }
     }
 
     private void chooseEngines() {
         if (availableEngines.isEmpty()) { Toast.makeText(this, "No engines found", Toast.LENGTH_LONG).show(); return; }
-        String[] labels = new String[availableEngines.size()];
+        CharSequence[] labels = new CharSequence[availableEngines.size()];
         boolean[] checked = new boolean[availableEngines.size()];
         for (int i = 0; i < availableEngines.size(); i++) {
-            EngineChoice choice = availableEngines.get(i); labels[i] = choice.name;
+            EngineChoice choice = availableEngines.get(i);
+            labels[i] = engineLabelWithIcon(choice.id, choice.name, choice.name, 24);
             for (EngineChoice selected : selectedEngines) if (selected.id.equals(choice.id)) checked[i] = true;
         }
         final ArrayList<EngineChoice> dialogSelection = new ArrayList<>(selectedEngines);
@@ -5709,7 +5831,7 @@ public final class TournamentActivity extends Activity {
         if (pgnPlaybackIntervalInput != null) pgnPlaybackIntervalInput.setText(p.getString("setupPgnPlaybackInterval", "1.0"));
         openingStartInput.setText(p.getString("setupOpeningStart", openingStartInput.getText().toString()));
         showTournamentArrowsCheck.setChecked(p.getBoolean("setupArrows", true));
-        if (engineIconsCheck != null) engineIconsCheck.setChecked(p.getBoolean("setupEngineIconsEnabled", false));
+        if (engineIconsCheck != null) engineIconsCheck.setChecked(p.getBoolean("setupEngineIconsEnabled", true));
         String iconFolder = p.getString("setupEngineIconFolder", "");
         engineIconFolderUri = iconFolder.isEmpty() ? null : Uri.parse(iconFolder);
         if (engineIconFolderButton != null) engineIconFolderButton.setText(engineIconFolderUri == null ?
@@ -6144,7 +6266,7 @@ public final class TournamentActivity extends Activity {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
-        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/json", "text/json", "application/octet-stream", "text/plain"});
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/json", "text/json", "application/gzip", "application/x-gzip", "application/octet-stream", "text/plain"});
         try { startActivityForResult(intent, REQUEST_TOURNAMENT_JSON); }
         catch (android.content.ActivityNotFoundException error) {
             Toast.makeText(this, "No file picker is available to import a tournament JSON", Toast.LENGTH_LONG).show();
@@ -6154,18 +6276,11 @@ public final class TournamentActivity extends Activity {
     private void importTournamentJson(Uri uri) {
         final String sourceName = queryDisplayName(uri);
         new Thread(() -> {
-            try (InputStream in = getContentResolver().openInputStream(uri);
-                 ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
                 if (in == null) throw new IOException("Could not open selected JSON file");
-                byte[] buffer = new byte[32768];
-                int count;
-                long total = 0;
-                while ((count = in.read(buffer)) != -1) {
-                    total += count;
-                    if (total > 32L * 1024L * 1024L) throw new IOException("Tournament JSON is larger than 32 MB");
-                    out.write(buffer, 0, count);
-                }
-                String json = new String(out.toByteArray(), Charset.forName("UTF-8"));
+                // Accept legacy plain JSON and gzip-compressed .json.gz files by
+                // inspecting the bytes, with a limit on the decoded JSON payload.
+                String json = TournamentManager.readTournamentJson(in);
                 TournamentManager imported = TournamentManager.importJson(this, json);
                 runOnUiThread(() -> {
                     String mirrorWarning = imported.externalSaveError().isEmpty() ? "" : "\n" + imported.externalSaveError();
@@ -6203,7 +6318,6 @@ public final class TournamentActivity extends Activity {
     }
 
     private void chooseSavedTournament() {
-        if (runner != null) { Toast.makeText(this, "A tournament is already running", Toast.LENGTH_SHORT).show(); return; }
         if (tournamentLoadInProgress) { Toast.makeText(this, "Tournament data is still loading", Toast.LENGTH_SHORT).show(); return; }
         final List<String> files = TournamentManager.savedTournamentFiles(this);
         if (files.isEmpty()) { Toast.makeText(this, "No saved tournaments", Toast.LENGTH_SHORT).show(); return; }
@@ -6226,7 +6340,9 @@ public final class TournamentActivity extends Activity {
                     for (TournamentManager.Pairing pairing : t.pairings()) if (pairing.isComplete()) completed++;
                     String label = t.title() + " · " + completed + "/" + t.pairings().size() +
                             " games · " + (t.isComplete() ? "Completed" : "Unfinished");
-                    entries.add(new SavedTournamentEntry(file, label, true));
+                    // restore() transparently migrates a legacy .json to a new
+                    // compressed filename. Keep the canonical name it returned.
+                    entries.add(new SavedTournamentEntry(t.savedFileName(), label, true));
                 } catch (Exception e) {
                     entries.add(new SavedTournamentEntry(file, file + " · Cannot read: " + e.getMessage(), false));
                 }
@@ -6242,6 +6358,15 @@ public final class TournamentActivity extends Activity {
                         SavedTournamentEntry entry = entries.get(which);
                         if (!entry.readable) {
                             Toast.makeText(this, "This saved tournament could not be read", Toast.LENGTH_LONG).show();
+                        } else if (runner != null) {
+                            if (activeTournamentManager != null &&
+                                    entry.fileName.equals(activeTournamentManager.savedFileName())) {
+                                // The current runner owns this file. Do not create a second
+                                // manager or allow a second event to replace its live state.
+                                setContentView(isMirrorShowing() ? mirrorView : playView);
+                            } else {
+                                Toast.makeText(this, "Pause and stop the active tournament before opening another saved event", Toast.LENGTH_LONG).show();
+                            }
                         } else {
                             showSavedTournamentActions(entry.fileName);
                         }
@@ -6280,13 +6405,29 @@ public final class TournamentActivity extends Activity {
     }
 
     private void showSavedTournamentActions(String fileName, TournamentManager saved) {
-        String[] actions = saved.isComplete() ? new String[]{"Load setup / review", "Delete tournament"} : new String[]{"Continue tournament", "Delete tournament"};
+        final String[] actions = saved.isComplete()
+                ? new String[]{"View completed tournament", "Load setup", "Delete tournament"}
+                : new String[]{"Resume tournament", "View tournament", "Delete tournament"};
         new AlertDialog.Builder(this).setTitle(saved.title()).setItems(actions, (dialog, which) -> {
             if (which == 0) {
-                loadTournamentSetup(saved);
-                if (!saved.isComplete()) launchTournament(saved);
-                else Toast.makeText(this, "Completed tournament loaded into setup; its saved results remain available.", Toast.LENGTH_LONG).show();
-            } else {
+                if (saved.isComplete()) showSavedTournamentReview(saved);
+                else {
+                    loadTournamentSetup(saved);
+                    // Keep the saved event visible and read-only during background
+                    // preparation. The runner takes ownership only after preparation succeeds.
+                    showSavedTournamentReview(saved);
+                    launchTournament(saved);
+                }
+            } else if (which == 1) {
+                if (saved.isComplete()) {
+                    loadTournamentSetup(saved);
+                    savedTournamentReviewMode = false;
+                    setContentView(setupView);
+                    Toast.makeText(this, "Tournament settings loaded into setup.", Toast.LENGTH_LONG).show();
+                } else {
+                    showSavedTournamentReview(saved);
+                }
+            } else if (which == 2) {
                 new AlertDialog.Builder(this).setTitle("Delete saved tournament?").setMessage(saved.title() + " will be permanently deleted.")
                     .setNegativeButton("Cancel", null).setPositiveButton("Delete", (d, w) -> {
                         try { TournamentManager.deleteSavedTournament(this, fileName); Toast.makeText(this, "Tournament deleted", Toast.LENGTH_SHORT).show(); }
@@ -6296,8 +6437,75 @@ public final class TournamentActivity extends Activity {
         }).setNegativeButton("Cancel", null).show();
     }
 
+    private boolean blockSavedTournamentReviewEdit() {
+        if (!savedTournamentReviewMode) return false;
+        Toast.makeText(this, "Saved tournament review is read-only. Resume an unfinished tournament to make changes.",
+                Toast.LENGTH_LONG).show();
+        return true;
+    }
+
+    /** Open a saved tournament in read-only Mirror Board review without starting engines. */
+    private void showSavedTournamentReview(TournamentManager saved) {
+        if (runner != null) {
+            Toast.makeText(this, "Pause and stop the active tournament before reviewing another event", Toast.LENGTH_LONG).show();
+            return;
+        }
+        activeTournamentManager = saved;
+        savedTournamentReviewMode = true;
+        currentTournamentScreen = 1;
+        mirrorReplayMode = false;
+        mirrorReplayLiveSnapshot = false;
+        mirrorReplayPairingIndex = -1;
+        mirrorReplayWhiteEngineId = mirrorReplayBlackEngineId = "";
+        mirrorReplayPositions.clear(); mirrorReplayMoves.clear(); mirrorReplayComments.clear();
+        mirrorReplayPgn = "";
+        mirrorPly = -1;
+        mirrorPositions.clear();
+        mirrorLiveSanMoves.clear();
+        mirrorLiveAnalysisByPly.clear();
+        mirrorLiveHistoryInitialized = false;
+        latestPosition = standardStartPosition();
+        currentGameNumber = 0;
+        currentGameTotal = saved.pairings().size();
+        mirrorTcLabel = mirrorTimeControlLabel(saved);
+        mirrorHeaderShowsTitle = true;
+        currentWhiteEngineId = currentBlackEngineId = "";
+        currentWhiteName = "WHITE";
+        currentBlackName = "BLACK";
+        lastWhiteAnalysis = lastBlackAnalysis = "Eval: —";
+        if (tournamentTitleText != null) tournamentTitleText.setText(saved.title());
+        if (statusText != null) statusText.setText(saved.isComplete() ? "Completed tournament review" : "Saved tournament review");
+        if (moveStatusText != null) moveStatusText.setText(saved.isComplete() ? "TOURNAMENT COMPLETE · REVIEW MODE" : "SAVED TOURNAMENT · REVIEW MODE");
+        if (standingsText != null) standingsText.setText(formatStandings(saved, saved.standings(), saved.engines()));
+        if (tournamentBoard != null) {
+            tournamentBoard.setPosition(new Position(latestPosition));
+            tournamentBoard.setLastMove(null);
+            tournamentBoard.setMoveHints(null);
+            tournamentBoard.setSelection(-1);
+        }
+        if (mirrorBoard != null) {
+            mirrorBoard.setPosition(new Position(latestPosition));
+            mirrorBoard.setLastMove(null);
+            mirrorBoard.invalidate();
+        }
+        if (playPauseButton != null) { playPauseButton.setText("REVIEW"); playPauseButton.setEnabled(false); }
+        if (mirrorPauseButton != null) { mirrorPauseButton.setText("REVIEW"); mirrorPauseButton.setEnabled(false); }
+        if (startButton != null) startButton.setEnabled(false);
+        if (resumeButton != null) resumeButton.setEnabled(true);
+        if (stopButton != null) stopButton.setEnabled(false);
+        refreshMirrorRanks();
+        invalidateAllMirrorSectionCaches();
+        clearMirrorSubCaches();
+        setContentView(mirrorView);
+        selectMirrorTab(2, false);
+        if (mirrorHeaderText != null) mirrorHeaderText.setText(mirrorHeaderLabel());
+    }
+
     private void loadTournamentSetup(TournamentManager tournament) {
         selectedEngines.clear();
+        if (startButton != null) startButton.setEnabled(true);
+        if (resumeButton != null) resumeButton.setEnabled(true);
+        if (stopButton != null) stopButton.setEnabled(false);
         for (TournamentManager.Engine engine : tournament.engines()) selectedEngines.add(new EngineChoice(engine.id, engine.displayName));
         swissRankedEngines.clear();
         for (String id : tournament.swissStrengthOrder())
@@ -6500,18 +6708,19 @@ public final class TournamentActivity extends Activity {
         if (tournament == null || !tournament.cupCheckpointPending()) return;
         List<String> advancing = tournament.cupAdvancingEngineIds();
         ArrayList<String> pendingIds = new ArrayList<>();
-        ArrayList<String> labels = new ArrayList<>();
+        ArrayList<CharSequence> labels = new ArrayList<>();
         List<TournamentManager.Engine> engines = tournament.engines();
         for (String id : advancing) {
             if (updatedIds.contains(id)) continue;
             for (TournamentManager.Engine engine : engines) if (engine.id.equals(id)) {
                 pendingIds.add(id);
-                labels.add(engine.displayName + " · " + engine.executableId);
+                labels.add(engineLabelWithIcon(engine.id, engine.displayName,
+                        engine.displayName + " · " + engine.executableId, 24));
                 break;
             }
         }
         new AlertDialog.Builder(this).setTitle("Update engines for " + tournament.cupNextStageLabel())
-                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                .setItems(labels.toArray(new CharSequence[0]), (dialog, which) -> {
                     if (which >= 0 && which < pendingIds.size()) chooseCupReplacementExecutable(tournament, pendingIds.get(which), updatedIds);
                 })
                 .setPositiveButton("DONE", (dialog, which) -> continueCupAfterCheckpoint(tournament))
@@ -6531,13 +6740,16 @@ public final class TournamentActivity extends Activity {
         if (participant == null) { showCupEngineUpdateList(tournament, updatedIds); return; }
         final TournamentManager.Engine target = participant;
         ArrayList<EngineChoice> choices = new ArrayList<>();
-        ArrayList<String> labels = new ArrayList<>();
+        ArrayList<CharSequence> labels = new ArrayList<>();
         for (EngineChoice choice : availableEngines) {
             if (choice.id.equals(target.executableId)) continue;
             boolean used = false;
             for (TournamentManager.Engine engine : tournament.engines())
                 if (!engine.id.equals(target.id) && engine.executableId.equals(choice.id)) { used = true; break; }
-            if (!used) { choices.add(choice); labels.add(choice.name + "\n" + choice.id); }
+            if (!used) {
+                choices.add(choice);
+                labels.add(engineLabelWithIcon(choice.id, choice.name, choice.name + "\n" + choice.id, 24));
+            }
         }
         if (choices.isEmpty()) {
             Toast.makeText(this, "No unused replacement executable is available for " + target.displayName, Toast.LENGTH_LONG).show();
@@ -6545,7 +6757,7 @@ public final class TournamentActivity extends Activity {
             return;
         }
         new AlertDialog.Builder(this).setTitle("Replace " + target.displayName + " for next stage")
-                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                .setItems(labels.toArray(new CharSequence[0]), (dialog, which) -> {
                     if (which < 0 || which >= choices.size()) { showCupEngineUpdateList(tournament, updatedIds); return; }
                     EngineChoice replacement = choices.get(which);
                     new AlertDialog.Builder(this).setTitle("Confirm Cup engine update")
@@ -6596,6 +6808,7 @@ public final class TournamentActivity extends Activity {
     }
 
     private void launchPreparedTournament(final TournamentManager tournament) {
+        savedTournamentReviewMode = false;
         stopMirrorAutoPlay();
         mirrorReplayMode = false;
         mirrorReplayLiveSnapshot = false;
@@ -6606,6 +6819,8 @@ public final class TournamentActivity extends Activity {
         mirrorReplayMoves.clear();
         mirrorReplayComments.clear();
         activeTournamentManager = tournament;
+        if (playPauseButton != null) playPauseButton.setEnabled(true);
+        if (mirrorPauseButton != null) mirrorPauseButton.setEnabled(true);
         refreshMirrorRanks();
         tournamentElapsedAccumulatedMs = tournament.tournamentElapsedMs();
         tournamentElapsedStartNs = System.nanoTime();
@@ -7024,6 +7239,7 @@ public final class TournamentActivity extends Activity {
     }
 
     private void showAdjudicationDialog() {
+        if (blockSavedTournamentReviewEdit()) return;
         if (runner == null || !runner.isPaused()) {
             Toast.makeText(this, "Pause the tournament before adjudicating the current game", Toast.LENGTH_LONG).show();
             return;
