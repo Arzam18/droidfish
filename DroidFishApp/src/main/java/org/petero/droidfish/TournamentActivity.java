@@ -199,7 +199,8 @@ public final class TournamentActivity extends Activity {
     private TextView cachedAnomalySummary;
     private LinearLayout cachedAnomalyRows;
     private Spinner formatSpinner, timeModeSpinner, swissSeedingSpinner, cupSeedingSpinner;
-    private EditText titleInput, gamesInput, swissRoundsInput, baseInput, incrementInput, limitInput, openingPliesInput, openingStartInput, autoWinEvalInput, pgnPlaybackIntervalInput;
+    private EditText titleInput, gamesInput, swissRoundsInput, baseInput, incrementInput, limitInput, openingPliesInput, openingStartInput, autoWinEvalInput, pgnPlaybackIntervalInput, chess960StartInput;
+    private CheckBox chess960EnableCheck;
     private TextView swissSetupHint, cupSetupHint, cupSeedingLabel;
     private Button swissRankEditorButton, cupRankEditorButton, cachedScheduleBracketButton;
     private final ArrayList<EngineChoice> swissRankedEngines = new ArrayList<>();
@@ -427,6 +428,12 @@ public final class TournamentActivity extends Activity {
         root.addView(pgnPlaybackIntervalInput, fullWidth());
         repeatOpeningCheck = new CheckBox(this); repeatOpeningCheck.setText("Repeat opening for paired color-reversal games");
         root.addView(repeatOpeningCheck, fullWidth());
+        chess960EnableCheck = new CheckBox(this);
+        chess960EnableCheck.setText("Use Chess960 / Fischer Random when no PGN or BIN opening book is selected");
+        root.addView(chess960EnableCheck, fullWidth());
+        chess960StartInput = field("Starting Chess960 position number (1–960; wraps from 960 to 1)", "1");
+        chess960StartInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        root.addView(chess960StartInput, fullWidth());
         formatSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 applyTournamentFormatUi(position);
@@ -1044,7 +1051,9 @@ public final class TournamentActivity extends Activity {
             Position before = i < positions.size() ? positions.get(i) : null;
             int moveNumber = before == null ? (ply + 1) / 2 : before.fullMoveCounter;
             boolean whiteMove = before == null ? ((ply & 1) == 1) : before.whiteMove;
-            TextView move = text(moveNumber + (whiteMove ? "." : "...") + sans.get(i));
+            boolean followsWhiteInSameFullMove = !whiteMove && i > 0 && i - 1 < positions.size() &&
+                    positions.get(i - 1).whiteMove && positions.get(i - 1).fullMoveCounter == moveNumber;
+            TextView move = text((whiteMove ? moveNumber + "." : (followsWhiteInSameFullMove ? "" : moveNumber + "...")) + sans.get(i));
             move.setTextSize(14);
             move.setIncludeFontPadding(false);
             move.setSingleLine(true);
@@ -1134,8 +1143,9 @@ public final class TournamentActivity extends Activity {
         int playerVisibility = mirrorEngineOutputHidden ? View.GONE : View.VISIBLE;
         if (mirrorBoardShortcuts != null) mirrorBoardShortcuts.setVisibility(playerVisibility);
         if (mirrorBlackAnalysisScroll != null) mirrorBlackAnalysisScroll.setVisibility(playerVisibility);
-        if (mirrorBlackRow != null) mirrorBlackRow.setVisibility(playerVisibility);
-        if (mirrorWhiteRow != null) mirrorWhiteRow.setVisibility(playerVisibility);
+        // Player rows are physically anchored to the chessboard: keep both clock/name/logo/time rows visible.
+        if (mirrorBlackRow != null) mirrorBlackRow.setVisibility(View.VISIBLE);
+        if (mirrorWhiteRow != null) mirrorWhiteRow.setVisibility(View.VISIBLE);
         if (mirrorWhiteAnalysisScroll != null) mirrorWhiteAnalysisScroll.setVisibility(playerVisibility);
         if (mirrorFocusAnalysisContainer != null) mirrorFocusAnalysisContainer.setVisibility(mirrorEngineOutputHidden ? View.VISIBLE : View.GONE);
         if (mirrorFocusMovesScroll != null) mirrorFocusMovesScroll.setVisibility(mirrorEngineOutputHidden ? View.VISIBLE : View.GONE);
@@ -1169,10 +1179,7 @@ public final class TournamentActivity extends Activity {
         }
         engineName = splitMirrorEngineNameVersion(engineName)[0];
         if (analysis == null || analysis.trim().isEmpty()) analysis = "Analysis unavailable";
-        String depthLabel = "";
-        java.util.regex.Matcher depthMatcher = java.util.regex.Pattern.compile("(?i)Depth\\s*:\\s*(\\d+)").matcher(analysis);
-        if (depthMatcher.find()) depthLabel = " · Depth " + depthMatcher.group(1);
-        mirrorFocusAnalysisText.setText("PLAYING ENGINE · " + side + " · " + engineName + depthLabel + "\n" + analysis.trim());
+        mirrorFocusAnalysisText.setText(engineName + "\n" + analysis.trim());
 
         ArrayList<String> sans = currentMirrorSanMoves(null);
         ArrayList<Position> history = currentMirrorPositions();
@@ -1182,7 +1189,10 @@ public final class TournamentActivity extends Activity {
             Position before = i < history.size() ? history.get(i) : null;
             int moveNumber = before == null ? (i / 2) + 1 : before.fullMoveCounter;
             boolean whiteMove = before == null ? ((i & 1) == 0) : before.whiteMove;
-            moves.append(moveNumber).append(whiteMove ? "." : "...").append(sans.get(i));
+            boolean followsWhiteInSameFullMove = !whiteMove && i > 0 && i - 1 < history.size() &&
+                    history.get(i - 1).whiteMove && history.get(i - 1).fullMoveCounter == moveNumber;
+            if (whiteMove || !followsWhiteInSameFullMove) moves.append(moveNumber).append(whiteMove ? "." : "...");
+            moves.append(sans.get(i));
         }
         mirrorFocusMovesText.setText(moves.length() == 0 ? "No moves yet." : moves.toString());
     }
@@ -3493,7 +3503,7 @@ public final class TournamentActivity extends Activity {
                 LinearLayout left = new LinearLayout(TournamentActivity.this); left.setGravity(android.view.Gravity.CENTER_VERTICAL);
                 TextView number = text((pairing.index + 1) + "."); number.setTextSize(12); number.setTextColor(0xFFBFCBD2);
                 left.addView(number, new LinearLayout.LayoutParams(dp(25), -2));
-                addMirrorEngineIcon(left, pairing.whiteEngineId, white, 30);
+                addMirrorEngineIcon(left, pairing.whiteEngineId, white, 38);
                 LinearLayout whiteLabels = new LinearLayout(TournamentActivity.this); whiteLabels.setOrientation(LinearLayout.VERTICAL);
                 String[] whiteNameParts = splitMirrorEngineNameVersion(white);
                 TextView whiteName = text(whiteNameParts[0]); whiteName.setTextSize(14); whiteName.setTypeface(null, android.graphics.Typeface.BOLD);
@@ -3502,10 +3512,6 @@ public final class TournamentActivity extends Activity {
                 TextView whiteRank = text(mirrorScheduleRankLabel(pairing.whiteEngineId));
                 whiteRank.setTextSize(12); whiteRank.setTextColor(0xFFD3DCE1);
                 whiteLabels.addView(whiteRank, fullWidth());
-                if (!whiteNameParts[1].isEmpty()) {
-                    TextView whiteVersion = text(whiteNameParts[1]); whiteVersion.setTextSize(10); whiteVersion.setTextColor(0xFFBFCBD2);
-                    whiteLabels.addView(whiteVersion, fullWidth());
-                }
                 left.addView(whiteLabels, new LinearLayout.LayoutParams(0, -2, 1));
                 row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
                 LinearLayout center = new LinearLayout(TournamentActivity.this); center.setOrientation(LinearLayout.VERTICAL); center.setGravity(android.view.Gravity.CENTER);
@@ -3514,7 +3520,7 @@ public final class TournamentActivity extends Activity {
                 center.addView(result, new LinearLayout.LayoutParams(-2, -2)); center.addView(moves, new LinearLayout.LayoutParams(-2, -2));
                 row.addView(center, new LinearLayout.LayoutParams(dp(82), -2));
                 LinearLayout right = new LinearLayout(TournamentActivity.this); right.setGravity(android.view.Gravity.CENTER_VERTICAL);
-                addMirrorEngineIcon(right, pairing.blackEngineId, black, 30);
+                addMirrorEngineIcon(right, pairing.blackEngineId, black, 38);
                 LinearLayout blackLabels = new LinearLayout(TournamentActivity.this); blackLabels.setOrientation(LinearLayout.VERTICAL);
                 String[] blackNameParts = splitMirrorEngineNameVersion(black);
                 TextView blackName = text(blackNameParts[0]); blackName.setTextSize(14); blackName.setTypeface(null, android.graphics.Typeface.BOLD);
@@ -3523,10 +3529,6 @@ public final class TournamentActivity extends Activity {
                 TextView blackRank = text(mirrorScheduleRankLabel(pairing.blackEngineId));
                 blackRank.setTextSize(12); blackRank.setTextColor(0xFFD3DCE1);
                 blackLabels.addView(blackRank, fullWidth());
-                if (!blackNameParts[1].isEmpty()) {
-                    TextView blackVersion = text(blackNameParts[1]); blackVersion.setTextSize(10); blackVersion.setTextColor(0xFFBFCBD2);
-                    blackLabels.addView(blackVersion, fullWidth());
-                }
                 right.addView(blackLabels, new LinearLayout.LayoutParams(0, -2, 1));
                 row.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
                 return row;
@@ -5609,6 +5611,8 @@ public final class TournamentActivity extends Activity {
         if (pgnPlaybackIntervalInput != null) e.putString("setupPgnPlaybackInterval", pgnPlaybackIntervalInput.getText().toString());
         e.putString("setupOpeningStart", openingStartInput.getText().toString());
         e.putBoolean("setupRepeat", forcedPairFormat ? repeatOpeningBeforeForcedPairFormat : repeatOpeningCheck.isChecked());
+        if (chess960EnableCheck != null) e.putBoolean("setupChess960Enabled", chess960EnableCheck.isChecked());
+        if (chess960StartInput != null) e.putString("setupChess960Start", chess960StartInput.getText().toString());
         e.putBoolean("setupArrows", showTournamentArrowsCheck.isChecked());
         e.putBoolean("setupEngineIconsEnabled", engineIconsCheck != null && engineIconsCheck.isChecked());
         e.putString("setupEngineIconFolder", engineIconFolderUri == null ? "" : engineIconFolderUri.toString());
@@ -5647,6 +5651,8 @@ public final class TournamentActivity extends Activity {
         if (cupSeedingSpinner != null) cupSeedingSpinner.setSelection(Math.max(0, Math.min(2, p.getInt("setupCupSeedingMode", 0))));
         cupRankOrderConfirmed = p.getBoolean("setupCupRankOrderConfirmed", false);
         repeatOpeningCheck.setChecked(p.getBoolean("setupRepeat", false));
+        if (chess960EnableCheck != null) chess960EnableCheck.setChecked(p.getBoolean("setupChess960Enabled", false));
+        if (chess960StartInput != null) chess960StartInput.setText(p.getString("setupChess960Start", "1"));
         int savedFormat = p.getInt("setupFormat", 0);
         formatSpinner.setSelection(savedFormat);
         applyTournamentFormatUi(savedFormat);
@@ -5946,6 +5952,10 @@ public final class TournamentActivity extends Activity {
                     (movePeriodMode ? positiveInt(limitInput, "moves per time period", 1) : 30)));
             int openingPlies = nonNegativeInt(openingPliesInput, "opening plies");
             int openingStart = positiveInt(openingStartInput, "starting PGN opening number", 1);
+            boolean chess960Enabled = chess960EnableCheck != null && chess960EnableCheck.isChecked();
+            int chess960Start = chess960StartInput == null ? 1 : positiveInt(chess960StartInput, "starting Chess960 position number", 1);
+            if (chess960Start < 1 || chess960Start > 960)
+                throw new IllegalArgumentException("Chess960 starting position must be between 1 and 960");
             // A selected PGN is applied in full by default (0); positive values cap half-moves.
             if (openingPlies > 0 && selectedOpeningPgn.trim().isEmpty() && selectedOpeningBinPath.trim().isEmpty())
                 throw new IllegalArgumentException("Select a PGN opening file before setting a custom opening-ply limit");
@@ -5963,7 +5973,9 @@ public final class TournamentActivity extends Activity {
                     TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart, swissRounds,
                     swissSeedingMode, swissRankOrderIds, cupSeedingMode, cupRankOrderIds);
             tournament.setOpeningBinPath(selectedOpeningBinPath);
+            tournament.setChess960Settings(chess960Enabled, chess960Start);
             tournament.setOpeningPgnFileName(selectedOpeningPgn.trim().isEmpty() ? "" : selectedOpeningFileName);
+            tournament.save();
             launchTournament(tournament);
         } catch (Exception e) {
             TournamentRunner failedRunner = runner;
@@ -6258,6 +6270,8 @@ public final class TournamentActivity extends Activity {
         if (openingFileText != null) openingFileText.setText(selectedOpeningFileName);
         openingStartInput.setText(String.valueOf(tournament.openingStartIndex()));
         repeatOpeningCheck.setChecked(tournament.repeatOpening());
+        if (chess960EnableCheck != null) chess960EnableCheck.setChecked(tournament.chess960Enabled());
+        if (chess960StartInput != null) chess960StartInput.setText(String.valueOf(tournament.chess960StartId()));
         // The authoritative opening book is already stored in this tournament's JSON.
         // Do not duplicate a potentially multi-megabyte PGN into SharedPreferences.
     }
@@ -6657,6 +6671,21 @@ public final class TournamentActivity extends Activity {
                     moveStatusText.setText("PGN: " + currentMirrorSanMoves(null).size() + " plies");
                 });
             }
+    /** Main-board display formatting only; Mirror Board output stays unchanged. */
+    private String formatMainBoardTbHits(String value) {
+        if (value == null) return "";
+        java.util.regex.Matcher tb = java.util.regex.Pattern.compile("(?i)\\s+TBHits:\\s*(\\S+)").matcher(value);
+        String hits = "0";
+        String formatted = value;
+        if (tb.find()) { hits = tb.group(1); formatted = tb.replaceFirst(""); }
+        java.util.regex.Matcher wdl = java.util.regex.Pattern.compile("(?m)^(W:\\s*\\d+%\\s+D:\\s*\\d+%\\s+L:\\s*\\d+%)").matcher(formatted);
+        if (wdl.find()) {
+            String replacement = java.util.regex.Matcher.quoteReplacement(wdl.group(1) + "   TBHits: " + hits);
+            return wdl.replaceFirst(replacement);
+        }
+        return formatted + "\nTBHits: " + hits;
+    }
+
             @Override public void onEngineAnalysis(boolean white, String analysis) {
                 runOnUiThread(() -> {
                     TextView target = isMirrorShowing() ? null : (white ? whiteAnalysisText : blackAnalysisText);
@@ -6667,12 +6696,13 @@ public final class TournamentActivity extends Activity {
                     }
                     if (isMirrorShowing() && mirrorEngineOutputHidden) updateMirrorFocusPanels();
                     if (target != null) {
-                        android.text.SpannableString styled = new android.text.SpannableString(analysis);
-                        int variationStart = analysis.indexOf('\n');
-                        if (variationStart >= 0) variationStart = analysis.indexOf('\n', variationStart + 1);
-                        if (variationStart >= 0 && variationStart + 1 < analysis.length()) {
+                        String mainBoardText = formatMainBoardTbHits(analysis);
+                        android.text.SpannableString styled = new android.text.SpannableString(mainBoardText);
+                        int variationStart = mainBoardText.indexOf('\n');
+                        if (variationStart >= 0) variationStart = mainBoardText.indexOf('\n', variationStart + 1);
+                        if (variationStart >= 0 && variationStart + 1 < mainBoardText.length()) {
                             styled.setSpan(new android.text.style.RelativeSizeSpan(0.75f), variationStart + 1,
-                                    analysis.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                                    mainBoardText.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                         }
                         target.setText(styled);
                     }
@@ -6709,8 +6739,8 @@ public final class TournamentActivity extends Activity {
                     if (ply > 0 && ply < mirrorPositions.size())
                         reviewLastMove = findMoveBetweenPositions(mirrorPositions.get(ply - 1), mirrorPositions.get(ply));
                     tournamentBoard.setLastMove(reviewLastMove);
-                    whiteAnalysisText.setText(whiteAnalysis);
-                    blackAnalysisText.setText(blackAnalysis);
+                    whiteAnalysisText.setText(formatMainBoardTbHits(whiteAnalysis));
+                    blackAnalysisText.setText(formatMainBoardTbHits(blackAnalysis));
                     moveStatusText.setText("PAUSED · Reviewing ply " + ply + "/" + totalPlies + " · Next/Previous to navigate");
                     String used = ply == 0 ? "—" : formatClockDuration(moveTimeMs);
                     if (ply > 0 && (ply % 2 == 1)) whiteMoveTimeText.setText(used); else if (ply > 0) blackMoveTimeText.setText(used);
