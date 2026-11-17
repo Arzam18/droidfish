@@ -25,6 +25,20 @@ public final class Chess960Position {
 
     /** @param userId one-based Chess960 number, 1 through 960. */
     public static String fenForId(int userId) {
+        return fenForIds(userId, userId);
+    }
+
+    /** Build a Double Fischer Random position from independent White/Black IDs. */
+    public static String fenForIds(int whiteId, int blackId) {
+        String whiteRank = backRankForId(whiteId);
+        String blackRank = backRankForId(blackId);
+        String rights = castleRights(whiteRank, true) + castleRights(blackRank, false);
+        return blackRank + "/pppppppp/8/8/8/8/PPPPPPPP/" +
+                whiteRank.toUpperCase(java.util.Locale.US) + " w " + rights + " - 0 1";
+    }
+
+    /** Lower-case back-rank arrangement for a one-based Chess960 ID. */
+    public static String backRankForId(int userId) {
         if (userId < 1 || userId > 960) throw new IllegalArgumentException("Chess960 number must be 1..960");
         int id = userId - 1;
         String king = KING[id / 16];
@@ -38,10 +52,15 @@ public final class Chess960Position {
         int kingRook = rank.lastIndexOf('r');
         if (kingFile < 0 || queenRook < 0 || kingRook < 0 || !(queenRook < kingFile && kingFile < kingRook))
             throw new IllegalStateException("Invalid Chess960 back rank for number " + userId);
-        char ks = (char)('A' + kingRook);
-        char qs = (char)('A' + queenRook);
-        String rights = "" + ks + qs + Character.toLowerCase(ks) + Character.toLowerCase(qs);
-        String upper = rank.toUpperCase(java.util.Locale.US);
-        return rank + "/pppppppp/8/8/8/8/PPPPPPPP/" + upper + " w " + rights + " - 0 1";
+        return rank;
+    }
+
+    private static String castleRights(String rank, boolean white) {
+        int queenRook = rank.indexOf('r');
+        int kingRook = rank.lastIndexOf('r');
+        char k = (char)('a' + kingRook);
+        char q = (char)('a' + queenRook);
+        if (white) return (char)(k - 'a' + 'A') + "" + (char)(q - 'a' + 'A');
+        return "" + k + q;
     }
 }
