@@ -5,12 +5,17 @@ import android.os.Environment;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
-import java.io.BufferedReader;
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.InputStreamReader;
+import java.io.InputStream;
 import java.io.IOException;
+import java.io.BufferedOutputStream;
+import java.util.Locale;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -171,6 +176,8 @@ public final class TournamentManager {
     /** Scheduled game interrupted by a pause/process death; it resumes before the priority queue. */
     private int activePairingIndex = -1;
     private String externalSaveError = "";
+    // Prevent two concurrent imports/creates from selecting the same not-yet-saved name.
+    private static final Set<String> RESERVED_TOURNAMENT_FILE_NAMES = new HashSet<>();
 
     public TournamentManager(Context context, String title, Format format, List<Engine> engines, int gamesPerPair) {
         this(context, title, format, engines, gamesPerPair, 30000, 500, "", 0, false);
@@ -229,10 +236,10 @@ public final class TournamentManager {
         if (gamesPerPair < 1) throw new IllegalArgumentException("Games per pairing must be positive");
         if (baseTimeMs < 1 || incrementMs < 0 || openingPlies < 0) throw new IllegalArgumentException("Invalid tournament settings");
         this.context = context.getApplicationContext();
-        // Every new tournament receives a unique internal filename so importing or
-        // creating an event can never overwrite another saved tournament.
-        this.fileName = newUniqueFileName(this.context);
-        this.title = title == null ? "CET Tournament" : title; this.format = format;
+        this.title = title == null ? "CET Tournament" : title;
+        // Each event gets a title-based, collision-safe compressed filename.
+        this.fileName = newUniqueFileName(this.context, this.title);
+        this.format = format;
         this.gamesPerPair = (format == Format.SWISS || format == Format.CUP) ? 2 : gamesPerPair;
         if (format == Format.SWISS) {
             int maximumRounds = maximumSwissRounds(engines.size());
@@ -492,7 +499,8 @@ public final class TournamentManager {
         JSONObject root = new JSONObject(json);
         TournamentManager imported;
         try {
-            imported = new TournamentManager(context, root, newUniqueFileName(context.getApplicationContext()));
+            imported = new TournamentManager(context, root,
+                    newUniqueFileName(context.getApplicationContext(), root.optString("title", "Tournament")));
             imported.validateImportedTournament();
         } catch (RuntimeException | JSONException invalid) {
             throw new IOException("Unsupported or invalid tournament JSON: " + invalid.getMessage(), invalid);
@@ -727,17 +735,44 @@ public final class TournamentManager {
             throw new IOException("Cup stage is complete but its transition state was not saved");
     }
 
-    private static String newUniqueFileName(Context context) {
-        long stamp = System.currentTimeMillis();
-        int suffix = 0;
-        String candidate;
-        do {
-            candidate = "cet_tournament_" + stamp + (suffix == 0 ? "" : "_" + suffix) + ".json";
-            suffix++;
-        } while (new File(context.getFilesDir(), candidate).exists() ||
-                externalTournamentFile(context, candidate).exists() ||
-                fileExists(appExternalTournamentFile(context, candidate)));
-        return candidate;
+    private static String safeTournamentFileStem(String title) {
+        String value = title == null ? "" : title.trim();
+        value = value.replaceAll("[^A-Za-z0-9._-]+", "_")
+                .replaceAll("_+", "_")
+                .replaceAll("^[._-]+|[._-]+$", "");
+        if (value.isEmpty()) value = "Tournament";
+        if (value.length() > 64) value = value.substring(0, 64).replaceAll("[._-]+$", "");
+        return value.isEmpty() ? "Tournament" : value;
+    }
+
+    private static synchronized String newUniqueFileName(Context context, String title) {
+        String stem = safeTournamentFileStem(title);
+        for (int sequence = 1; sequence < Integer.MAX_VALUE; sequence++) {
+            String candidate = stem + "_" + String.format(Locale.US, "%04d", sequence) + ".json.gz";
+            if (!RESERVED_TOURNAMENT_FILE_NAMES.contains(candidate) && !tournamentFileExists(context, candidate)) {
+                RESERVED_TOURNAMENT_FILE_NAMES.add(candidate);
+                return candidate;
+            }
+        }
+        throw new IllegalStateException("No free filename is available for this tournament name");
+    }
+
+    private static boolean tournamentFileExists(Context context, String candidate) {
+        File[] dirs = {context.getFilesDir(), externalTournamentDirectory(context), appExternalTournamentDirectory(context)};
+        for (File dir : dirs) {
+            if (dir == null) continue;
+            File[] entries = dir.listFiles();
+            if (entries == null) continue;
+            for (File entry : entries) {
+                String existing = entry.getName();
+                if (existing.equalsIgnoreCase(candidate) ||
+                        existing.regionMatches(true, 0, candidate + ".bak", 0, (candidate + ".bak").length()) ||
+                        existing.regionMatches(true, 0, candidate + ".restore", 0, (candidate + ".restore").length()) ||
+                        existing.equalsIgnoreCase(candidate + ".tmp") ||
+                        existing.equalsIgnoreCase(candidate + ".repair.tmp")) return true;
+            }
+        }
+        return false;
     }
 
     public static TournamentManager restore(Context context) throws IOException, JSONException {
@@ -749,27 +784,154 @@ public final class TournamentManager {
     public static TournamentManager restore(Context context, String fileName) throws IOException, JSONException {
         if (!isTournamentFileName(fileName)) throw new IOException("Invalid saved tournament name");
         File internal = new File(context.getFilesDir(), fileName);
-        if (!internal.isFile()) {
-            File external = findExternalTournamentFile(context, fileName);
-            if (external == null || !external.isFile()) throw new IOException("Saved tournament file was not found");
-            copyToInternal(context, external, fileName);
+        File shared = externalTournamentFile(context, fileName);
+        File app = appExternalTournamentFile(context, fileName);
+        ArrayList<File> candidates = new ArrayList<>();
+        candidates.add(internal);
+        addSaveBackups(candidates, internal);
+        addRepairBackups(candidates, internal);
+        candidates.add(shared);
+        addSaveBackups(candidates, shared);
+        addRepairBackups(candidates, shared);
+        if (app != null) {
+            candidates.add(app);
+            addSaveBackups(candidates, app);
+            addRepairBackups(candidates, app);
         }
-        try (FileInputStream in = context.openFileInput(fileName);
-             BufferedReader reader = new BufferedReader(new InputStreamReader(in, Charset.forName("UTF-8")))) {
-            StringBuilder data = new StringBuilder(); String line;
-            while ((line = reader.readLine()) != null) data.append(line);
-            return new TournamentManager(context, new JSONObject(data.toString()), fileName);
+
+        JSONObject root = null;
+        File validSource = null;
+        Exception lastError = null;
+        for (File candidate : candidates) {
+            if (candidate == null || !candidate.isFile()) continue;
+            try {
+                root = readTournamentRoot(candidate);
+                validSource = candidate;
+                break;
+            } catch (Exception invalidCopy) {
+                lastError = invalidCopy;
+            }
+        }
+        if (root == null || validSource == null) {
+            throw new IOException("No valid private or backup copy of the saved tournament could be read" +
+                    (lastError == null ? "" : ": " + lastError.getMessage()), lastError);
+        }
+
+        // Repair a missing/corrupt private copy only after a complete backup has
+        // been parsed successfully. The original candidate is never truncated.
+        if (!validSource.equals(internal)) copyFileAtomic(validSource, internal);
+
+        boolean legacyPlainJson = !isGzipFile(validSource);
+        if (legacyPlainJson && fileName.endsWith(".json")) {
+            // Migrate only after the old JSON parsed successfully. Publish the new
+            // compressed private copy first; retain the old copies as .legacy.bak.
+            String compressedName = newUniqueFileName(context.getApplicationContext(), root.optString("title", "Tournament"));
+            TournamentManager migrated = new TournamentManager(context, root, compressedName);
+            migrated.save();
+            // The new private snapshot is committed. Rename every legacy primary
+            // and sidecar to a .legacy archive (never delete it), including old
+            // external mirrors. This prevents a stale legacy backup from being
+            // rediscovered and migrated into a second event on the next list scan.
+            archiveLegacyCopies(context, fileName);
+            return migrated;
+        }
+        return new TournamentManager(context, root, fileName);
+    }
+
+    private static void addSaveBackups(List<File> candidates, File target) {
+        File parent = target.getParentFile();
+        if (parent == null || !parent.isDirectory()) return;
+        String prefix = target.getName() + ".bak";
+        File[] files = parent.listFiles();
+        if (files == null) return;
+        for (File file : files) {
+            String name = file.getName();
+            if (file.isFile() && name.startsWith(prefix)) candidates.add(file);
         }
     }
 
-    /** Internal app storage remains authoritative; public JSON copies are recovery/portability mirrors. */
+    private static void addRepairBackups(List<File> candidates, File target) {
+        File parent = target.getParentFile();
+        if (parent == null || !parent.isDirectory()) return;
+        String prefix = target.getName() + ".restore";
+        File[] files = parent.listFiles();
+        if (files == null) return;
+        for (File file : files) {
+            String name = file.getName();
+            if (file.isFile() && name.startsWith(prefix) && name.endsWith(".bak")) candidates.add(file);
+        }
+    }
+
+    private static JSONObject readTournamentRoot(File file) throws IOException, JSONException {
+        try (FileInputStream in = new FileInputStream(file)) {
+            return new JSONObject(readTournamentJson(in, 128L * 1024L * 1024L));
+        }
+    }
+
+    /** Read a plain JSON or gzip-compressed tournament file by inspecting its stream header. */
+    public static String readTournamentJson(InputStream source) throws IOException {
+        return readTournamentJson(source, 32L * 1024L * 1024L);
+    }
+
+    private static String readTournamentJson(InputStream source, long maximumDecodedBytes) throws IOException {
+        BufferedInputStream buffered = new BufferedInputStream(source);
+        buffered.mark(2);
+        int first = buffered.read();
+        int second = buffered.read();
+        buffered.reset();
+        InputStream decoded = first == 0x1f && second == 0x8b ? new GZIPInputStream(buffered) : buffered;
+        try (InputStream in = decoded; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[32768];
+            long total = 0;
+            int count;
+            while ((count = in.read(buffer)) != -1) {
+                total += count;
+                if (total > maximumDecodedBytes)
+                    throw new IOException("Decompressed tournament JSON exceeds the allowed size");
+                out.write(buffer, 0, count);
+            }
+            String json = new String(out.toByteArray(), Charset.forName("UTF-8"));
+            return !json.isEmpty() && json.charAt(0) == '\ufeff' ? json.substring(1) : json;
+        }
+    }
+
+    private static boolean isGzipFile(File file) throws IOException {
+        try (FileInputStream in = new FileInputStream(file)) {
+            return in.read() == 0x1f && in.read() == 0x8b;
+        }
+    }
+
+    private static void archiveLegacyCopies(Context context, String fileName) {
+        File[] dirs = {context.getFilesDir(), externalTournamentDirectory(context), appExternalTournamentDirectory(context)};
+        for (File dir : dirs) {
+            if (dir == null || !dir.isDirectory()) continue;
+            File[] entries = dir.listFiles();
+            if (entries == null) continue;
+            for (File copy : entries) {
+                String name = copy.getName();
+                boolean legacyCopy = name.equals(fileName) || name.startsWith(fileName + ".bak") ||
+                        name.startsWith(fileName + ".restore") || name.equals(fileName + ".tmp") ||
+                        name.equals(fileName + ".repair.tmp");
+                if (!legacyCopy || !copy.isFile()) continue;
+                File archive = new File(copy.getAbsolutePath() + ".legacy.bak");
+                int suffix = 1;
+                while (archive.exists()) archive = new File(copy.getAbsolutePath() + ".legacy_" + suffix++ + ".bak");
+                // Rename on the same volume. Never delete a legacy or recovery copy.
+                // A permission/rename failure must not invalidate the already-committed
+                // compressed snapshot; leave the original visible for recovery.
+                try { copy.renameTo(archive); } catch (SecurityException ignored) { }
+            }
+        }
+    }
+
+    /** Internal app storage remains authoritative; public compressed copies are portability mirrors. */
     public static List<String> savedTournamentFiles(Context context) {
         java.util.LinkedHashSet<String> found = new java.util.LinkedHashSet<>();
         addTournamentFiles(found, context.getFilesDir());
         addTournamentFiles(found, externalTournamentDirectory(context));
         addTournamentFiles(found, appExternalTournamentDirectory(context));
         List<String> files = new ArrayList<>(found);
-        Collections.sort(files, (a, b) -> Long.compare(savedTimestamp(b), savedTimestamp(a)));
+        Collections.sort(files, (a, b) -> Long.compare(savedModified(context, b), savedModified(context, a)));
         return files;
     }
 
@@ -777,12 +939,31 @@ public final class TournamentManager {
         if (dir == null || !dir.isDirectory()) return;
         File[] files = dir.listFiles();
         if (files == null) return;
-        for (File file : files) if (file.isFile() && isTournamentFileName(file.getName())) names.add(file.getName());
+        for (File file : files) {
+            if (!file.isFile()) continue;
+            String name = file.getName();
+            if (isTournamentFileName(name)) names.add(name);
+            else {
+                String recoveredName = tournamentNameFromBackup(name);
+                if (recoveredName != null) names.add(recoveredName);
+            }
+        }
+    }
+
+    /** Return the primary tournament filename represented by a recoverable sidecar. */
+    private static String tournamentNameFromBackup(String sidecarName) {
+        String base = sidecarName.replaceFirst("\\.restore(?:_[0-9]+)?\\.bak$", "");
+        if (!base.equals(sidecarName) && isTournamentFileName(base)) return base;
+        base = sidecarName.replaceFirst("\\.bak(?:\\.[0-9]+)?$", "");
+        if (!base.equals(sidecarName) && isTournamentFileName(base)) return base;
+        return null;
     }
 
     private static boolean isTournamentFileName(String name) {
-        return name != null && (name.equals("cet_tournament.json") ||
-                (name.startsWith("cet_tournament_") && name.endsWith(".json") && name.indexOf('/') < 0 && name.indexOf('\\') < 0));
+        if (name == null || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) return false;
+        return name.equals("cet_tournament.json") || name.equals("Tournament.json") ||
+                (name.startsWith("cet_tournament_") && name.endsWith(".json")) ||
+                name.matches("[A-Za-z0-9._-]{1,64}_[0-9]{4,}\\.json\\.gz");
     }
 
     private static File externalTournamentDirectory(Context context) {
@@ -803,39 +984,80 @@ public final class TournamentManager {
         return dir == null ? null : new File(dir, name);
     }
 
-    private static boolean fileExists(File file) { return file != null && file.exists(); }
-
-    private static File findExternalTournamentFile(Context context, String name) {
-        File shared = externalTournamentFile(context, name);
-        File app = appExternalTournamentFile(context, name);
-        boolean sharedExists = shared.isFile();
-        boolean appExists = app != null && app.isFile();
-        // Prefer the app-specific copy on equal timestamps because it is written
-        // immediately after a failed public-storage write on coarse-timestamp filesystems.
-        if (sharedExists && appExists) return shared.lastModified() > app.lastModified() ? shared : app;
-        if (sharedExists) return shared;
-        return appExists ? app : null;
+    private static long savedModified(Context context, String name) {
+        long modified = 0L;
+        File[] dirs = {context.getFilesDir(), externalTournamentDirectory(context), appExternalTournamentDirectory(context)};
+        for (File dir : dirs) {
+            if (dir == null || !dir.isDirectory()) continue;
+            File[] files = dir.listFiles();
+            if (files == null) continue;
+            for (File file : files) {
+                if (!file.isFile()) continue;
+                if (file.getName().equals(name) || name.equals(tournamentNameFromBackup(file.getName())))
+                    modified = Math.max(modified, file.lastModified());
+            }
+        }
+        return modified;
     }
 
-    private static void copyToInternal(Context context, File source, String name) throws IOException {
-        File temp = new File(context.getFilesDir(), name + ".importing");
-        try (FileInputStream in = new FileInputStream(source); FileOutputStream out = context.openFileOutput(temp.getName(), Context.MODE_PRIVATE)) {
-            byte[] buffer = new byte[8192]; int n;
-            while ((n = in.read(buffer)) >= 0) out.write(buffer, 0, n);
+    private static void copyFileAtomic(File source, File target) throws IOException {
+        File dir = target.getParentFile();
+        if (dir == null || (!dir.exists() && !dir.mkdirs() && !dir.isDirectory()))
+            throw new IOException("Cannot create private tournament folder");
+        File temp = new File(dir, target.getName() + ".repair.tmp");
+        try (FileInputStream in = new FileInputStream(source); FileOutputStream out = new FileOutputStream(temp, false)) {
+            byte[] buffer = new byte[32768];
+            int count;
+            while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+            out.flush();
             out.getFD().sync();
         }
-        File target = new File(context.getFilesDir(), name);
-        if (target.exists() && !target.delete()) { temp.delete(); throw new IOException("Could not replace internal tournament file"); }
-        if (!temp.renameTo(target)) { temp.delete(); throw new IOException("Could not import tournament file"); }
+        // Do not use the normal .bak rotation here: source may itself be target.bak.
+        // Keeping a separate recovery suffix prevents deleting the source backup.
+        File recovery = new File(target.getAbsolutePath() + ".restore.bak");
+        int suffix = 1;
+        while (recovery.exists()) recovery = new File(target.getAbsolutePath() + ".restore_" + suffix++ + ".bak");
+        boolean movedTarget = false;
+        if (target.exists()) {
+            if (!target.renameTo(recovery)) {
+                temp.delete();
+                throw new IOException("Cannot preserve previous private tournament copy");
+            }
+            movedTarget = true;
+        }
+        if (!temp.renameTo(target)) {
+            if (movedTarget && !recovery.renameTo(target))
+                throw new IOException("Cannot publish repaired tournament copy or restore its previous copy");
+            temp.delete();
+            throw new IOException("Cannot publish repaired private tournament copy");
+        }
     }
 
-    private static long savedTimestamp(String name) {
-        try {
-            String value = name.substring("cet_tournament_".length(), name.length() - 5);
-            int suffix = value.indexOf('_');
-            if (suffix >= 0) value = value.substring(0, suffix);
-            return Long.parseLong(value);
-        } catch (RuntimeException e) { return 0L; }
+    private static void publishTempFile(File temp, File target) throws IOException {
+        // First attempt the filesystem's atomic same-directory replacement.
+        if (temp.renameTo(target)) return;
+
+        // On filesystems that refuse replacement, preserve the previous snapshot
+        // under a collision-safe backup name. Never delete an existing backup.
+        File backup = new File(target.getAbsolutePath() + ".bak");
+        int suffix = 1;
+        while (backup.exists()) backup = new File(target.getAbsolutePath() + ".bak." + suffix++);
+        boolean movedTarget = false;
+        if (target.exists()) {
+            if (!target.renameTo(backup)) {
+                temp.delete();
+                throw new IOException("Cannot preserve previous tournament snapshot");
+            }
+            movedTarget = true;
+        }
+        if (!temp.renameTo(target)) {
+            if (movedTarget && !backup.renameTo(target))
+                throw new IOException("Cannot publish new tournament snapshot or restore previous snapshot");
+            temp.delete();
+            throw new IOException("Cannot publish tournament file");
+        }
+        // Keep the old complete snapshot as a recovery point. It is ignored by
+        // the normal saved-file list and read only if the primary copy is invalid.
     }
 
     public static void deleteSavedTournament(Context context, String fileName) throws IOException {
@@ -852,10 +1074,31 @@ public final class TournamentManager {
                 if (!app.delete()) throw new IOException("Could not delete external backup: " + app.getAbsolutePath());
                 deleted = true;
             }
+            deleted |= deleteTournamentSidecars(context.getFilesDir(), fileName);
+            deleted |= deleteTournamentSidecars(externalTournamentDirectory(context), fileName);
+            deleted |= deleteTournamentSidecars(appExternalTournamentDirectory(context), fileName);
         } catch (SecurityException e) {
             throw new IOException("Could not delete external tournament JSON copy", e);
         }
         if (!deleted) throw new IOException("Could not delete saved tournament");
+    }
+
+    private static boolean deleteTournamentSidecars(File directory, String fileName) throws IOException {
+        if (directory == null || !directory.isDirectory()) return false;
+        File[] files = directory.listFiles();
+        if (files == null) return false;
+        boolean deleted = false;
+        for (File file : files) {
+            String name = file.getName();
+            boolean sidecar = name.startsWith(fileName + ".bak") ||
+                    name.startsWith(fileName + ".restore") ||
+                    name.equals(fileName + ".tmp") || name.equals(fileName + ".repair.tmp");
+            if (sidecar && file.isFile()) {
+                if (!file.delete()) throw new IOException("Could not delete tournament recovery file: " + file.getAbsolutePath());
+                deleted = true;
+            }
+        }
+        return deleted;
     }
 
     public synchronized String savedFileName() { return fileName; }
@@ -2051,20 +2294,19 @@ public final class TournamentManager {
         JSONArray queue = new JSONArray(); for (Integer index : playQueue) queue.put(index); root.put("playQueue", queue);
         root.put("activePairingIndex", activePairingIndex);
         byte[] bytes = root.toString().getBytes(Charset.forName("UTF-8"));
-        // The private copy remains the authoritative recovery copy and is always written first.
-        try (FileOutputStream out = context.openFileOutput(fileName, Context.MODE_PRIVATE)) {
-            out.write(bytes); out.flush(); out.getFD().sync();
-        }
+        // Commit a complete, CRC-verified gzip snapshot atomically to private storage first.
+        writeAtomicCompressed(new File(context.getFilesDir(), fileName), bytes);
+        synchronized (TournamentManager.class) { RESERVED_TOURNAMENT_FILE_NAMES.remove(fileName); }
         // Mirror the exact same snapshot to shared DroidFish storage after every save(),
         // including each completed game and the periodic elapsed-time checkpoint.
         externalSaveError = "";
         try {
-            writeAtomic(externalTournamentFile(context, fileName), bytes);
+            writeAtomicCompressed(externalTournamentFile(context, fileName), bytes);
             // If an earlier save used the app-specific fallback, refresh that copy too
             // so a later restore can never select a stale mirror because of timestamp ties.
             File fallback = appExternalTournamentFile(context, fileName);
             if (fallback != null && fallback.isFile()) {
-                try { writeAtomic(fallback, bytes); }
+                try { writeAtomicCompressed(fallback, bytes); }
                 catch (IOException | SecurityException staleFallbackError) {
                     try { fallback.delete(); } catch (SecurityException ignored) { }
                 }
@@ -2073,7 +2315,7 @@ public final class TournamentManager {
             try {
                 File fallback = appExternalTournamentFile(context, fileName);
                 if (fallback == null) throw new IOException("App external storage is unavailable");
-                writeAtomic(fallback, bytes);
+                writeAtomicCompressed(fallback, bytes);
                 externalSaveError = "Shared DroidFish/tournament folder unavailable; backup saved in " + fallback.getAbsolutePath();
             } catch (IOException | SecurityException fallbackError) {
                 externalSaveError = "Could not mirror tournament JSON to shared or app external storage: " + fallbackError.getMessage();
@@ -2081,24 +2323,35 @@ public final class TournamentManager {
         }
     }
 
-    private static void writeAtomic(File target, byte[] bytes) throws IOException {
+    private static void writeAtomicCompressed(File target, byte[] bytes) throws IOException {
         File dir = target.getParentFile();
         if (dir == null || (!dir.exists() && !dir.mkdirs() && !dir.isDirectory()))
             throw new IOException("Cannot create tournament folder");
         File temp = new File(dir, target.getName() + ".tmp");
         try (FileOutputStream out = new FileOutputStream(temp, false)) {
-            out.write(bytes); out.flush(); out.getFD().sync();
+            GZIPOutputStream gzip = new GZIPOutputStream(new BufferedOutputStream(out));
+            gzip.write(bytes);
+            gzip.finish();
+            gzip.flush();
+            out.getFD().sync();
+            gzip.close();
         }
-        if (!temp.renameTo(target)) {
-            // Some filesystems do not replace an existing destination via renameTo.
-            File backup = new File(dir, target.getName() + ".bak");
-            if (backup.exists() && !backup.delete()) { temp.delete(); throw new IOException("Cannot replace tournament backup"); }
-            if (target.exists() && !target.renameTo(backup)) { temp.delete(); throw new IOException("Cannot rotate previous tournament JSON"); }
-            if (!temp.renameTo(target)) {
-                if (backup.exists()) backup.renameTo(target);
-                temp.delete(); throw new IOException("Cannot publish tournament JSON");
-            }
-            if (backup.exists()) backup.delete();
+        // Read the entire temporary gzip stream before publication. This checks the
+        // gzip trailer/CRC and confirms that every serialized JSON byte survived.
+        long decoded = 0;
+        try (GZIPInputStream verify = new GZIPInputStream(new BufferedInputStream(new FileInputStream(temp)))) {
+            byte[] buffer = new byte[32768];
+            int count;
+            while ((count = verify.read(buffer)) != -1) decoded += count;
+        } catch (IOException invalidGzip) {
+            temp.delete();
+            throw new IOException("Compressed tournament snapshot failed verification", invalidGzip);
         }
+        if (decoded != bytes.length) {
+            temp.delete();
+            throw new IOException("Compressed tournament snapshot has an incomplete payload");
+        }
+        publishTempFile(temp, target);
     }
+
 }
