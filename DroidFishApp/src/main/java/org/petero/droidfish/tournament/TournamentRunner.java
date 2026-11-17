@@ -8,6 +8,7 @@ import org.petero.droidfish.book.TournamentBinBook;
 import org.petero.droidfish.gamelogic.TextIO;
 import org.petero.droidfish.engine.DroidComputerPlayer;
 import org.petero.droidfish.engine.UCIOptions;
+import org.petero.droidfish.gamelogic.Chess960Position;
 import org.petero.droidfish.gamelogic.Game;
 import org.petero.droidfish.gamelogic.GameTree;
 import org.petero.droidfish.gamelogic.Move;
@@ -194,10 +195,10 @@ public final class TournamentRunner {
         blackPlayer.setFlushAnalysisBeforeResult(true);
         whitePlayer.setEngineOptions(this.engineOptions);
         blackPlayer.setEngineOptions(this.engineOptions);
-        // A PGN opening book is authoritative for tournament starts. Do not let
-        // DroidFish's own Polyglot/CTG/ECO/internal book replace the selected line.
+        // A selected PGN/BIN opening or a generated Chess960 start is authoritative.
+        // Do not let DroidFish's own Polyglot/CTG/ECO/internal book replace it.
         BookOptions tournamentBookOptions = new BookOptions(this.bookOptions);
-        if (!this.openingPgn.trim().isEmpty() || !tournament.openingBinPath().trim().isEmpty()) {
+        if (!this.openingPgn.trim().isEmpty() || !tournament.openingBinPath().trim().isEmpty() || tournament.chess960Enabled()) {
             tournamentBookOptions.filename = "";
             tournamentBookOptions.maxLength = 0;
             tournamentBookOptions.preferMainLines = false;
@@ -414,6 +415,18 @@ public final class TournamentRunner {
         else
             tc.setTimeControl((int)baseTimeMs, 0, (int)incrementMs);
         game = new Game(new EmptyPgnReceiver(), tc);
+        boolean useChess960 = tournament.chess960Enabled() && openingPgn.trim().isEmpty() && tournament.openingBinPath().trim().isEmpty();
+        if (useChess960) {
+            int chess960Id = ((tournament.chess960StartId() - 1 + pairing.index) % 960) + 1;
+            try {
+                game.setPos(TextIO.readFEN(Chess960Position.fenForId(chess960Id)));
+                game.tree.setTournamentVariant("Chess960");
+                currentOpeningName = "Chess960 #" + chess960Id;
+            } catch (Exception invalid960) {
+                listener.onError("Could not create Chess960 starting position #" + chess960Id, invalid960);
+                stop(); return;
+            }
+        }
         game.tree.setPlayerNames(whiteEngine.displayName, blackEngine.displayName);
         positionHistory.clear(); whiteAnalysisHistory.clear(); blackAnalysisHistory.clear(); moveTimeHistory.clear();
         reviewPly = -1; lastMoveTimeMs = 0; humanAdjudication = false;
@@ -455,14 +468,20 @@ public final class TournamentRunner {
             return;
         }
         pairing = tournament.pairings().get(pairing.index);
-        currentOpeningName = pairing.openingName == null || pairing.openingName.trim().isEmpty()
-                ? "Starting position" : pairing.openingName;
+        boolean frcActiveForGame = tournament.chess960Enabled() && openingPgn.trim().isEmpty() && tournament.openingBinPath().trim().isEmpty();
+        if (frcActiveForGame) {
+            int chess960Id = ((tournament.chess960StartId() - 1 + pairing.index) % 960) + 1;
+            currentOpeningName = "Chess960 #" + chess960Id;
+        } else {
+            currentOpeningName = pairing.openingName == null || pairing.openingName.trim().isEmpty()
+                    ? "Starting position" : pairing.openingName;
+        }
         game.tree.setTournamentOpening(currentOpeningName);
         // Publish the new game before the opening callbacks. The Mirror Board
         // clears its previous game's move history in onGameStarted.
         listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
-        int appliedPlies = applyAssignedOpening(pairing.openingSanLine);
-        if (appliedPlies == 0 && pairing.openingSanLine != null && !pairing.openingSanLine.trim().isEmpty()) {
+        int appliedPlies = frcActiveForGame ? 0 : applyAssignedOpening(pairing.openingSanLine);
+        if (!frcActiveForGame && appliedPlies == 0 && pairing.openingSanLine != null && !pairing.openingSanLine.trim().isEmpty()) {
             listener.onError("The saved opening assignment for Game " + (pairing.index + 1) +
                     " contains no legal moves from the starting position.", null);
             stop();

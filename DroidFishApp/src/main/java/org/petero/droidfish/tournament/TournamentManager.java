@@ -150,6 +150,8 @@ public final class TournamentManager {
     private int openingPlies;
     private int openingStartIndex = 1;
     private boolean repeatOpening;
+    private boolean chess960Enabled;
+    private int chess960StartId = 1;
     private long tournamentElapsedMs;
     private boolean anomalyRuleSettingsSaved;
     private boolean anomalyRulesEnabled;
@@ -364,6 +366,8 @@ public final class TournamentManager {
         repeatOpening = root.optBoolean("repeatOpening", false);
         tournamentElapsedMs = Math.max(0L, root.optLong("tournamentElapsedMs", 0L));
         openingStartIndex = Math.max(1, root.optInt("openingStartIndex", 1));
+        chess960Enabled = root.optBoolean("chess960Enabled", false);
+        chess960StartId = Math.max(1, Math.min(960, root.optInt("chess960StartId", 1)));
         anomalyRuleSettingsSaved = root.optBoolean("anomalyRuleSettingsSaved", false);
         anomalyRulesEnabled = root.optBoolean("anomalyRulesEnabled", true);
         anomalyRuleStartFullMove = Math.max(1, root.optInt("anomalyRuleStartFullMove", 1));
@@ -1342,6 +1346,11 @@ public final class TournamentManager {
     public synchronized String openingPgnFileName() { return openingPgnFileName; }
     public synchronized void setOpeningPgnFileName(String name) { openingPgnFileName = name == null ? "" : name.trim(); }
     public synchronized String openingBinPath() { return openingBinPath; }
+    public synchronized boolean chess960Enabled() { return chess960Enabled; }
+    public synchronized int chess960StartId() { return chess960StartId; }
+    public synchronized void setChess960Settings(boolean enabled, int startId) {
+        chess960Enabled = enabled; chess960StartId = Math.max(1, Math.min(960, startId));
+    }
     public synchronized void setOpeningBinPath(String path) { openingBinPath = path == null ? "" : path; }
     public synchronized int openingPlies() { return openingPlies; }
     public synchronized int openingStartIndex() { return openingStartIndex; }
@@ -1916,6 +1925,7 @@ public final class TournamentManager {
         root.put("baseTimeMs", baseTimeMs); root.put("incrementMs", incrementMs);
         root.put("timeMode", timeMode.name()); root.put("limitValue", limitValue);
         root.put("openingPgn", openingPgn); root.put("openingPgnFileName", openingPgnFileName); root.put("openingBinPath", openingBinPath); root.put("openingPlies", openingPlies); root.put("openingStartIndex", openingStartIndex); root.put("repeatOpening", repeatOpening); root.put("tournamentElapsedMs", tournamentElapsedMs);
+        root.put("chess960Enabled", chess960Enabled); root.put("chess960StartId", chess960StartId);
         root.put("anomalyRuleSettingsSaved", anomalyRuleSettingsSaved); root.put("anomalyRulesEnabled", anomalyRulesEnabled);
         root.put("anomalyRuleStartFullMove", anomalyRuleStartFullMove); root.put("anomalyMaximumFullMoves", anomalyMaximumFullMoves);
         JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); o.put("executableId", e.executableId); ea.put(o); } root.put("engines", ea);
