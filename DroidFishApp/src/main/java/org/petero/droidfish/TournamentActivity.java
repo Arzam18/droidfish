@@ -137,6 +137,10 @@ public final class TournamentActivity extends Activity {
     private final java.util.TreeMap<Integer, String> mirrorAnalysisPvByDepth = new java.util.TreeMap<>();
     private String mirrorReplayPgn = "";
     private CheckBox engineIconsCheck;
+    private CheckBox ratingEnabledCheck;
+    private LinearLayout ratingInitialContainer;
+    private final HashMap<String, EditText> ratingInitialInputs = new HashMap<>();
+    private final HashMap<String, String> ratingSetupValues = new HashMap<>();
     private Button engineIconFolderButton, engineIconConfigureButton;
     private Uri engineIconFolderUri;
     private final Set<String> engineIconDisabledIds = new HashSet<>();
@@ -144,6 +148,7 @@ public final class TournamentActivity extends Activity {
     private final HashMap<String, Bitmap> engineIconBitmaps = new HashMap<>();
     private boolean engineIconFolderScanned;
     private boolean restoringSetup;
+    private boolean loadingTournamentSetup;
     private static final int REQUEST_ENGINE_ICON_FOLDER = 7318;
     private ListView mirrorScheduleList;
     private final ArrayList<String> mirrorScheduleRows = new ArrayList<>();
@@ -312,6 +317,18 @@ public final class TournamentActivity extends Activity {
         root.addView(choose, fullWidth());
         selectedText = text("No engines selected"); root.addView(selectedText, fullWidth());
         choose.setOnClickListener(v -> chooseEngines());
+
+        ratingEnabledCheck = new CheckBox(this);
+        ratingEnabledCheck.setText("Enable Elo rating for this tournament");
+        root.addView(ratingEnabledCheck, fullWidth());
+        ratingInitialContainer = new LinearLayout(this);
+        ratingInitialContainer.setOrientation(LinearLayout.VERTICAL);
+        root.addView(ratingInitialContainer, fullWidth());
+        ratingEnabledCheck.setOnCheckedChangeListener((button, checked) -> {
+            updateRatingSetupUi();
+            if (!restoringSetup && !loadingTournamentSetup) saveSetup();
+        });
+        updateRatingSetupUi();
 
         engineIconsCheck = new CheckBox(this);
         engineIconsCheck.setText("Show engine icons on Mirror Board and engine lists");
@@ -679,16 +696,19 @@ public final class TournamentActivity extends Activity {
         menu.setOnClickListener(v -> {
             if (savedTournamentReviewMode) {
                 new AlertDialog.Builder(TournamentActivity.this).setTitle("Saved tournament review")
-                        .setItems(new String[]{"Tournament list", "Flip Board"}, (dialog, which) -> {
-                            if (which == 0) chooseSavedTournament(); else toggleTournamentFlip();
+                        .setItems(new String[]{"Tournament list", "See Rating", "Flip Board"}, (dialog, which) -> {
+                            if (which == 0) chooseSavedTournament();
+                            else if (which == 1) showRatingsDialog();
+                            else toggleTournamentFlip();
                         }).show();
             } else {
                 new AlertDialog.Builder(TournamentActivity.this).setTitle("Tournament menu")
-                        .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Schedule"}, (dialog, which) -> {
+                        .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Schedule", "See Rating"}, (dialog, which) -> {
                             if (which == 0) showAdjudicationDialog();
                             else if (which == 1) setContentView(setupView);
                             else if (which == 2) toggleTournamentFlip();
-                            else showScheduleDialog();
+                            else if (which == 3) showScheduleDialog();
+                            else showRatingsDialog();
                         }).show();
             }
         });
@@ -950,8 +970,10 @@ public final class TournamentActivity extends Activity {
         menu.setOnClickListener(v -> {
             if (savedTournamentReviewMode) {
                 new AlertDialog.Builder(TournamentActivity.this).setTitle("Saved tournament review")
-                        .setItems(new String[]{"Tournament list", "Flip Board"}, (dialog, which) -> {
-                            if (which == 0) chooseSavedTournament(); else toggleTournamentFlip();
+                        .setItems(new String[]{"Tournament list", "See Rating", "Flip Board"}, (dialog, which) -> {
+                            if (which == 0) chooseSavedTournament();
+                            else if (which == 1) showRatingsDialog();
+                            else toggleTournamentFlip();
                         }).show();
             } else {
                 new AlertDialog.Builder(TournamentActivity.this).setTitle("Tournament menu")
@@ -2777,6 +2799,7 @@ public final class TournamentActivity extends Activity {
             mirrorSectionHost.addView(empty, fullWidth());
             return;
         }
+        boolean cupBracketShownAboveRatings = false;
         if (tournament.format() == TournamentManager.Format.CUP) {
             String cupSummary = formatCupProgress(tournament, tournament.engines());
             android.text.SpannableString styledCupSummary = new android.text.SpannableString(cupSummary);
@@ -2795,11 +2818,19 @@ public final class TournamentActivity extends Activity {
             body.setPadding(dp(10), dp(8), dp(10), dp(8));
             ScrollView cupScroll = new MirrorSectionScrollView(this);
             cupScroll.addView(body, new ScrollView.LayoutParams(-1, -2));
-            mirrorSectionHost.addView(cupScroll, new LinearLayout.LayoutParams(-1, -1));
-            return;
+            if (tournament.ratingEnabled()) {
+                // Keep the Cup bracket visible, then show the same score-ranked Elo table below it.
+                mirrorSectionHost.addView(cupScroll, new LinearLayout.LayoutParams(-1, dp(220)));
+                cupBracketShownAboveRatings = true;
+            } else {
+                mirrorSectionHost.addView(cupScroll, new LinearLayout.LayoutParams(-1, -1));
+                return;
+            }
         }
 
         List<TournamentManager.Standing> standings = tournament.standings();
+        Map<String, Double> ratings = tournament.ratings();
+        boolean showRatingColumn = tournament.ratingEnabled();
         HashMap<String, MirrorColorRecord> colors = new HashMap<>();
         for (TournamentManager.Engine engine : tournament.engines()) colors.put(engine.id, new MirrorColorRecord());
         for (TournamentManager.Pairing pairing : tournament.pairings()) {
@@ -2815,18 +2846,22 @@ public final class TournamentActivity extends Activity {
             }
         }
 
-        int availableWidth = Math.max(dp(300), getResources().getDisplayMetrics().widthPixels - dp(20));
-        final int engineWidth = (int)(availableWidth * 0.38f);
-        final int resultWidth = Math.max(dp(72), (availableWidth - engineWidth) / 3);
+        // Fixed columns intentionally make the table horizontally swipeable on phones.
+        final int engineWidth = dp(178);
+        final int ratingWidth = dp(88);
+        final int scoreWidth = dp(96);
+        final int resultWidth = dp(78);
         LinearLayout table = new LinearLayout(this);
         table.setOrientation(LinearLayout.VERTICAL);
         table.setPadding(dp(4), dp(4), dp(4), dp(8));
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         addMirrorStandingHeaderCell(header, "Engine", engineWidth);
-        addMirrorStandingHeaderCell(header, "Win", resultWidth);
-        addMirrorStandingHeaderCell(header, "Draw", resultWidth);
-        addMirrorStandingHeaderCell(header, "Lose", resultWidth);
+        if (showRatingColumn) addMirrorStandingHeaderCell(header, "Rating", ratingWidth);
+        addMirrorStandingHeaderCell(header, "Score", scoreWidth);
+        addMirrorStandingHeaderCell(header, "W", resultWidth);
+        addMirrorStandingHeaderCell(header, "D", resultWidth);
+        addMirrorStandingHeaderCell(header, "L", resultWidth);
         table.addView(header, new LinearLayout.LayoutParams(-2, -2));
 
         for (int i = 0; i < standings.size(); i++) {
@@ -2846,33 +2881,25 @@ public final class TournamentActivity extends Activity {
             engineCell.setOrientation(LinearLayout.VERTICAL);
             engineCell.setPadding(dp(7), dp(8), dp(4), dp(8));
             TextView engineName = text((i + 1) + "." + name);
-            engineName.setTextSize(15);
+            engineName.setTextSize(14);
             engineName.setMaxLines(2);
             engineName.setEllipsize(android.text.TextUtils.TruncateAt.END);
             engineName.setTypeface(null, android.graphics.Typeface.BOLD);
-            String engineScoreText = String.format(java.util.Locale.US, "%.1f/%s · %.1f%%",
-                    standing.points, (maxScore == Math.rint(maxScore) ? Integer.toString((int)maxScore) :
-                            String.format(java.util.Locale.US, "%.1f", maxScore)), scorePct);
-            android.text.SpannableString engineScoreStyled = new android.text.SpannableString(engineScoreText);
-            int percentageStart = engineScoreText.indexOf(" · ");
-            if (percentageStart >= 0) {
-                engineScoreStyled.setSpan(new android.text.style.RelativeSizeSpan(0.72f), percentageStart,
-                        engineScoreText.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                engineScoreStyled.setSpan(new android.text.style.ForegroundColorSpan(0xFF9EABB4), percentageStart,
-                        engineScoreText.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            }
-            TextView score = text("");
-            score.setText(engineScoreStyled);
-            score.setTextSize(14);
-            score.setTextColor(0xFFB8C4CC);
             LinearLayout engineNameLine = new LinearLayout(this);
             engineNameLine.setGravity(android.view.Gravity.CENTER_VERTICAL);
-            addMirrorEngineIcon(engineNameLine, standing.engineId, name, 30);
+            addMirrorEngineIcon(engineNameLine, standing.engineId, name, 28);
             engineNameLine.addView(engineName, new LinearLayout.LayoutParams(0, -2, 1));
             engineCell.addView(engineNameLine, fullWidth());
-            engineCell.addView(score, fullWidth());
             row.addView(engineCell, new LinearLayout.LayoutParams(engineWidth, -2));
 
+            if (showRatingColumn) {
+                double elo = ratings.containsKey(standing.engineId) ? ratings.get(standing.engineId) : 3000.0;
+                addMirrorStandingSimpleCell(row, formatElo(elo, tournament.ratingShowDecimals()), ratingWidth, rowColor, true);
+            }
+            String scoreMain = String.format(java.util.Locale.US, "%.1f/%s", standing.points,
+                    (maxScore == Math.rint(maxScore) ? Integer.toString((int)maxScore) :
+                            String.format(java.util.Locale.US, "%.1f", maxScore)));
+            addMirrorStandingScoreCell(row, scoreMain, scorePct, scoreWidth, rowColor);
             addMirrorStandingResultCell(row, standing.wins, color.whiteWins, color.blackWins, standing.played, resultWidth, rowColor);
             addMirrorStandingResultCell(row, standing.draws, color.whiteDraws, color.blackDraws, standing.played, resultWidth, rowColor);
             addMirrorStandingResultCell(row, standing.losses, color.whiteLosses, color.blackLosses, standing.played, resultWidth, rowColor);
@@ -2890,7 +2917,39 @@ public final class TournamentActivity extends Activity {
         vertical.setFillViewport(false);
         vertical.setVerticalScrollBarEnabled(true);
         vertical.addView(horizontal, new ScrollView.LayoutParams(-1, -2));
-        mirrorSectionHost.addView(vertical, new LinearLayout.LayoutParams(-1, -1));
+        mirrorSectionHost.addView(vertical, cupBracketShownAboveRatings ?
+                new LinearLayout.LayoutParams(-1, 0, 1.0f) :
+                new LinearLayout.LayoutParams(-1, -1));
+    }
+
+    private void addMirrorStandingSimpleCell(LinearLayout row, String value, int width, int background, boolean bold) {
+        TextView cell = text(value);
+        cell.setTextSize(13);
+        cell.setGravity(android.view.Gravity.CENTER);
+        cell.setTypeface(null, bold ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+        cell.setTextColor(0xFFE0E0E0);
+        cell.setPadding(dp(2), dp(13), dp(2), dp(13));
+        cell.setBackgroundColor(background);
+        row.addView(cell, new LinearLayout.LayoutParams(width, -2));
+    }
+
+    private void addMirrorStandingScoreCell(LinearLayout row, String value, double percent, int width, int background) {
+        LinearLayout cell = new LinearLayout(this);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setGravity(android.view.Gravity.CENTER);
+        cell.setPadding(dp(2), dp(7), dp(2), dp(7));
+        cell.setBackgroundColor(background);
+        TextView score = text(value);
+        score.setTextSize(13);
+        score.setGravity(android.view.Gravity.CENTER);
+        score.setTypeface(null, android.graphics.Typeface.BOLD);
+        TextView pct = text(String.format(java.util.Locale.US, "%.1f%%", percent));
+        pct.setTextSize(10);
+        pct.setTextColor(0xFFB8C4CC);
+        pct.setGravity(android.view.Gravity.CENTER);
+        cell.addView(score, fullWidth());
+        cell.addView(pct, fullWidth());
+        row.addView(cell, new LinearLayout.LayoutParams(width, -2));
     }
 
     private String[] mirrorGraphMetricLabels() {
@@ -3366,7 +3425,15 @@ public final class TournamentActivity extends Activity {
     private void renderMirrorCrosstableSection() {
         TournamentManager tournament = activeTournamentManager;
         if (tournament == null) { mirrorSectionHost.addView(text("No tournament loaded."), fullWidth()); return; }
-        List<TournamentManager.Engine> engines = tournament.engines();
+        List<TournamentManager.Engine> allEngines = tournament.engines();
+        HashMap<String, TournamentManager.Engine> enginesById = new HashMap<>();
+        for (TournamentManager.Engine engine : allEngines) enginesById.put(engine.id, engine);
+        ArrayList<TournamentManager.Engine> engines = new ArrayList<>();
+        for (TournamentManager.Standing standing : tournament.standings()) {
+            TournamentManager.Engine engine = enginesById.get(standing.engineId);
+            if (engine != null) engines.add(engine);
+        }
+        // One score-ranked participant order is shared by both matrix axes.
         int nameWidth = dp(170), cellWidth = dp(88);
         LinearLayout table = new LinearLayout(this); table.setOrientation(LinearLayout.VERTICAL);
         LinearLayout header = new LinearLayout(this); header.setOrientation(LinearLayout.HORIZONTAL);
@@ -4317,6 +4384,56 @@ public final class TournamentActivity extends Activity {
                     })
                     .setPositiveButton("CLOSE", null).show();
         }
+    }
+
+    private void showRatingsDialog() {
+        TournamentManager tournament = activeTournamentManager;
+        if (tournament == null) {
+            Toast.makeText(this, "No tournament is loaded", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (!tournament.ratingEnabled()) {
+            new AlertDialog.Builder(this).setTitle("Ratings")
+                    .setMessage("Elo rating was not enabled when this tournament was created. Existing tournaments are not modified retroactively. Enable rating when creating the next tournament.")
+                    .setPositiveButton("CLOSE", null).show();
+            return;
+        }
+        Map<String, Double> ratings = tournament.ratings();
+        ArrayList<TournamentManager.Standing> ranked = new ArrayList<>(tournament.standings());
+        Collections.sort(ranked, (a, b) -> {
+            double ar = ratings.containsKey(a.engineId) ? ratings.get(a.engineId) : 0.0;
+            double br = ratings.containsKey(b.engineId) ? ratings.get(b.engineId) : 0.0;
+            int compare = Double.compare(br, ar);
+            return compare != 0 ? compare : a.engineId.compareToIgnoreCase(b.engineId);
+        });
+        StringBuilder out = new StringBuilder("Ratings\n");
+        for (int i = 0; i < ranked.size(); i++) {
+            TournamentManager.Standing standing = ranked.get(i);
+            double rating = ratings.containsKey(standing.engineId) ? ratings.get(standing.engineId) : 3000.0;
+            out.append(i + 1).append(".").append(engineDisplayName(tournament.engines(), standing.engineId)).append("\n   (")
+                    .append(formatElo(rating, tournament.ratingShowDecimals())).append(")  +")
+                    .append(standing.wins).append(" =").append(standing.draws).append(" -").append(standing.losses);
+            if (i + 1 < ranked.size()) out.append("\n");
+        }
+        String ratingsText = out.toString();
+        new AlertDialog.Builder(this).setTitle("Ratings · Elo")
+                .setMessage(ratingsText)
+                .setNegativeButton("COPY", (dialog, which) -> {
+                    ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+                    if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Tournament ratings", ratingsText));
+                    Toast.makeText(this, "Ratings copied", Toast.LENGTH_SHORT).show();
+                })
+                .setNeutralButton(tournament.ratingShowDecimals() ? "SHOW WHOLE" : "SHOW DECIMAL", (dialog, which) -> {
+                    try {
+                        tournament.setRatingShowDecimals(!tournament.ratingShowDecimals());
+                        invalidateMirrorStandingsSubCache(0);
+                        if (isMirrorShowing() && mirrorSelectedTab == 1) renderMirrorSection();
+                        showRatingsDialog();
+                    } catch (Exception error) {
+                        Toast.makeText(this, "Could not change rating display: " + error.getMessage(), Toast.LENGTH_LONG).show();
+                    }
+                })
+                .setPositiveButton("CLOSE", null).show();
     }
 
     /** Standings are derived from game results; correct a game result to update both records consistently. */
@@ -5733,9 +5850,13 @@ public final class TournamentActivity extends Activity {
                     Set<String> updatedIds = new HashSet<>();
                     for (EngineChoice e : dialogSelection) updatedIds.add(e.id);
                     if (!previousIds.equals(updatedIds)) { swissRankOrderConfirmed = false; cupRankOrderConfirmed = false; }
+                    syncRatingInitialValues();
                     selectedEngines.clear(); selectedEngines.addAll(dialogSelection);
+                    for (EngineChoice engine : selectedEngines)
+                        if (!ratingSetupValues.containsKey(engine.id)) ratingSetupValues.put(engine.id, "3000");
                     syncSwissRankedEngines(); syncCupRankedEngines();
                     updateSelectedText();
+                    saveSetup();
                 }).setNegativeButton(android.R.string.cancel, null).show();
     }
 
@@ -5743,8 +5864,82 @@ public final class TournamentActivity extends Activity {
         StringBuilder b = new StringBuilder();
         for (EngineChoice e : selectedEngines) { if (b.length() > 0) b.append(", "); b.append(e.name); }
         selectedText.setText(b.length() == 0 ? "No engines selected" : b.toString());
+        rebuildRatingInitialRows();
     }
 
+    private void syncRatingInitialValues() {
+        for (Map.Entry<String, EditText> entry : ratingInitialInputs.entrySet()) {
+            EditText input = entry.getValue();
+            if (input != null) ratingSetupValues.put(entry.getKey(), input.getText().toString());
+        }
+    }
+
+    private void updateRatingSetupUi() {
+        boolean enabled = ratingEnabledCheck != null && ratingEnabledCheck.isChecked();
+        if (ratingInitialContainer != null) ratingInitialContainer.setVisibility(enabled ? View.VISIBLE : View.GONE);
+        if (enabled) rebuildRatingInitialRows();
+    }
+
+    private void rebuildRatingInitialRows() {
+        if (ratingInitialContainer == null) return;
+        syncRatingInitialValues();
+        ratingInitialContainer.removeAllViews();
+        ratingInitialInputs.clear();
+        if (ratingEnabledCheck == null || !ratingEnabledCheck.isChecked()) return;
+        TextView heading = text("Initial Elo for each engine (default 3000; allowed 0–10000)");
+        heading.setTypeface(null, android.graphics.Typeface.BOLD);
+        ratingInitialContainer.addView(heading, fullWidth());
+        for (EngineChoice engine : selectedEngines) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            TextView name = text(engine.name);
+            name.setMaxLines(2);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+            EditText rating = new EditText(this);
+            rating.setSingleLine(true);
+            rating.setInputType(android.text.InputType.TYPE_CLASS_NUMBER |
+                    android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL |
+                    android.text.InputType.TYPE_NUMBER_FLAG_SIGNED);
+            rating.setHint("3000");
+            String value = ratingSetupValues.get(engine.id);
+            rating.setText(value == null || value.trim().isEmpty() ? "3000" : value);
+            row.addView(rating, new LinearLayout.LayoutParams(dp(112), -2));
+            ratingInitialInputs.put(engine.id, rating);
+            rating.addTextChangedListener(new android.text.TextWatcher() {
+                @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+                @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                    ratingSetupValues.put(engine.id, s.toString());
+                }
+                @Override public void afterTextChanged(android.text.Editable editable) { }
+            });
+            ratingInitialContainer.addView(row, fullWidth());
+        }
+    }
+
+    private Map<String, Double> collectInitialRatings() {
+        HashMap<String, Double> values = new HashMap<>();
+        for (EngineChoice engine : selectedEngines) {
+            EditText input = ratingInitialInputs.get(engine.id);
+            String raw = input == null ? ratingSetupValues.get(engine.id) : input.getText().toString();
+            if (raw == null || raw.trim().isEmpty()) raw = "3000";
+            double value;
+            try { value = Double.parseDouble(raw.trim()); }
+            catch (NumberFormatException invalid) {
+                throw new IllegalArgumentException("Enter a valid initial Elo rating for " + engine.name);
+            }
+            if (!Double.isFinite(value) || value < 0.0 || value > 10000.0)
+                throw new IllegalArgumentException("Initial Elo for " + engine.name + " must be between 0 and 10000");
+            values.put(engine.id, value);
+        }
+        return values;
+    }
+
+    private String formatElo(double rating, boolean decimals) {
+        return decimals ? String.format(java.util.Locale.US, "%.2f", rating) :
+                Long.toString(Math.round(rating));
+    }
 
     private void saveSetup() {
         if (titleInput == null) return;
@@ -5777,6 +5972,8 @@ public final class TournamentActivity extends Activity {
         if (openingFenInput != null) e.putString("setupOpeningFen", openingFenInput.getText().toString());
         e.putBoolean("setupArrows", showTournamentArrowsCheck.isChecked());
         e.putBoolean("setupEngineIconsEnabled", engineIconsCheck != null && engineIconsCheck.isChecked());
+        syncRatingInitialValues();
+        e.putBoolean("setupRatingEnabled", ratingEnabledCheck != null && ratingEnabledCheck.isChecked());
         e.putString("setupEngineIconFolder", engineIconFolderUri == null ? "" : engineIconFolderUri.toString());
         StringBuilder disabledIcons = new StringBuilder();
         for (String id : engineIconDisabledIds) { if (disabledIcons.length() > 0) disabledIcons.append("\n"); disabledIcons.append(id); }
@@ -5832,6 +6029,7 @@ public final class TournamentActivity extends Activity {
         openingStartInput.setText(p.getString("setupOpeningStart", openingStartInput.getText().toString()));
         showTournamentArrowsCheck.setChecked(p.getBoolean("setupArrows", true));
         if (engineIconsCheck != null) engineIconsCheck.setChecked(p.getBoolean("setupEngineIconsEnabled", true));
+        if (ratingEnabledCheck != null) ratingEnabledCheck.setChecked(p.getBoolean("setupRatingEnabled", false));
         String iconFolder = p.getString("setupEngineIconFolder", "");
         engineIconFolderUri = iconFolder.isEmpty() ? null : Uri.parse(iconFolder);
         if (engineIconFolderButton != null) engineIconFolderButton.setText(engineIconFolderUri == null ?
@@ -5852,6 +6050,9 @@ public final class TournamentActivity extends Activity {
         selectedOpeningBinPath = p.getString("setupOpeningBinPath", "");
         selectedOpeningPgn=p.getString("setupOpeningPgn", ""); selectedOpeningFileName=p.getString("setupOpeningName", selectedOpeningPgn.isEmpty()?"No PGN file selected":"Saved PGN book loaded"); openingFileText.setText(selectedOpeningFileName);
         selectedEngines.clear(); String ids=p.getString("setupEngineIds", ""); if (!ids.isEmpty()) for(String id:ids.split("\n")) for(EngineChoice c:availableEngines) if(c.id.equals(id)){selectedEngines.add(c); break;}
+        ratingSetupValues.clear();
+        // Initial Elo values belong to one tournament only; every fresh setup starts at 3000.
+        for (EngineChoice engine : selectedEngines) ratingSetupValues.put(engine.id, "3000");
         swissRankedEngines.clear();
         String savedSwissRankIds = p.getString("setupSwissRankIds", "");
         if (!savedSwissRankIds.isEmpty()) for (String id : savedSwissRankIds.split("\n"))
@@ -5863,6 +6064,7 @@ public final class TournamentActivity extends Activity {
             for (EngineChoice c : selectedEngines) if (c.id.equals(id)) { cupRankedEngines.add(c); break; }
         syncCupRankedEngines();
         updateSelectedText();
+        updateRatingSetupUi();
         updateSwissSeedingUi(); updateCupSeedingUi();
         restoringSetup = false;
     }
@@ -6146,17 +6348,23 @@ public final class TournamentActivity extends Activity {
             for (EngineChoice e : selectedEngines) engines.add(new TournamentManager.Engine(e.id, e.name));
             String tournamentName = titleInput.getText().toString().trim();
             if (tournamentName.isEmpty()) tournamentName = "My Tournament";
+            boolean enableRatings = ratingEnabledCheck != null && ratingEnabledCheck.isChecked();
+            Map<String, Double> initialRatingValues = enableRatings ? collectInitialRatings() : java.util.Collections.emptyMap();
             saveSetup();
             TournamentManager tournament = new TournamentManager(this, tournamentName, format,
                     engines, games, baseMillis, increment, selectedOpeningPgn, openingPlies,
                     format == TournamentManager.Format.SWISS || format == TournamentManager.Format.CUP || repeatOpeningCheck.isChecked(),
                     TournamentManager.TimeMode.values()[timeModeIndex], limitValue, openingStart, swissRounds,
                     swissSeedingMode, swissRankOrderIds, cupSeedingMode, cupRankOrderIds);
+            tournament.setRatingSettings(enableRatings, initialRatingValues, false);
             tournament.setOpeningBinPath(selectedOpeningBinPath);
             long positionSeed = requestedSeed == null ? tournament.startingPositionSeed() : requestedSeed;
             tournament.setStartingPositionSettings(startPositionMode, chess960Start, positionSeed, startingFen);
             tournament.setOpeningPgnFileName(selectedOpeningPgn.trim().isEmpty() ? "" : selectedOpeningFileName);
             tournament.save();
+            // Do not carry custom starting Elo values into the next tournament setup.
+            for (EngineChoice engine : selectedEngines) ratingSetupValues.put(engine.id, "3000");
+            rebuildRatingInitialRows();
             launchTournament(tournament);
         } catch (Exception e) {
             TournamentRunner failedRunner = runner;
@@ -6502,11 +6710,19 @@ public final class TournamentActivity extends Activity {
     }
 
     private void loadTournamentSetup(TournamentManager tournament) {
+        loadingTournamentSetup = true;
         selectedEngines.clear();
         if (startButton != null) startButton.setEnabled(true);
         if (resumeButton != null) resumeButton.setEnabled(true);
         if (stopButton != null) stopButton.setEnabled(false);
         for (TournamentManager.Engine engine : tournament.engines()) selectedEngines.add(new EngineChoice(engine.id, engine.displayName));
+        ratingSetupValues.clear();
+        Map<String, Double> savedInitialRatings = tournament.initialRatings();
+        for (TournamentManager.Engine engine : tournament.engines()) {
+            Double savedRating = savedInitialRatings.get(engine.id);
+            ratingSetupValues.put(engine.id, savedRating == null ? "3000" : Double.toString(savedRating));
+        }
+        if (ratingEnabledCheck != null) ratingEnabledCheck.setChecked(tournament.ratingEnabled());
         swissRankedEngines.clear();
         for (String id : tournament.swissStrengthOrder())
             for (EngineChoice engine : selectedEngines) if (engine.id.equals(id)) { swissRankedEngines.add(engine); break; }
@@ -6542,6 +6758,7 @@ public final class TournamentActivity extends Activity {
         if (variantSeedInput != null) variantSeedInput.setText(String.valueOf(tournament.startingPositionSeed()));
         if (openingFenInput != null) openingFenInput.setText(tournament.openingFen());
         updateStartingPositionUi();
+        loadingTournamentSetup = false;
         // The authoritative opening book is already stored in this tournament's JSON.
         // Do not duplicate a potentially multi-megabyte PGN into SharedPreferences.
     }
