@@ -30,6 +30,8 @@ public final class TournamentManager {
     public enum CupSeedingMode { RANDOM, RANK_ENGINE }
     public enum Outcome { WHITE_WIN, DRAW, BLACK_WIN, UNFINISHED }
     public enum TimeMode { CLOCK, MOVE_TIME, DEPTH, NODES, MOVE_PERIOD }
+    /** Automatic starting-position family when no custom FEN or PGN/BIN opening is selected. */
+    public enum StartPositionMode { STANDARD, CHESS960, DFRC, CHESS324 }
 
     public static final class Engine {
         /** Stable tournament participant identity. Pairings and historical PGNs reference this ID. */
@@ -150,8 +152,10 @@ public final class TournamentManager {
     private int openingPlies;
     private int openingStartIndex = 1;
     private boolean repeatOpening;
-    private boolean chess960Enabled;
+    private StartPositionMode startPositionMode = StartPositionMode.STANDARD;
     private int chess960StartId = 1;
+    private long startingPositionSeed = new java.security.SecureRandom().nextLong();
+    private String openingFen = "";
     private long tournamentElapsedMs;
     private boolean anomalyRuleSettingsSaved;
     private boolean anomalyRulesEnabled;
@@ -366,8 +370,12 @@ public final class TournamentManager {
         repeatOpening = root.optBoolean("repeatOpening", false);
         tournamentElapsedMs = Math.max(0L, root.optLong("tournamentElapsedMs", 0L));
         openingStartIndex = Math.max(1, root.optInt("openingStartIndex", 1));
-        chess960Enabled = root.optBoolean("chess960Enabled", false);
+        String savedPositionMode = root.optString("startPositionMode", root.optBoolean("chess960Enabled", false) ? "CHESS960" : "STANDARD");
+        try { startPositionMode = StartPositionMode.valueOf(savedPositionMode); }
+        catch (IllegalArgumentException invalidMode) { startPositionMode = root.optBoolean("chess960Enabled", false) ? StartPositionMode.CHESS960 : StartPositionMode.STANDARD; }
         chess960StartId = Math.max(1, Math.min(960, root.optInt("chess960StartId", 1)));
+        startingPositionSeed = root.optLong("startingPositionSeed", startingPositionSeed);
+        openingFen = root.optString("openingFen", "");
         anomalyRuleSettingsSaved = root.optBoolean("anomalyRuleSettingsSaved", false);
         anomalyRulesEnabled = root.optBoolean("anomalyRulesEnabled", true);
         anomalyRuleStartFullMove = Math.max(1, root.optInt("anomalyRuleStartFullMove", 1));
@@ -1342,14 +1350,81 @@ public final class TournamentManager {
     public synchronized long incrementMs() { return incrementMs; }
     public synchronized TimeMode timeMode() { return timeMode; }
     public synchronized int limitValue() { return limitValue; }
+    /**
+     * Stable sequence index for generated DFRC/Chess324 starts. Reversed-color
+     * games in the same mini-match deliberately share one start position.
+     */
+    public synchronized int positionPairSequenceIndex(Pairing target) {
+        if (target == null) return 0;
+        String targetGroup = positionSequenceGroupKey(target);
+        int targetOffset = positionSequenceOffset(target);
+        Set<String> seenGroups = new HashSet<>();
+        int sequenceBase = 0;
+        for (Pairing pairing : pairings) {
+            String group = positionSequenceGroupKey(pairing);
+            if (!seenGroups.add(group)) continue;
+            if (group.equals(targetGroup)) return sequenceBase + targetOffset;
+            sequenceBase += positionSequencePairsPerGroup(pairing);
+        }
+        // Defensive fallback for a stale/non-scheduled pairing reference.
+        return Math.max(0, target.index / 2);
+    }
+
+    private String positionSequenceGroupKey(Pairing pairing) {
+        String first = pairing.whiteEngineId.compareTo(pairing.blackEngineId) <= 0
+                ? pairing.whiteEngineId : pairing.blackEngineId;
+        String second = pairing.whiteEngineId.compareTo(pairing.blackEngineId) <= 0
+                ? pairing.blackEngineId : pairing.whiteEngineId;
+        if (format == Format.CUP) {
+            if (pairing.cupMatchNumber > 0 && pairing.cupPairNumber > 0)
+                return "C:" + pairing.cupMatchNumber + ":" + pairing.cupPairNumber;
+            return "C:legacy:" + (pairing.index / 2);
+        }
+        String players = first + "|" + second;
+        switch (format) {
+            case MATCH:
+                return "M:" + players;
+            case GAUNTLET:
+                return "G:" + pairing.round + ":" + players;
+            case SWISS:
+                return "S:" + pairing.round + ":" + players;
+            case ROUND_ROBIN:
+            default:
+                return "R:" + pairing.round + ":" + players;
+        }
+    }
+
+    private int positionSequenceOffset(Pairing pairing) {
+        if (format == Format.MATCH || format == Format.GAUNTLET || format == Format.ROUND_ROBIN)
+            return Math.max(0, (pairing.gameNumber - 1) / 2);
+        return 0;
+    }
+
+    private int positionSequencePairsPerGroup(Pairing pairing) {
+        if (format == Format.MATCH || format == Format.GAUNTLET || format == Format.ROUND_ROBIN)
+            return Math.max(1, (gamesPerPair + 1) / 2);
+        return 1;
+    }
+
     public synchronized String openingPgn() { return openingPgn; }
     public synchronized String openingPgnFileName() { return openingPgnFileName; }
     public synchronized void setOpeningPgnFileName(String name) { openingPgnFileName = name == null ? "" : name.trim(); }
     public synchronized String openingBinPath() { return openingBinPath; }
-    public synchronized boolean chess960Enabled() { return chess960Enabled; }
+    public synchronized StartPositionMode startPositionMode() { return startPositionMode; }
     public synchronized int chess960StartId() { return chess960StartId; }
+    public synchronized long startingPositionSeed() { return startingPositionSeed; }
+    public synchronized String openingFen() { return openingFen; }
+    /** Backwards-compatible accessor for imported pre-DFRC tournament records. */
+    public synchronized boolean chess960Enabled() { return startPositionMode == StartPositionMode.CHESS960; }
+    public synchronized void setStartingPositionSettings(StartPositionMode mode, int chess960Start, long seed, String fen) {
+        startPositionMode = mode == null ? StartPositionMode.STANDARD : mode;
+        chess960StartId = Math.max(1, Math.min(960, chess960Start));
+        startingPositionSeed = seed;
+        openingFen = fen == null ? "" : fen.trim();
+    }
     public synchronized void setChess960Settings(boolean enabled, int startId) {
-        chess960Enabled = enabled; chess960StartId = Math.max(1, Math.min(960, startId));
+        startPositionMode = enabled ? StartPositionMode.CHESS960 : StartPositionMode.STANDARD;
+        chess960StartId = Math.max(1, Math.min(960, startId));
     }
     public synchronized void setOpeningBinPath(String path) { openingBinPath = path == null ? "" : path; }
     public synchronized int openingPlies() { return openingPlies; }
@@ -1925,7 +2000,8 @@ public final class TournamentManager {
         root.put("baseTimeMs", baseTimeMs); root.put("incrementMs", incrementMs);
         root.put("timeMode", timeMode.name()); root.put("limitValue", limitValue);
         root.put("openingPgn", openingPgn); root.put("openingPgnFileName", openingPgnFileName); root.put("openingBinPath", openingBinPath); root.put("openingPlies", openingPlies); root.put("openingStartIndex", openingStartIndex); root.put("repeatOpening", repeatOpening); root.put("tournamentElapsedMs", tournamentElapsedMs);
-        root.put("chess960Enabled", chess960Enabled); root.put("chess960StartId", chess960StartId);
+        root.put("startPositionMode", startPositionMode.name()); root.put("chess960Enabled", startPositionMode == StartPositionMode.CHESS960);
+        root.put("chess960StartId", chess960StartId); root.put("startingPositionSeed", startingPositionSeed); root.put("openingFen", openingFen);
         root.put("anomalyRuleSettingsSaved", anomalyRuleSettingsSaved); root.put("anomalyRulesEnabled", anomalyRulesEnabled);
         root.put("anomalyRuleStartFullMove", anomalyRuleStartFullMove); root.put("anomalyMaximumFullMoves", anomalyMaximumFullMoves);
         JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); o.put("executableId", e.executableId); ea.put(o); } root.put("engines", ea);

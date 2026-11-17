@@ -9,6 +9,7 @@ import org.petero.droidfish.gamelogic.TextIO;
 import org.petero.droidfish.engine.DroidComputerPlayer;
 import org.petero.droidfish.engine.UCIOptions;
 import org.petero.droidfish.gamelogic.Chess960Position;
+import org.petero.droidfish.gamelogic.TournamentPositionGenerator;
 import org.petero.droidfish.gamelogic.Game;
 import org.petero.droidfish.gamelogic.GameTree;
 import org.petero.droidfish.gamelogic.Move;
@@ -195,10 +196,12 @@ public final class TournamentRunner {
         blackPlayer.setFlushAnalysisBeforeResult(true);
         whitePlayer.setEngineOptions(this.engineOptions);
         blackPlayer.setEngineOptions(this.engineOptions);
-        // A selected PGN/BIN opening or a generated Chess960 start is authoritative.
-        // Do not let DroidFish's own Polyglot/CTG/ECO/internal book replace it.
+        // A selected custom FEN, PGN/BIN opening, or generated non-standard start
+        // is authoritative. Do not let DroidFish's own book replace it.
         BookOptions tournamentBookOptions = new BookOptions(this.bookOptions);
-        if (!this.openingPgn.trim().isEmpty() || !tournament.openingBinPath().trim().isEmpty() || tournament.chess960Enabled()) {
+        boolean selectedCustomFen = !tournament.openingFen().trim().isEmpty();
+        boolean selectedExternalOpening = !this.openingPgn.trim().isEmpty() || !tournament.openingBinPath().trim().isEmpty();
+        if (selectedCustomFen || selectedExternalOpening || tournament.startPositionMode() != TournamentManager.StartPositionMode.STANDARD) {
             tournamentBookOptions.filename = "";
             tournamentBookOptions.maxLength = 0;
             tournamentBookOptions.preferMainLines = false;
@@ -415,23 +418,60 @@ public final class TournamentRunner {
         else
             tc.setTimeControl((int)baseTimeMs, 0, (int)incrementMs);
         game = new Game(new EmptyPgnReceiver(), tc);
-        boolean useChess960 = tournament.chess960Enabled() && openingPgn.trim().isEmpty() && tournament.openingBinPath().trim().isEmpty();
-        if (useChess960) {
-            int chess960Id = ((tournament.chess960StartId() - 1 + pairing.index) % 960) + 1;
-            try {
-                game.setPos(TextIO.readFEN(Chess960Position.fenForId(chess960Id)));
-                game.tree.setTournamentVariant("Chess960");
-                currentOpeningName = "Chess960 #" + chess960Id;
-            } catch (Exception invalid960) {
-                listener.onError("Could not create Chess960 starting position #" + chess960Id, invalid960);
-                stop(); return;
+        String customFen = tournament.openingFen().trim().replaceAll("\\s+", " ");
+        boolean customFenActive = !customFen.isEmpty();
+        boolean externalOpeningActive = !openingPgn.trim().isEmpty() || !tournament.openingBinPath().trim().isEmpty();
+        boolean generatedVariantActive = !customFenActive && !externalOpeningActive &&
+                tournament.startPositionMode() != TournamentManager.StartPositionMode.STANDARD;
+        TournamentPositionGenerator.PositionPair generatedPair = null;
+        currentOpeningName = "Starting position";
+        try {
+            if (customFenActive) {
+                Position customPosition = TextIO.readFEN(customFen);
+                game.setPos(customPosition);
+                if (customPosition.isChess960()) game.tree.setTournamentVariant("Chess960 (Custom FEN)");
+                else game.tree.setTournamentVariant("Custom FEN");
+                currentOpeningName = "Custom FEN";
+            } else if (generatedVariantActive) {
+                switch (tournament.startPositionMode()) {
+                    case CHESS960: {
+                        int id = ((tournament.chess960StartId() - 1 + pairing.index) % 960) + 1;
+                        game.setPos(TextIO.readFEN(Chess960Position.fenForId(id)));
+                        game.tree.setTournamentVariant("Chess960");
+                        currentOpeningName = "Chess960 #" + id;
+                        break;
+                    }
+                    case DFRC: {
+                        generatedPair = TournamentPositionGenerator.dfrc(tournament.startingPositionSeed(),
+                                tournament.positionPairSequenceIndex(pairing));
+                        game.setPos(TextIO.readFEN(generatedPair.fen));
+                        // Keep Chess960 in the tag so saved/reloaded games restore the
+                        // special castling state, while retaining the DFRC identity.
+                        game.tree.setTournamentVariant("Chess960 (Double Fischer Random Chess)");
+                        currentOpeningName = "DFRC W#" + generatedPair.whiteId + " / B#" + generatedPair.blackId;
+                        break;
+                    }
+                    case CHESS324: {
+                        generatedPair = TournamentPositionGenerator.chess324(tournament.startingPositionSeed(),
+                                tournament.positionPairSequenceIndex(pairing));
+                        game.setPos(TextIO.readFEN(generatedPair.fen));
+                        game.tree.setTournamentVariant("Chess324 (Kaufman)");
+                        currentOpeningName = "Chess324 W#" + generatedPair.whiteId + " / B#" + generatedPair.blackId;
+                        break;
+                    }
+                    case STANDARD:
+                    default:
+                        break;
+                }
             }
+        } catch (Exception invalidStartPosition) {
+            listener.onError("Could not create the configured tournament starting position", invalidStartPosition);
+            stop(); return;
         }
         game.tree.setPlayerNames(whiteEngine.displayName, blackEngine.displayName);
         positionHistory.clear(); whiteAnalysisHistory.clear(); blackAnalysisHistory.clear(); moveTimeHistory.clear();
         reviewPly = -1; lastMoveTimeMs = 0; humanAdjudication = false;
         latestWhiteAnalysis = "WHITE analysis waiting…"; latestBlackAnalysis = "BLACK analysis waiting…";
-        currentOpeningName = "Starting position";
         String eventType = tournament.format().name().toLowerCase(java.util.Locale.US).replace('_', ' ');
         String pgnTimeControl = tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD
                 ? tournament.limitValue() + "/" + (baseTimeMs / 1000)
@@ -454,7 +494,7 @@ public final class TournamentRunner {
         // persisted before engines begin. Replay therefore cannot consume a new
         // opening number or make a different random Polyglot selection.
         try {
-            if (!pairing.openingAssigned) {
+            if (!customFenActive && !generatedVariantActive && !pairing.openingAssigned) {
                 if (!tournament.openingBinPath().trim().isEmpty()) {
                     ArrayList<String> selectedLine = selectBinOpeningLine(tournament.openingBinPath());
                     tournament.setPairingOpeningIfMissing(pairing.index, selectedLine, "Polyglot BIN opening");
@@ -468,11 +508,7 @@ public final class TournamentRunner {
             return;
         }
         pairing = tournament.pairings().get(pairing.index);
-        boolean frcActiveForGame = tournament.chess960Enabled() && openingPgn.trim().isEmpty() && tournament.openingBinPath().trim().isEmpty();
-        if (frcActiveForGame) {
-            int chess960Id = ((tournament.chess960StartId() - 1 + pairing.index) % 960) + 1;
-            currentOpeningName = "Chess960 #" + chess960Id;
-        } else {
+        if (!customFenActive && !generatedVariantActive) {
             currentOpeningName = pairing.openingName == null || pairing.openingName.trim().isEmpty()
                     ? "Starting position" : pairing.openingName;
         }
@@ -480,8 +516,8 @@ public final class TournamentRunner {
         // Publish the new game before the opening callbacks. The Mirror Board
         // clears its previous game's move history in onGameStarted.
         listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
-        int appliedPlies = frcActiveForGame ? 0 : applyAssignedOpening(pairing.openingSanLine);
-        if (!frcActiveForGame && appliedPlies == 0 && pairing.openingSanLine != null && !pairing.openingSanLine.trim().isEmpty()) {
+        int appliedPlies = (customFenActive || generatedVariantActive) ? 0 : applyAssignedOpening(pairing.openingSanLine);
+        if (!customFenActive && !generatedVariantActive && appliedPlies == 0 && pairing.openingSanLine != null && !pairing.openingSanLine.trim().isEmpty()) {
             listener.onError("The saved opening assignment for Game " + (pairing.index + 1) +
                     " contains no legal moves from the starting position.", null);
             stop();
