@@ -6580,6 +6580,21 @@ public final class TournamentActivity extends Activity {
         }
     }
 
+    /** Display-only formatting: keep TBHits beside WDL on both boards without changing saved analysis. */
+    private String formatEngineOutputTbHits(String value) {
+        if (value == null) return "";
+        java.util.regex.Matcher tb = java.util.regex.Pattern.compile("(?i)\\s+TBHits:\\s*(\\S+)").matcher(value);
+        String hits = "0";
+        String formatted = value;
+        if (tb.find()) { hits = tb.group(1); formatted = tb.replaceFirst(""); }
+        java.util.regex.Matcher wdl = java.util.regex.Pattern.compile("(?m)^(W:\\s*\\d+%\\s+D:\\s*\\d+%\\s+L:\\s*\\d+%)").matcher(formatted);
+        if (wdl.find()) {
+            String replacement = java.util.regex.Matcher.quoteReplacement(wdl.group(1) + "   TBHits: " + hits);
+            return wdl.replaceFirst(replacement);
+        }
+        return formatted + "\nTBHits: " + hits;
+    }
+
     private void launchPreparedTournament(final TournamentManager tournament) {
         stopMirrorAutoPlay();
         mirrorReplayMode = false;
@@ -6734,21 +6749,6 @@ public final class TournamentActivity extends Activity {
                     moveStatusText.setText("PGN: " + currentMirrorSanMoves(null).size() + " plies");
                 });
             }
-    /** Display-only formatting: keep TBHits beside WDL on both boards without changing saved analysis. */
-    private String formatEngineOutputTbHits(String value) {
-        if (value == null) return "";
-        java.util.regex.Matcher tb = java.util.regex.Pattern.compile("(?i)\\s+TBHits:\\s*(\\S+)").matcher(value);
-        String hits = "0";
-        String formatted = value;
-        if (tb.find()) { hits = tb.group(1); formatted = tb.replaceFirst(""); }
-        java.util.regex.Matcher wdl = java.util.regex.Pattern.compile("(?m)^(W:\\s*\\d+%\\s+D:\\s*\\d+%\\s+L:\\s*\\d+%)").matcher(formatted);
-        if (wdl.find()) {
-            String replacement = java.util.regex.Matcher.quoteReplacement(wdl.group(1) + "   TBHits: " + hits);
-            return wdl.replaceFirst(replacement);
-        }
-        return formatted + "\nTBHits: " + hits;
-    }
-
             @Override public void onEngineAnalysis(boolean white, String analysis) {
                 runOnUiThread(() -> {
                     TextView target = isMirrorShowing() ? null : (white ? whiteAnalysisText : blackAnalysisText);
