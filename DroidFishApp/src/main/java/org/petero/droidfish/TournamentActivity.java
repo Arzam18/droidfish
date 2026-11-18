@@ -91,7 +91,8 @@ public final class TournamentActivity extends Activity {
     private TournamentChessBoard expandedMainBoard;
     private TextView expandedWhiteName, expandedBlackName, expandedWhiteAnalysis, expandedBlackAnalysis,
             expandedWhiteClock, expandedBlackClock, expandedWhiteMoveTime, expandedBlackMoveTime, expandedVariation;
-    private View expandedEngineInfoRow;
+    private HorizontalScrollView expandedWhitePv, expandedBlackPv;
+    private View expandedEngineInfoRow, expandedVariationContainer;
     private boolean tournamentUiFlipped = false;
     private boolean currentWhiteToMove = true;
     private String currentWhiteName = "WHITE", currentBlackName = "BLACK";
@@ -129,7 +130,7 @@ public final class TournamentActivity extends Activity {
     private Button mirrorMoveListTab, mirrorMoveAnalysisTab, mirrorGameInfoTab;
     private Button mirrorStandingsTableTab, mirrorGraphTab, mirrorCrosstableTab;
     private int mirrorMovesSubTab = 0, mirrorStandingsSubTab = 0, mirrorGraphMetric = 0;
-    private ImageView mirrorWhiteIcon, mirrorBlackIcon;
+    private ImageView mirrorWhiteIcon, mirrorBlackIcon, mirrorFocusWhiteIcon, mirrorFocusBlackIcon;
     private Button mirrorAnalysisToggle, mirrorAnalysisChooseEngine, mirrorAnalysisEngineToggle;
     private LinearLayout mirrorAnalysisOutput;
     private TextView mirrorAnalysisEngineName;
@@ -647,18 +648,22 @@ public final class TournamentActivity extends Activity {
         ImageView whiteLogo = createExpandedEngineLogo(true);
         expandedBlackName = text(currentBlackName); expandedBlackName.setTextSize(16); expandedBlackName.setTypeface(null, android.graphics.Typeface.BOLD);
         expandedWhiteName = text(currentWhiteName); expandedWhiteName.setTextSize(16); expandedWhiteName.setTypeface(null, android.graphics.Typeface.BOLD);
-        expandedBlackAnalysis = text(formatEngineOutput(lastBlackAnalysis)); expandedBlackAnalysis.setTextSize(14); expandedBlackAnalysis.setTextColor(0xFFE0E0E0);
-        expandedWhiteAnalysis = text(formatEngineOutput(lastWhiteAnalysis)); expandedWhiteAnalysis.setTextSize(14); expandedWhiteAnalysis.setTextColor(0xFFE0E0E0);
+        expandedBlackAnalysis = text(formatEngineMetrics(lastBlackAnalysis)); expandedBlackAnalysis.setTextSize(16); expandedBlackAnalysis.setTextColor(0xFFE0E0E0);
+        expandedWhiteAnalysis = text(formatEngineMetrics(lastWhiteAnalysis)); expandedWhiteAnalysis.setTextSize(16); expandedWhiteAnalysis.setTextColor(0xFFE0E0E0);
         expandedBlackAnalysis.setGravity(android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL);
         expandedWhiteAnalysis.setGravity(android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL);
-        expandedBlackAnalysis.setMaxLines(6); expandedWhiteAnalysis.setMaxLines(6);
-        // Black logo sits above its name; White logo sits below its name, as requested.
-        blackPanel.addView(blackLogo, new LinearLayout.LayoutParams(dp(56), dp(48)));
+        expandedBlackAnalysis.setMaxLines(5); expandedWhiteAnalysis.setMaxLines(5);
+        expandedBlackPv = createSingleLinePv(lastBlackAnalysis);
+        expandedWhitePv = createSingleLinePv(lastWhiteAnalysis);
+        // Focus layout: Black logo above its name; White logo below its name.
+        blackPanel.addView(blackLogo, new LinearLayout.LayoutParams(dp(68), dp(58)));
         blackPanel.addView(expandedBlackName, fullWidth());
-        blackPanel.addView(expandedBlackAnalysis, new LinearLayout.LayoutParams(-1, dp(92)));
+        blackPanel.addView(expandedBlackAnalysis, new LinearLayout.LayoutParams(-1, dp(112)));
+        blackPanel.addView(expandedBlackPv, new LinearLayout.LayoutParams(-1, dp(28)));
         whitePanel.addView(expandedWhiteName, fullWidth());
-        whitePanel.addView(whiteLogo, new LinearLayout.LayoutParams(dp(56), dp(48)));
-        whitePanel.addView(expandedWhiteAnalysis, new LinearLayout.LayoutParams(-1, dp(92)));
+        whitePanel.addView(whiteLogo, new LinearLayout.LayoutParams(dp(68), dp(58)));
+        whitePanel.addView(expandedWhiteAnalysis, new LinearLayout.LayoutParams(-1, dp(112)));
+        whitePanel.addView(expandedWhitePv, new LinearLayout.LayoutParams(-1, dp(28)));
         engineRow.addView(blackPanel, new LinearLayout.LayoutParams(0, -2, 1));
         engineRow.addView(whitePanel, new LinearLayout.LayoutParams(0, -2, 1));
         root.addView(engineRow, fullWidth());
@@ -687,7 +692,7 @@ public final class TournamentActivity extends Activity {
 
         int screenWidth = getResources().getDisplayMetrics().widthPixels;
         int screenHeight = getResources().getDisplayMetrics().heightPixels;
-        int boardSize = Math.min(screenWidth - dp(12), (int)(screenHeight * 0.55f));
+        int boardSize = Math.min(screenWidth - dp(12), (int)(screenHeight * 0.48f));
         FrameLayout boardFrame = new FrameLayout(this);
         expandedMainBoard = new TournamentChessBoard(this);
         expandedMainBoard.highlightLastMove = true;
@@ -702,15 +707,23 @@ public final class TournamentActivity extends Activity {
         boardParams.topMargin = dp(16); boardParams.bottomMargin = dp(4);
         root.addView(boardFrame, boardParams);
         expandedVariation = text(expandedVariationText());
-        expandedVariation.setTextSize(14); expandedVariation.setTextColor(0xFFE0E0E0);
-        expandedVariation.setMaxLines(2); expandedVariation.setGravity(android.view.Gravity.CENTER);
-        root.addView(expandedVariation, fullWidth());
+        expandedVariation.setTextSize(16); expandedVariation.setTextColor(0xFFE0E0E0);
+        setExpandedVariationText(expandedVariationText());
+        expandedVariation.setSingleLine(true); expandedVariation.setMaxLines(1);
+        expandedVariation.setHorizontallyScrolling(true); expandedVariation.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        HorizontalScrollView variationScroll = new HorizontalScrollView(this);
+        variationScroll.setHorizontalScrollBarEnabled(false);
+        variationScroll.setFillViewport(false);
+        variationScroll.addView(expandedVariation, new HorizontalScrollView.LayoutParams(-2, dp(32)));
+        expandedVariationContainer = variationScroll;
+        root.addView(variationScroll, new LinearLayout.LayoutParams(-1, dp(34)));
         dialog.setContentView(root);
         dialog.setOnDismissListener(d -> {
             expandedMainDialog = null; expandedMainBoard = null;
             expandedWhiteName = expandedBlackName = expandedWhiteAnalysis = expandedBlackAnalysis = null;
+            expandedWhitePv = expandedBlackPv = null;
             expandedWhiteClock = expandedBlackClock = expandedWhiteMoveTime = expandedBlackMoveTime = expandedVariation = null;
-            expandedEngineInfoRow = null;
+            expandedEngineInfoRow = null; expandedVariationContainer = null;
         });
         dialog.show();
         if (dialog.getWindow() != null) {
@@ -724,32 +737,59 @@ public final class TournamentActivity extends Activity {
         ImageView image = new ImageView(this);
         image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         String id = white ? currentWhiteEngineId : currentBlackEngineId;
-        Bitmap bitmap = id == null ? null : engineIconBitmaps.get(id);
-        if (bitmap != null) {
-            image.setImageBitmap(bitmap);
-        } else {
-            String engineName = white ? currentWhiteName : currentBlackName;
-            String letter = engineName == null || engineName.trim().isEmpty() ? "?" : engineName.trim().substring(0, 1).toUpperCase(java.util.Locale.US);
-            Bitmap placeholder = Bitmap.createBitmap(96, 84, Bitmap.Config.ARGB_8888);
-            Canvas canvas = new Canvas(placeholder);
-            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            paint.setColor(0xFF454545);
-            canvas.drawRoundRect(0, 0, 96, 84, 12, 12, paint);
-            paint.setColor(0xFFFFFFFF);
-            paint.setTextAlign(Paint.Align.CENTER);
-            paint.setTextSize(48);
-            canvas.drawText(letter, 48, 60, paint);
-            image.setImageBitmap(placeholder);
-            image.setContentDescription(engineName + " logo placeholder");
-        }
+        String name = white ? currentWhiteName : currentBlackName;
+        // Use the same configured engine-icon lookup as the Mirror Board. Never
+        // manufacture a giant first-letter tile (the old C/D placeholders).
+        Bitmap bitmap = mirrorEngineIcon(id, name);
+        if (bitmap != null) image.setImageDrawable(new BitmapDrawable(getResources(), bitmap));
+        else image.setVisibility(View.GONE);
+        image.setContentDescription((name == null ? "Engine" : name) + " icon");
         return image;
     }
 
+    private HorizontalScrollView createSingleLinePv(String analysis) {
+        TextView pv = text(extractPrincipalVariationLine(analysis));
+        pv.setTextSize(15);
+        pv.setTextColor(0xFFE0E0E0);
+        pv.setSingleLine(true);
+        pv.setHorizontallyScrolling(true);
+        pv.setGravity(android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.LEFT);
+        HorizontalScrollView scroll = new HorizontalScrollView(this);
+        scroll.setHorizontalScrollBarEnabled(false);
+        scroll.setFillViewport(false);
+        scroll.addView(pv, new HorizontalScrollView.LayoutParams(-2, dp(28)));
+        return scroll;
+    }
+
+    private String extractPrincipalVariationLine(String analysis) {
+        if (analysis == null || analysis.trim().isEmpty()) return "PV: —";
+        String[] lines = analysis.split("\\r?\\n");
+        for (int i = lines.length - 1; i >= 0; i--) {
+            String line = lines[i].trim();
+            if (line.isEmpty() || line.regionMatches(true, 0, "Engine WDL:", 0, 11)) continue;
+            line = line.replaceFirst("(?i)^PV\\s*\\d*\\s*", "");
+            line = line.replaceFirst("^\\d+\\.{1,3}\\s*", "");
+            if (line.matches("(?i).*(?:[a-h][1-8]|O-O).*")) return line;
+        }
+        return "PV: —";
+    }
+
+    private String formatEngineMetrics(String analysis) {
+        if (analysis == null) return "Eval: —\nDepth: —\nSelDepth: —\nNPS: —\nNodes: —";
+        String value = analysis.split("\\r?\\n", 2)[0];
+        value = value.replaceAll("(?i)\\s+Time:\\s*[^\\s]+", "");
+        value = value.replaceAll("(?i)\\s+Hash:\\s*[^\\s]+", "");
+        value = value.replaceAll("(Nodes:\\s*[^\\s]+)\\s+(NPS:\\s*[^\\s]+)", "$2 $1");
+        value = value.replaceAll("\\s+(?=(?:Depth|SelDepth|Nodes|NPS):)", "\\n");
+        value = value.replaceAll("(?i)^\\s*Eval\\s*:", "Eval:");
+        return value.trim();
+    }
+
     private void toggleExpandedBoardFocus() {
-        if (expandedEngineInfoRow == null || expandedVariation == null) return;
+        if (expandedEngineInfoRow == null || expandedVariationContainer == null) return;
         boolean focus = expandedEngineInfoRow.getVisibility() == View.VISIBLE;
         expandedEngineInfoRow.setVisibility(focus ? View.GONE : View.VISIBLE);
-        expandedVariation.setVisibility(focus ? View.GONE : View.VISIBLE);
+        expandedVariationContainer.setVisibility(focus ? View.GONE : View.VISIBLE);
         Toast.makeText(this, focus ? "Board focus · long-press to restore engine panels" : "Engine panels restored", Toast.LENGTH_SHORT).show();
     }
 
@@ -759,10 +799,14 @@ public final class TournamentActivity extends Activity {
         if (expandedBlackName != null) expandedBlackName.setText(appendResultScore(currentBlackName, currentBoardBlackScore));
         if (expandedWhiteName != null) expandedWhiteName.setTextColor(currentWhiteToMove ? 0xFFFFFFFF : 0xFF9A9A9A);
         if (expandedBlackName != null) expandedBlackName.setTextColor(currentWhiteToMove ? 0xFF9A9A9A : 0xFFFFFFFF);
-        if (expandedWhiteAnalysis != null) expandedWhiteAnalysis.setText(formatEngineOutput(lastWhiteAnalysis));
-        if (expandedBlackAnalysis != null) expandedBlackAnalysis.setText(formatEngineOutput(lastBlackAnalysis));
+        if (expandedWhiteAnalysis != null) expandedWhiteAnalysis.setText(formatEngineMetrics(lastWhiteAnalysis));
+        if (expandedBlackAnalysis != null) expandedBlackAnalysis.setText(formatEngineMetrics(lastBlackAnalysis));
+        if (expandedWhitePv != null && expandedWhitePv.getChildCount() > 0 && expandedWhitePv.getChildAt(0) instanceof TextView)
+            ((TextView) expandedWhitePv.getChildAt(0)).setText(extractPrincipalVariationLine(lastWhiteAnalysis));
+        if (expandedBlackPv != null && expandedBlackPv.getChildCount() > 0 && expandedBlackPv.getChildAt(0) instanceof TextView)
+            ((TextView) expandedBlackPv.getChildAt(0)).setText(extractPrincipalVariationLine(lastBlackAnalysis));
         updateExpandedClockDisplay();
-        if (expandedVariation != null) expandedVariation.setText(expandedVariationText());
+        if (expandedVariation != null) setExpandedVariationText(expandedVariationText());
         if (expandedMainBoard != null && latestPosition != null) {
             expandedMainBoard.setPosition(new Position(latestPosition));
             ArrayList<Move> hints = new ArrayList<>();
@@ -784,6 +828,19 @@ public final class TournamentActivity extends Activity {
             out.append(moves.get(i));
         }
         return out.toString();
+    }
+
+    private void setExpandedVariationText(String value) {
+        if (expandedVariation == null) return;
+        android.text.SpannableString styled = new android.text.SpannableString(value == null ? "" : value);
+        int end = styled.length();
+        int start = end;
+        while (start > 0 && !Character.isWhitespace(styled.charAt(start - 1))) start--;
+        if (start < end) {
+            styled.setSpan(new android.text.style.ForegroundColorSpan(0xFFFFD54F), start, end, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            styled.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD), start, end, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        expandedVariation.setText(styled);
     }
 
     private void updateExpandedClockDisplay() {
@@ -1078,6 +1135,12 @@ public final class TournamentActivity extends Activity {
         mirrorBlackRow.addView(mirrorBlackIcon, new LinearLayout.LayoutParams(dp(48), dp(48)));
         mirrorBlackRow.addView(mirrorBlackName, new LinearLayout.LayoutParams(0, -2, 1.4f));
         mirrorBlackRow.addView(mirrorBlackMoveTime, new LinearLayout.LayoutParams(0, -2, 1));
+        mirrorFocusBlackIcon = new ImageView(this);
+        mirrorFocusBlackIcon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        mirrorFocusBlackIcon.setVisibility(View.GONE);
+        LinearLayout.LayoutParams focusBlackIconParams = new LinearLayout.LayoutParams(dp(64), dp(52));
+        focusBlackIconParams.gravity = android.view.Gravity.CENTER_HORIZONTAL;
+        mirrorPage.addView(mirrorFocusBlackIcon, focusBlackIconParams);
         mirrorPage.addView(mirrorBlackRow, fullWidth());
 
         FrameLayout frame = new FrameLayout(this) {
@@ -1132,10 +1195,16 @@ public final class TournamentActivity extends Activity {
         mirrorWhiteRow = new LinearLayout(this);
         mirrorWhiteRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
         mirrorWhiteRow.addView(mirrorWhiteClock, new LinearLayout.LayoutParams(0, -2, 1));
-        mirrorWhiteRow.addView(mirrorWhiteName, new LinearLayout.LayoutParams(0, -2, 1.4f));
         mirrorWhiteRow.addView(mirrorWhiteIcon, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        mirrorWhiteRow.addView(mirrorWhiteName, new LinearLayout.LayoutParams(0, -2, 1.4f));
         mirrorWhiteRow.addView(mirrorWhiteMoveTime, new LinearLayout.LayoutParams(0, -2, 1));
         mirrorPage.addView(mirrorWhiteRow, fullWidth());
+        mirrorFocusWhiteIcon = new ImageView(this);
+        mirrorFocusWhiteIcon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        mirrorFocusWhiteIcon.setVisibility(View.GONE);
+        LinearLayout.LayoutParams focusWhiteIconParams = new LinearLayout.LayoutParams(dp(64), dp(52));
+        focusWhiteIconParams.gravity = android.view.Gravity.CENTER_HORIZONTAL;
+        mirrorPage.addView(mirrorFocusWhiteIcon, focusWhiteIconParams);
 
         mirrorWhiteAnalysisText = text("—    Depth: —    Nodes: —    NPS: —");
         mirrorWhiteAnalysisText.setTextSize(18);
@@ -1535,13 +1604,22 @@ public final class TournamentActivity extends Activity {
             mirrorPage.setGravity(android.view.Gravity.CENTER);
             for (int i = 0; i < mirrorPage.getChildCount(); i++) {
                 View child = mirrorPage.getChildAt(i);
-                child.setVisibility((child == mirrorBoardFrame || child == mirrorBlackRow || child == mirrorWhiteRow) ? View.VISIBLE : View.GONE);
+                child.setVisibility((child == mirrorBoardFrame || child == mirrorBlackRow || child == mirrorWhiteRow ||
+                        child == mirrorFocusBlackIcon || child == mirrorFocusWhiteIcon) ? View.VISIBLE : View.GONE);
             }
+            if (mirrorBlackIcon != null) mirrorBlackIcon.setVisibility(View.GONE);
+            if (mirrorWhiteIcon != null) mirrorWhiteIcon.setVisibility(View.GONE);
+            if (mirrorFocusBlackIcon != null) { setMirrorPlayerIcon(mirrorFocusBlackIcon, currentBlackEngineId, currentBlackName); }
+            if (mirrorFocusWhiteIcon != null) { setMirrorPlayerIcon(mirrorFocusWhiteIcon, currentWhiteEngineId, currentWhiteName); }
             if (mirrorControlBar != null) mirrorControlBar.setVisibility(View.GONE);
         } else {
             mirrorPage.setGravity(android.view.Gravity.NO_GRAVITY);
             for (int i = 0; i < mirrorPage.getChildCount(); i++)
                 mirrorPage.getChildAt(i).setVisibility(View.VISIBLE);
+            if (mirrorFocusBlackIcon != null) mirrorFocusBlackIcon.setVisibility(View.GONE);
+            if (mirrorFocusWhiteIcon != null) mirrorFocusWhiteIcon.setVisibility(View.GONE);
+            if (mirrorBlackIcon != null) setMirrorPlayerIcon(mirrorBlackIcon, currentBlackEngineId, currentBlackName);
+            if (mirrorWhiteIcon != null) setMirrorPlayerIcon(mirrorWhiteIcon, currentWhiteEngineId, currentWhiteName);
             applyMirrorEngineOutputVisibility();
             if (mirrorControlBar != null) mirrorControlBar.setVisibility(View.VISIBLE);
             if (mirrorPrimaryControls != null) mirrorPrimaryControls.setVisibility(mirrorNavigationMode ? View.GONE : View.VISIBLE);
@@ -1953,6 +2031,8 @@ public final class TournamentActivity extends Activity {
             mirrorBlackName.setText(appendResultScore(mirrorRankedName(mirrorReplayBlackEngineId, mirrorReplayBlackName), resultScore(resultTag, false)));
             setMirrorPlayerIcon(mirrorWhiteIcon, mirrorReplayWhiteEngineId, mirrorReplayWhiteName);
             setMirrorPlayerIcon(mirrorBlackIcon, mirrorReplayBlackEngineId, mirrorReplayBlackName);
+            if (mirrorFocusWhiteIcon != null) setMirrorPlayerIcon(mirrorFocusWhiteIcon, mirrorReplayWhiteEngineId, mirrorReplayWhiteName);
+            if (mirrorFocusBlackIcon != null) setMirrorPlayerIcon(mirrorFocusBlackIcon, mirrorReplayBlackEngineId, mirrorReplayBlackName);
             if (mirrorEngineOutputHidden) updateMirrorFocusPanels();
             return;
         }
@@ -1964,14 +2044,18 @@ public final class TournamentActivity extends Activity {
         if (mirrorBlackClock != null) mirrorBlackClock.setAlpha(currentWhiteToMove ? 0.58f : 1.0f);
         setMirrorPlayerIcon(mirrorWhiteIcon, currentWhiteEngineId, currentWhiteName);
         setMirrorPlayerIcon(mirrorBlackIcon, currentBlackEngineId, currentBlackName);
+        if (mirrorFocusWhiteIcon != null) setMirrorPlayerIcon(mirrorFocusWhiteIcon, currentWhiteEngineId, currentWhiteName);
+        if (mirrorFocusBlackIcon != null) setMirrorPlayerIcon(mirrorFocusBlackIcon, currentBlackEngineId, currentBlackName);
         if (mirrorEngineOutputHidden) updateMirrorFocusPanels();
     }
 
     private void setMirrorPlayerIcon(ImageView view, String engineId, String displayName) {
         if (view == null) return;
         Bitmap bitmap = mirrorEngineIcon(engineId, displayName);
-        if (bitmap == null) { view.setImageDrawable(null); view.setVisibility(View.GONE); }
-        else { view.setImageDrawable(new BitmapDrawable(getResources(), bitmap)); view.setVisibility(View.VISIBLE); }
+        if (bitmap == null) { view.setImageDrawable(null); view.setVisibility(View.GONE); return; }
+        view.setImageDrawable(new BitmapDrawable(getResources(), bitmap));
+        boolean focusIcon = view == mirrorFocusBlackIcon || view == mirrorFocusWhiteIcon;
+        view.setVisibility(focusIcon == mirrorBoardOnlyMode ? View.VISIBLE : View.GONE);
     }
 
     private String mirrorRankedName(String engineId, String displayName) {
@@ -2429,8 +2513,7 @@ public final class TournamentActivity extends Activity {
                         "%   D " + String.format(java.util.Locale.US, "%.1f", pv.wdlDraw / 10.0) +
                         "%   L " + String.format(java.util.Locale.US, "%.1f", pv.wdlLoss / 10.0) + "%" : "";
                 String output = "Eval: " + eval + "   Depth: " + pv.depth + "   SelDepth: " + pv.seldepth +
-                        "   Nodes: " + compactViewerCount(pv.nodes) + "   NPS: " + compactViewerCount(pv.nps) +
-                        "   Time: " + elapsed + "s   Hash: " + String.format(java.util.Locale.US, "%.1f", Math.max(0, pv.hash) / 10.0) + "%" +
+                        "   NPS: " + compactViewerCount(pv.nps) + "   Nodes: " + compactViewerCount(pv.nodes) +
                         engineWdl + (line.length() == 0 ? "" : "\nPV 1  " + line) +
                         (depthLines.isEmpty() ? "" : "\n" + depthLines);
                 runOnUiThread(() -> {
@@ -4614,11 +4697,9 @@ public final class TournamentActivity extends Activity {
         String nodes = findCommentValue(c, "Nodes|N");
         String nps = findCommentValue(c, "NPS|nps");
         String engineTime = findCommentValue(c, "EngineTime");
-        String hash = findCommentValue(c, "Hash");
-        String result = dash(eval) + "  Depth: " + dash(depth) +
-                "  SelDepth: " + dash(selDepth) + "  Nodes: " + dash(nodes) +
-                "  NPS: " + dash(nps);
-        if (!hash.isEmpty() && !"n/a".equals(hash)) result += "  Hash: " + hash;
+        String result = "Eval: " + dash(eval) + "  Depth: " + dash(depth) +
+                "  SelDepth: " + dash(selDepth) + "  NPS: " + dash(nps) +
+                "  Nodes: " + dash(nodes);
         java.util.regex.Matcher w = java.util.regex.Pattern.compile(
                 "(?i)EngineWDL:\\s*W:\\s*([0-9]+(?:\\.[0-9]+)?)%\\s+D:\\s*([0-9]+(?:\\.[0-9]+)?)%\\s+L:\\s*([0-9]+(?:\\.[0-9]+)?)%")
                 .matcher(c);
@@ -4731,9 +4812,7 @@ public final class TournamentActivity extends Activity {
                         "%  D " + String.format(java.util.Locale.US, "%.1f", pv.wdlDraw / 10.0) +
                         "%  L " + String.format(java.util.Locale.US, "%.1f", pv.wdlLoss / 10.0) + "%" : "";
                 String output="Eval: "+eval+"    Depth: "+pv.depth+"    SelDepth: "+pv.seldepth+
-                        "    Nodes: "+compactViewerCount(pv.nodes)+"    NPS: "+compactViewerCount(pv.nps)+
-                        "    Time: "+String.format(java.util.Locale.US, "%.2f", Math.max(0, pv.time) / 1000.0)+"s"+
-                        "    Hash: "+String.format(java.util.Locale.US, "%.1f", Math.max(0, pv.hash) / 10.0)+"%"+
+                        "    NPS: "+compactViewerCount(pv.nps)+"    Nodes: "+compactViewerCount(pv.nodes)+
                         engineWdl+"\n"+variation;
                 runOnUiThread(()->{ if(!gameViewerAnalysisOn)return; gvWhiteAnalysis.setText(formatEngineOutput(output)); gvBlackAnalysis.setText("Black ---  Depth: ---  Nodes: ---  NPS: ---"); gameViewerHints.clear(); gameViewerHints.addAll(hints); gameViewerBoard.setMoveHints(gameViewerHints); });
             }
@@ -7534,8 +7613,10 @@ public final class TournamentActivity extends Activity {
     private String formatEngineOutput(String value) {
         if (value == null) return "";
         String formatted = value.replaceAll("(?i)\\s*TBHits:\\s*[^\\s]+", "");
-        formatted = formatted.replaceAll("(?i)\\bEval:\\s*", "");
         formatted = formatted.replaceAll("(?i)\\s+Time:\\s*[^\\s]+", "");
+        formatted = formatted.replaceAll("(?i)\\s+Hash:\\s*[^\\s]+", "");
+        formatted = formatted.replaceAll("(?i)(Nodes:\\s*[^\\s]+)\\s+(NPS:\\s*[^\\s]+)", "$2\\n$1");
+        formatted = formatted.replaceAll("\\s+(?=(?:Depth|SelDepth|Nodes|NPS):)", "\\n");
         return formatted.trim();
     }
 
