@@ -1,6 +1,7 @@
 package org.petero.droidfish.tournament;
 
 import android.util.Pair;
+import android.util.Log;
 import org.petero.droidfish.EngineOptions;
 import org.petero.droidfish.PGNOptions;
 import org.petero.droidfish.book.BookOptions;
@@ -87,7 +88,9 @@ public final class TournamentRunner {
     private String latestWhiteAnalysis = "WHITE analysis waiting…";
     private String latestBlackAnalysis = "BLACK analysis waiting…";
     private long lastMoveTimeMs;
-    private long currentTurnStartedNs;
+    private volatile long currentTurnStartedNs;
+    private volatile long currentTurnQueueSubmittedNs;
+    private volatile long currentTurnQueueReturnedNs;
     private boolean humanAdjudication;
     private boolean drawRulesEnabled = true;
     private int drawMoveLimit = 50;
@@ -186,6 +189,7 @@ public final class TournamentRunner {
         pgnOptions = new PGNOptions();
         // Tournament move comments are part of the exported record, not optional UI comments.
         pgnOptions.exp.comments = true;
+        pgnOptions.exp.blackMoveNrAfterComment = false;
         whiteAnalysisListener = new EngineListener(true);
         blackAnalysisListener = new EngineListener(false);
         whitePlayer = new DroidComputerPlayer(whiteAnalysisListener);
@@ -626,7 +630,9 @@ public final class TournamentRunner {
             case CLOCK: default: break;
         }
         (whiteToMove ? whiteAnalysisListener : blackAnalysisListener).beginSearch();
+        currentTurnQueueSubmittedNs = System.nanoTime();
         player.queueSearchRequest(request);
+        currentTurnQueueReturnedNs = System.nanoTime();
         if (usesClock()) startClockWatchdog(whiteToMove, turnToken);
     }
 
@@ -639,6 +645,16 @@ public final class TournamentRunner {
                             game.getGameState() != Game.GameState.ALIVE || game.currPos().whiteMove != whiteToMove)
                         return;
                     if (usesClock() && clock.isExpired()) {
+                        long timeoutNs = System.nanoTime();
+                        long turnMs = currentTurnStartedNs == 0L ? -1L : Math.max(0L, (timeoutNs - currentTurnStartedNs) / 1_000_000L);
+                        long preQueueMs = currentTurnQueueSubmittedNs == 0L || currentTurnStartedNs == 0L ? -1L :
+                                Math.max(0L, (currentTurnQueueSubmittedNs - currentTurnStartedNs) / 1_000_000L);
+                        long queueCallMs = currentTurnQueueReturnedNs == 0L || currentTurnQueueSubmittedNs == 0L ? -1L :
+                                Math.max(0L, (currentTurnQueueReturnedNs - currentTurnQueueSubmittedNs) / 1_000_000L);
+                        Log.e("CET-TournamentClock", "FLAG FALL side=" + (whiteToMove ? "white" : "black") +
+                                " turnMs=" + turnMs + " remainingMs=" + clock.remainingMs(whiteToMove) +
+                                " preQueueMs=" + preQueueMs + " queueCallMs=" + queueCallMs +
+                                " pairing=" + (pairing == null ? -1 : pairing.index + 1) + " watchdog=true");
                         game.markTimeout(whiteToMove);
                         // A non-responsive engine may never answer stop; kill it so the next
                         // pairing can start a clean process instead of inheriting a stuck search.
@@ -648,8 +664,14 @@ public final class TournamentRunner {
                         return;
                     }
                 }
-                try { Thread.sleep(5); }
-                catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+                try {
+                    long remainingMs = clock == null ? 0L : clock.remainingMs(whiteToMove);
+                    // Avoid waking hundreds of times per second during normal engine searches.
+                    // Deadline arithmetic still uses nanoTime in CetClock; this polling
+                    // interval only bounds how quickly a non-responsive engine is noticed.
+                    long sleepMs = remainingMs > 2000L ? 25L : (remainingMs > 250L ? 10L : 5L);
+                    Thread.sleep(sleepMs);
+                } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
             }
         }, "CET-Clock-Watchdog");
         watchdog.setDaemon(true);
@@ -680,7 +702,10 @@ public final class TournamentRunner {
         addMoveAnalysisComment(whiteEngineSide, lastMoveTimeMs, analysisAtBestMove);
         recordPosition(lastMoveTimeMs);
         listener.onMoveTime(!game.currPos().whiteMove, lastMoveTimeMs, currentOpeningName);
-        notifyPosition();
+        // The live UI already has the initial PGN and receives this exact move.
+        // Avoid exporting the entire growing PGN on every ply while the next engine
+        // search is starting; user-requested snapshots use currentPgn() on demand.
+        notifyPosition(false);
         if (applyConfiguredDrawRules()) return;
         if (game.getGameState() != Game.GameState.ALIVE) {
             finishCurrentGame(resultForState(game.getGameState()));
@@ -701,6 +726,7 @@ public final class TournamentRunner {
             options.exp.comments = true;
             options.exp.nag = true;
             options.exp.variations = false;
+            options.exp.blackMoveNrAfterComment = false;
             return game.tree.toPGN(options);
         } catch (RuntimeException ignored) {
             return "";
@@ -758,7 +784,9 @@ public final class TournamentRunner {
         } catch (RuntimeException ignored) { }
     }
 
-    private void notifyPosition() {
+    private void notifyPosition() { notifyPosition(true); }
+
+    private void notifyPosition(boolean includeFullPgn) {
         if (game == null || pairing == null || whiteEngine == null || blackEngine == null) return;
         // Keep each engine's most recent score across moves. Only the side to move is
         // searching at a time, so clearing both scores here would make agreement
@@ -767,7 +795,13 @@ public final class TournamentRunner {
         long whiteMs = activeClock == null || !usesClock() ? 0 : activeClock.remainingMs(true);
         long blackMs = activeClock == null || !usesClock() ? 0 : activeClock.remainingMs(false);
         listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove,
-                whiteMs, blackMs, whiteEngine.displayName, blackEngine.displayName, currentPgnMoves(), game.getLastMove());
+                whiteMs, blackMs, whiteEngine.displayName, blackEngine.displayName,
+                includeFullPgn ? currentPgnMoves() : null, game.getLastMove());
+    }
+
+    /** Capture a complete PGN only when the user asks for a live-game snapshot. */
+    public synchronized String currentPgn() {
+        return game == null ? "" : currentPgnMoves();
     }
 
     private String terminationForState(Game.GameState state) {
@@ -905,7 +939,7 @@ public final class TournamentRunner {
 
                 // Retain every newest engine measurement and evaluation for rules
                 // and the final PGN snapshot, but defer expensive SAN formatting.
-                int whitePerspectiveScore = white ? pv.score : -pv.score;
+                int whitePerspectiveScore = (pos != null && pos.whiteMove) ? pv.score : -pv.score;
                 if (!pv.isMate) {
                     double evalPawns = whitePerspectiveScore / 100.0;
                     if (white) latestWhiteEvalPawns = evalPawns; else latestBlackEvalPawns = evalPawns;
@@ -1035,7 +1069,7 @@ public final class TournamentRunner {
                         cursor.makeMove(move, new org.petero.droidfish.gamelogic.UndoInfo());
                     }
                 }
-                int pvScore = pv == null ? 0 : (white ? pv.score : -pv.score);
+                int pvScore = pv == null ? 0 : ((pendingPvPosition != null && pendingPvPosition.whiteMove) ? pv.score : -pv.score);
                 boolean pvIsMate = pv != null && pv.isMate;
                 String scoreText = pvIsMate ?
                         (pvScore >= 0 ? "+M" : "-M") + Math.abs(pvScore) :
@@ -1073,8 +1107,20 @@ public final class TournamentRunner {
             long arrivalNs = System.nanoTime();
             int activeId = white ? activeWhiteId : activeBlackId;
             CetClock activeClock = clock;
+            long remainingBeforeArrival = activeClock == null || !usesClock() ? -1L : activeClock.remainingMs(white);
             boolean acceptedAtArrival = !stopped && !finished && !paused && id == activeId && activeClock != null &&
                     (!usesClock() || activeClock.acceptMove(white, arrivalNs));
+            long turnElapsedMs = currentTurnStartedNs == 0L ? -1L : Math.max(0L, (arrivalNs - currentTurnStartedNs) / 1_000_000L);
+            long requestSubmitDelayMs = currentTurnQueueSubmittedNs == 0L || currentTurnStartedNs == 0L ? -1L :
+                    Math.max(0L, (currentTurnQueueSubmittedNs - currentTurnStartedNs) / 1_000_000L);
+            long queueCallMs = currentTurnQueueReturnedNs == 0L || currentTurnQueueSubmittedNs == 0L ? -1L :
+                    Math.max(0L, (currentTurnQueueReturnedNs - currentTurnQueueSubmittedNs) / 1_000_000L);
+            if (!acceptedAtArrival || remainingBeforeArrival >= 0L && remainingBeforeArrival <= 10000L) {
+                Log.w("CET-TournamentClock", "BESTMOVE side=" + (white ? "white" : "black") + " accepted=" + acceptedAtArrival +
+                        " remainingBeforeMs=" + remainingBeforeArrival + " turnElapsedMs=" + turnElapsedMs +
+                        " requestSubmitDelayMs=" + requestSubmitDelayMs + " queueCallMs=" + queueCallMs +
+                        " pairing=" + (pairing == null ? -1 : pairing.index + 1));
+            }
             // Freeze this search's final analysis on bestmove, before deferred result
             // handling can start another turn or receive any late engine notifications.
             final String analysisAtBestMove = snapshotForMove();
