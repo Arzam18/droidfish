@@ -206,6 +206,14 @@ public abstract class ChessBoard extends View {
      * @param forward   True if forward direction, false for undo move.
      */
     public final void setAnimMove(Position sourcePos, Move move, boolean forward) {
+        setAnimMove(sourcePos, move, forward, -1);
+    }
+
+    /** Set up a move animation using an explicit duration in milliseconds.
+     *  A negative duration keeps the historical distance-based timing; zero disables it.
+     */
+    public final void setAnimMove(Position sourcePos, Move move, boolean forward, int durationMs) {
+        if (sourcePos == null || move == null) return;
         anim.startTime = -1;
         anim.paused = true; // Animation starts at next position update
         if (forward) {
@@ -217,8 +225,8 @@ public abstract class ChessBoard extends View {
         } else {
             anim.posHash = sourcePos.zobristHash();
         }
-        int animTime; // Animation duration in milliseconds.
-        {
+        int animTime = durationMs; // Negative means use the original distance-based duration.
+        if (animTime < 0) {
             int dx = Position.getX(move.to) - Position.getX(move.from);
             int dy = Position.getY(move.to) - Position.getY(move.from);
             double dist = Math.sqrt(dx * dx + dy * dy);
