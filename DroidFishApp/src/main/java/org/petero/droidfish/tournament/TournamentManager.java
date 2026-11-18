@@ -186,7 +186,11 @@ public final class TournamentManager {
     private final ArrayList<Integer> playQueue = new ArrayList<>();
     /** Scheduled game interrupted by a pause/process death; it resumes before the priority queue. */
     private int activePairingIndex = -1;
-    private String externalSaveError = "";
+    private volatile String externalSaveError = "";
+    // Snapshot under the manager monitor, but perform gzip/fsync/shared-storage IO
+    // under a separate lock so standings and clock readers never wait on disk.
+    private final Object saveIoLock = new Object();
+    private volatile long latestSaveRevision;
     // Prevent two concurrent imports/creates from selecting the same not-yet-saved name.
     private static final Set<String> RESERVED_TOURNAMENT_FILE_NAMES = new HashSet<>();
 
@@ -1750,32 +1754,38 @@ public final class TournamentManager {
     public synchronized List<Integer> playQueue() { return Collections.unmodifiableList(new ArrayList<>(playQueue)); }
     public synchronized boolean isQueued(int index) { return playQueue.contains(index); }
     public synchronized int activePairingIndex() { return activePairingIndex; }
-    public synchronized void setActivePairing(int index) throws IOException, JSONException {
-        Pairing p = pairings.get(index);
-        if (p.isComplete() && !p.replayPending) throw new IllegalStateException("Only a pending game can become active");
-        activePairingIndex = index;
+    public void setActivePairing(int index) throws IOException, JSONException {
+        synchronized (this) {
+            Pairing p = pairings.get(index);
+            if (p.isComplete() && !p.replayPending) throw new IllegalStateException("Only a pending game can become active");
+            activePairingIndex = index;
+        }
         save();
     }
-    public synchronized void setQueued(int index, boolean queued) throws IOException, JSONException {
-        Pairing p = pairings.get(index);
-        if (queued) {
-            if (p.isComplete() && !p.replayPending) throw new IllegalStateException("Only unfinished games can be queued; use Replay for completed games");
-            if (!playQueue.contains(index)) playQueue.add(index);
-        } else {
-            playQueue.remove(Integer.valueOf(index));
+    public void setQueued(int index, boolean queued) throws IOException, JSONException {
+        synchronized (this) {
+            Pairing p = pairings.get(index);
+            if (queued) {
+                if (p.isComplete() && !p.replayPending) throw new IllegalStateException("Only unfinished games can be queued; use Replay for completed games");
+                if (!playQueue.contains(index)) playQueue.add(index);
+            } else {
+                playQueue.remove(Integer.valueOf(index));
+            }
         }
         save();
     }
     /** Queue a replacement play at the head while keeping the old result recoverable until replacement finishes. */
-    public synchronized void requestReplay(int index) throws IOException, JSONException {
-        if (format == Format.CUP)
-            throw new IllegalStateException("Cup games cannot be replayed after they enter the bracket result history");
-        Pairing p = pairings.get(index);
-        if (!p.isComplete()) throw new IllegalStateException("Only completed games can be replayed");
-        if (p.replayPending) throw new IllegalStateException("This game is already waiting to be replayed");
-        p.replayPending = true;
-        playQueue.remove(Integer.valueOf(index));
-        playQueue.add(0, index);
+    public void requestReplay(int index) throws IOException, JSONException {
+        synchronized (this) {
+            if (format == Format.CUP)
+                throw new IllegalStateException("Cup games cannot be replayed after they enter the bracket result history");
+            Pairing p = pairings.get(index);
+            if (!p.isComplete()) throw new IllegalStateException("Only completed games can be replayed");
+            if (p.replayPending) throw new IllegalStateException("This game is already waiting to be replayed");
+            p.replayPending = true;
+            playQueue.remove(Integer.valueOf(index));
+            playQueue.add(0, index);
+        }
         save();
     }
     public synchronized Pairing current() {
@@ -1794,8 +1804,9 @@ public final class TournamentManager {
     public synchronized boolean isComplete() { return format == Format.CUP ? cupFinished : current() == null; }
 
     /** Initialize stable assignments for every PGN opening (or empty assignments when no book is selected). */
-    public synchronized void prepareOpeningAssignments() throws IOException, JSONException {
+    public void prepareOpeningAssignments() throws IOException, JSONException {
         boolean changed = false;
+        synchronized (this) {
         // Splitting this 3+ MB string separately for every scheduled game used to
         // rescan the entire opening book thousands of times (O(games * book size)).
         // Split once, then do O(1) indexed lookups for all pairings.
@@ -1837,6 +1848,7 @@ public final class TournamentManager {
                 }
             }
         }
+        }
         if (changed) save();
     }
 
@@ -1870,50 +1882,60 @@ public final class TournamentManager {
     }
 
     /** Store the actual BIN line chosen the first time a pairing runs; never redraw it on replay. */
-    public synchronized void setPairingOpeningIfMissing(int index, List<String> sanMoves, String name) throws IOException, JSONException {
-        Pairing p = pairings.get(index);
-        if (p.openingAssigned) return;
-        String line = joinSan(sanMoves == null ? Collections.emptyList() : sanMoves);
-        String label = name == null || name.trim().isEmpty() ? "Starting position" : name.trim();
-        // The repeat-opening option pairs adjacent color-reversal games. Whichever
-        // one is played first establishes the same immutable BIN line for both.
-        int first = repeatOpening ? (index / 2) * 2 : index;
-        int lastExclusive = repeatOpening ? Math.min(pairings.size(), first + 2) : index + 1;
-        if (repeatOpening) {
+    public void setPairingOpeningIfMissing(int index, List<String> sanMoves, String name) throws IOException, JSONException {
+        boolean changed = false;
+        synchronized (this) {
+            Pairing p = pairings.get(index);
+            if (p.openingAssigned) return;
+            String line = joinSan(sanMoves == null ? Collections.emptyList() : sanMoves);
+            String label = name == null || name.trim().isEmpty() ? "Starting position" : name.trim();
+            // The repeat-opening option pairs adjacent color-reversal games. Whichever
+            // one is played first establishes the same immutable BIN line for both.
+            int first = repeatOpening ? (index / 2) * 2 : index;
+            int lastExclusive = repeatOpening ? Math.min(pairings.size(), first + 2) : index + 1;
+            if (repeatOpening) {
+                for (int target = first; target < lastExclusive; target++) {
+                    Pairing partner = pairings.get(target);
+                    if (partner.openingAssigned) {
+                        line = partner.openingSanLine;
+                        label = partner.openingName;
+                        break;
+                    }
+                }
+            }
             for (int target = first; target < lastExclusive; target++) {
-                Pairing partner = pairings.get(target);
-                if (partner.openingAssigned) {
-                    line = partner.openingSanLine;
-                    label = partner.openingName;
-                    break;
+                Pairing paired = pairings.get(target);
+                if (!paired.openingAssigned) {
+                    paired.openingSanLine = line;
+                    paired.openingName = label;
+                    paired.openingIndex = 0;
+                    paired.openingAssigned = true;
+                    changed = true;
                 }
             }
         }
-        for (int target = first; target < lastExclusive; target++) {
-            Pairing paired = pairings.get(target);
-            if (!paired.openingAssigned) {
-                paired.openingSanLine = line;
-                paired.openingName = label;
-                paired.openingIndex = 0;
-                paired.openingAssigned = true;
-            }
-        }
-        save();
+        if (changed) save();
     }
 
     /** Original PGN date is reused when a scheduled game is replayed, replacing the same record. */
-    public synchronized String ensurePairingPgnDate(int index) throws IOException, JSONException {
-        Pairing p = pairings.get(index);
-        if (p.pgnDate == null || !p.pgnDate.matches("\\d{4}\\.\\d{2}\\.\\d{2}")) {
-            p.pgnDate = pgnTagValue(p.pgn, "Date");
-            if (!p.pgnDate.matches("\\d{4}\\.\\d{2}\\.\\d{2}")) {
-                java.util.Calendar now = java.util.Calendar.getInstance();
-                p.pgnDate = String.format(java.util.Locale.US, "%04d.%02d.%02d", now.get(java.util.Calendar.YEAR),
-                        now.get(java.util.Calendar.MONTH) + 1, now.get(java.util.Calendar.DAY_OF_MONTH));
+    public String ensurePairingPgnDate(int index) throws IOException, JSONException {
+        String result;
+        boolean changed = false;
+        synchronized (this) {
+            Pairing p = pairings.get(index);
+            if (p.pgnDate == null || !p.pgnDate.matches("\\d{4}\\.\\d{2}\\.\\d{2}")) {
+                p.pgnDate = pgnTagValue(p.pgn, "Date");
+                if (!p.pgnDate.matches("\\d{4}\\.\\d{2}\\.\\d{2}")) {
+                    java.util.Calendar now = java.util.Calendar.getInstance();
+                    p.pgnDate = String.format(java.util.Locale.US, "%04d.%02d.%02d", now.get(java.util.Calendar.YEAR),
+                            now.get(java.util.Calendar.MONTH) + 1, now.get(java.util.Calendar.DAY_OF_MONTH));
+                }
+                changed = true;
             }
-            save();
+            result = p.pgnDate;
         }
-        return p.pgnDate;
+        if (changed) save();
+        return result;
     }
 
     private String pgnTagValue(String pgn, String name) {
@@ -1923,13 +1945,21 @@ public final class TournamentManager {
         return m.find() ? m.group(1).replace("\\\\\"", "\"").replace("\\\\\\\\", "\\\\") : "";
     }
     /** All completed game PGNs in schedule order, separated for concatenated-PGN readers. */
-    public synchronized String exportPgn() {
-        StringBuilder out = new StringBuilder();
-        for (Pairing p : pairings) {
-            if (p.isComplete() && p.pgn != null && !p.pgn.trim().isEmpty()) {
-                if (out.length() > 0) out.append("\n\n");
-                out.append(p.pgn.trim());
+    public String exportPgn() {
+        final ArrayList<String> completedGames = new ArrayList<>();
+        synchronized (this) {
+            // Copy immutable PGN strings only. Concatenating potentially thousands of
+            // complete games happens after releasing the manager monitor so UI readers
+            // never wait for a large StringBuilder operation.
+            for (Pairing p : pairings) {
+                if (p.isComplete() && p.pgn != null && !p.pgn.isEmpty())
+                    completedGames.add(p.pgn);
             }
+        }
+        StringBuilder out = new StringBuilder();
+        for (String pgn : completedGames) {
+            if (out.length() > 0) out.append("\n\n");
+            out.append(pgn.trim());
         }
         return out.toString();
     }
@@ -1938,39 +1968,46 @@ public final class TournamentManager {
         return null;
     }
 
-    public synchronized void recordResult(int index, Outcome outcome, String pgn) throws IOException, JSONException {
+    public void recordResult(int index, Outcome outcome, String pgn) throws IOException, JSONException {
         recordResult(index, outcome, pgn, Double.NaN, Double.NaN);
     }
-    public synchronized void recordResult(int index, Outcome outcome, String pgn,
-                                          double whiteEvalPawns, double blackEvalPawns) throws IOException, JSONException {
+
+    public void recordResult(int index, Outcome outcome, String pgn,
+                             double whiteEvalPawns, double blackEvalPawns) throws IOException, JSONException {
         if (outcome == null || outcome == Outcome.UNFINISHED) throw new IllegalArgumentException("A final result is required");
-        Pairing p = pairings.get(index);
-        if (p.isComplete() && !p.replayPending) throw new IllegalStateException("Pairing already has a result");
-        boolean replacingReplay = p.replayPending;
-        if (ratingEnabled && (!p.isComplete() || replacingReplay)) p.ratingSequence = nextRatingSequence++;
-        p.outcome = outcome; p.pgn = pgn == null ? "" : pgn;
-        p.whiteEvalPawns = Double.isFinite(whiteEvalPawns) ? whiteEvalPawns : Double.NaN;
-        p.blackEvalPawns = Double.isFinite(blackEvalPawns) ? blackEvalPawns : Double.NaN;
-        p.replayPending = false;
-        p.anomalyReviewed = false;
-        playQueue.remove(Integer.valueOf(index));
-        if (activePairingIndex == index) activePairingIndex = -1;
-        if (p.pgnDate == null || p.pgnDate.isEmpty()) p.pgnDate = pgnTagValue(p.pgn, "Date");
-        Engine whiteEngine = findEngineOrNull(p.whiteEngineId), blackEngine = findEngineOrNull(p.blackEngineId);
-        if (whiteEngine != null) p.whiteNameAtPlay = whiteEngine.displayName;
-        if (blackEngine != null) p.blackNameAtPlay = blackEngine.displayName;
         RuntimeException pairingError = null;
-        if (format == Format.CUP) {
-            try { evaluateCupMatch(findCupMatch(p.cupMatchNumber)); }
-            catch (RuntimeException error) { pairingError = error; }
-        } else if (format == Format.SWISS && p.round == swissCurrentRound &&
-                swissCurrentRound < swissRoundsTotal && swissRoundComplete(swissCurrentRound)) {
-            try { generateSwissRound(); }
-            catch (RuntimeException error) { pairingError = error; }
+        Format resultFormat;
+        synchronized (this) {
+            Pairing p = pairings.get(index);
+            if (p.isComplete() && !p.replayPending) throw new IllegalStateException("Pairing already has a result");
+            boolean replacingReplay = p.replayPending;
+            if (ratingEnabled && (!p.isComplete() || replacingReplay)) p.ratingSequence = nextRatingSequence++;
+            p.outcome = outcome; p.pgn = pgn == null ? "" : pgn;
+            p.whiteEvalPawns = Double.isFinite(whiteEvalPawns) ? whiteEvalPawns : Double.NaN;
+            p.blackEvalPawns = Double.isFinite(blackEvalPawns) ? blackEvalPawns : Double.NaN;
+            p.replayPending = false;
+            p.anomalyReviewed = false;
+            playQueue.remove(Integer.valueOf(index));
+            if (activePairingIndex == index) activePairingIndex = -1;
+            if (p.pgnDate == null || p.pgnDate.isEmpty()) p.pgnDate = pgnTagValue(p.pgn, "Date");
+            Engine whiteEngine = findEngineOrNull(p.whiteEngineId), blackEngine = findEngineOrNull(p.blackEngineId);
+            if (whiteEngine != null) p.whiteNameAtPlay = whiteEngine.displayName;
+            if (blackEngine != null) p.blackNameAtPlay = blackEngine.displayName;
+            resultFormat = format;
+            if (format == Format.CUP) {
+                try { evaluateCupMatch(findCupMatch(p.cupMatchNumber)); }
+                catch (RuntimeException error) { pairingError = error; }
+            } else if (format == Format.SWISS && p.round == swissCurrentRound &&
+                    swissCurrentRound < swissRoundsTotal && swissRoundComplete(swissCurrentRound)) {
+                try { generateSwissRound(); }
+                catch (RuntimeException error) { pairingError = error; }
+            }
         }
+        // Tournament reads (standings, schedules and clocks) remain responsive while
+        // compressed persistence and external-storage mirroring are in progress.
         save();
         if (pairingError != null) {
-            String operation = format == Format.CUP ? "Cup match progression" : "Swiss round pairing";
+            String operation = resultFormat == Format.CUP ? "Cup match progression" : "Swiss round pairing";
             throw new IllegalStateException("The game result was saved, but " + operation + " failed: " +
                     pairingError.getMessage(), pairingError);
         }
@@ -1998,10 +2035,12 @@ public final class TournamentManager {
     }
 
     /** Mark a flagged game as reviewed without changing its result or PGN. */
-    public synchronized void markAnomalyReviewed(int index) throws IOException, JSONException {
-        Pairing p = pairings.get(index);
-        if (!p.isComplete() || p.replayPending) throw new IllegalStateException("An unfinished or queued-replay game cannot be confirmed");
-        p.anomalyReviewed = true;
+    public void markAnomalyReviewed(int index) throws IOException, JSONException {
+        synchronized (this) {
+            Pairing p = pairings.get(index);
+            if (!p.isComplete() || p.replayPending) throw new IllegalStateException("An unfinished or queued-replay game cannot be confirmed");
+            p.anomalyReviewed = true;
+        }
         save();
     }
 
@@ -2131,15 +2170,17 @@ public final class TournamentManager {
     }
 
     /** Correct a recorded result; standings are always recalculated from the game records. */
-    public synchronized void updatePairingResult(int index, Outcome outcome) throws IOException, JSONException {
-        if (format == Format.CUP)
-            throw new IllegalStateException("Cup game results are locked to preserve match advancement and bracket history");
-        if (outcome == null || outcome == Outcome.UNFINISHED) throw new IllegalArgumentException("Choose a final result");
-        Pairing p = pairings.get(index);
-        if (!p.isComplete() || p.replayPending) throw new IllegalStateException("An unfinished or queued-replay game cannot have its result corrected");
-        p.outcome = outcome;
-        p.pgn = replacePgnResult(p.pgn, outcome);
-        p.anomalyReviewed = true;
+    public void updatePairingResult(int index, Outcome outcome) throws IOException, JSONException {
+        synchronized (this) {
+            if (format == Format.CUP)
+                throw new IllegalStateException("Cup game results are locked to preserve match advancement and bracket history");
+            if (outcome == null || outcome == Outcome.UNFINISHED) throw new IllegalArgumentException("Choose a final result");
+            Pairing p = pairings.get(index);
+            if (!p.isComplete() || p.replayPending) throw new IllegalStateException("An unfinished or queued-replay game cannot have its result corrected");
+            p.outcome = outcome;
+            p.pgn = replacePgnResult(p.pgn, outcome);
+            p.anomalyReviewed = true;
+        }
         save();
     }
 
@@ -2300,10 +2341,12 @@ public final class TournamentManager {
     public synchronized boolean ratingEnabled() { return ratingEnabled; }
     public synchronized boolean ratingShowDecimals() { return ratingShowDecimals; }
     public synchronized double ratingKFactor() { return ratingKFactor; }
-    public synchronized void setRatingShowDecimals(boolean show) throws IOException, JSONException {
-        if (!ratingEnabled) throw new IllegalStateException("Elo rating is disabled for this tournament");
-        if (ratingShowDecimals == show) return;
-        ratingShowDecimals = show;
+    public void setRatingShowDecimals(boolean show) throws IOException, JSONException {
+        synchronized (this) {
+            if (!ratingEnabled) throw new IllegalStateException("Elo rating is disabled for this tournament");
+            if (ratingShowDecimals == show) return;
+            ratingShowDecimals = show;
+        }
         save();
     }
     public synchronized Map<String, Double> initialRatings() {
@@ -2374,74 +2417,86 @@ public final class TournamentManager {
 
     public synchronized String externalSaveError() { return externalSaveError; }
 
-    public synchronized void save() throws IOException, JSONException {
-        JSONObject root = new JSONObject(); root.put("title", title); root.put("format", format.name()); root.put("gamesPerPair", gamesPerPair);
-        root.put("baseTimeMs", baseTimeMs); root.put("incrementMs", incrementMs);
-        root.put("timeMode", timeMode.name()); root.put("limitValue", limitValue);
-        // Omit all rating metadata when disabled. Legacy/current tournaments therefore
-        // retain their old schema and load as unrated without a rating migration.
-        if (ratingEnabled) {
-            root.put("ratingEnabled", true); root.put("ratingShowDecimals", ratingShowDecimals);
-            root.put("ratingKFactor", ratingKFactor); root.put("nextRatingSequence", nextRatingSequence);
-            JSONArray initialRatingArray = new JSONArray();
-            for (Engine engine : engines) {
-                JSONObject rating = new JSONObject(); rating.put("engineId", engine.id);
-                rating.put("rating", initialRatings.get(engine.id)); initialRatingArray.put(rating);
+    public void save() throws IOException, JSONException {
+        final JSONObject root = new JSONObject();
+        final long revision;
+        synchronized (this) {
+            root.put("title", title); root.put("format", format.name()); root.put("gamesPerPair", gamesPerPair);
+            root.put("baseTimeMs", baseTimeMs); root.put("incrementMs", incrementMs);
+            root.put("timeMode", timeMode.name()); root.put("limitValue", limitValue);
+            // Omit all rating metadata when disabled. Legacy/current tournaments therefore
+            // retain their old schema and load as unrated without a rating migration.
+            if (ratingEnabled) {
+                root.put("ratingEnabled", true); root.put("ratingShowDecimals", ratingShowDecimals);
+                root.put("ratingKFactor", ratingKFactor); root.put("nextRatingSequence", nextRatingSequence);
+                JSONArray initialRatingArray = new JSONArray();
+                for (Engine engine : engines) {
+                    JSONObject rating = new JSONObject(); rating.put("engineId", engine.id);
+                    rating.put("rating", initialRatings.get(engine.id)); initialRatingArray.put(rating);
+                }
+                root.put("initialRatings", initialRatingArray);
             }
-            root.put("initialRatings", initialRatingArray);
+            root.put("openingPgn", openingPgn); root.put("openingPgnFileName", openingPgnFileName); root.put("openingBinPath", openingBinPath); root.put("openingPlies", openingPlies); root.put("openingStartIndex", openingStartIndex); root.put("repeatOpening", repeatOpening); root.put("tournamentElapsedMs", tournamentElapsedMs);
+            root.put("startPositionMode", startPositionMode.name()); root.put("chess960Enabled", startPositionMode == StartPositionMode.CHESS960);
+            root.put("chess960StartId", chess960StartId); root.put("startingPositionSeed", startingPositionSeed); root.put("openingFen", openingFen);
+            root.put("anomalyRuleSettingsSaved", anomalyRuleSettingsSaved); root.put("anomalyRulesEnabled", anomalyRulesEnabled);
+            root.put("anomalyRuleStartFullMove", anomalyRuleStartFullMove); root.put("anomalyMaximumFullMoves", anomalyMaximumFullMoves);
+            JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); o.put("executableId", e.executableId); ea.put(o); } root.put("engines", ea);
+            JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); o.put("whiteEvalPawns", Double.isFinite(p.whiteEvalPawns) ? p.whiteEvalPawns : JSONObject.NULL); o.put("blackEvalPawns", Double.isFinite(p.blackEvalPawns) ? p.blackEvalPawns : JSONObject.NULL); o.put("anomalyReviewed", p.anomalyReviewed); o.put("replayPending", p.replayPending); o.put("openingAssigned", p.openingAssigned); o.put("openingIndex", p.openingIndex); o.put("openingName", p.openingName); o.put("openingSanLine", p.openingSanLine); o.put("pgnDate", p.pgnDate); o.put("cupMatchNumber", p.cupMatchNumber); o.put("cupPairNumber", p.cupPairNumber); o.put("cupGameInPair", p.cupGameInPair); if (ratingEnabled) o.put("ratingSequence", p.ratingSequence); o.put("whiteNameAtPlay", p.whiteNameAtPlay); o.put("blackNameAtPlay", p.blackNameAtPlay); pa.put(o); } root.put("pairings", pa);
+            if (format == Format.SWISS) {
+                root.put("swissRoundsTotal", swissRoundsTotal);
+                root.put("swissCurrentRound", swissCurrentRound);
+                root.put("swissSeedingMode", swissSeedingMode.name());
+                root.put("swissRandomSeed", swissRandomSeed);
+                JSONArray strengthOrder = new JSONArray();
+                for (String engineId : swissStrengthOrder) strengthOrder.put(engineId);
+                root.put("swissStrengthOrder", strengthOrder);
+                JSONArray byes = new JSONArray();
+                for (SwissBye bye : swissByes) {
+                    JSONObject entry = new JSONObject(); entry.put("round", bye.round); entry.put("engine", bye.engineId); byes.put(entry);
+                }
+                root.put("swissByes", byes);
+                JSONArray matches = new JSONArray();
+                for (SwissMatch match : swissMatches) {
+                    JSONObject entry = new JSONObject(); entry.put("round", match.round);
+                    entry.put("first", match.firstEngineId); entry.put("second", match.secondEngineId);
+                    entry.put("firstGame", match.firstGameIndex); entry.put("secondGame", match.secondGameIndex);
+                    matches.put(entry);
+                }
+                root.put("swissMatches", matches);
+            }
+            if (format == Format.CUP) {
+                root.put("cupSeedingMode", cupSeedingMode.name()); root.put("cupRandomSeed", cupRandomSeed);
+                root.put("cupBracketSize", cupBracketSize); root.put("cupCurrentStage", cupCurrentStage);
+                root.put("cupCheckpointPending", cupCheckpointPending); root.put("cupFinished", cupFinished);
+                root.put("cupNextMatchNumber", cupNextMatchNumber); root.put("cupNextGameNumber", cupNextGameNumber);
+                root.put("cupPgnFileBaseName", cupPgnFileBaseName);
+                JSONArray strength = new JSONArray(); for (String id : cupStrengthOrder) strength.put(id); root.put("cupStrengthOrder", strength);
+                JSONArray slots = new JSONArray(); for (String id : cupSeedSlots) { if (id == null || id.isEmpty()) slots.put(JSONObject.NULL); else slots.put(id); } root.put("cupSeedSlots", slots);
+                JSONArray matches = new JSONArray();
+                for (CupMatch match : cupMatches) {
+                    JSONObject o = new JSONObject(); o.put("stage", match.stageIndex); o.put("number", match.matchNumber);
+                    o.put("regularPairLimit", match.regularPairLimit); o.put("engineA", match.engineAId); o.put("engineB", match.engineBId);
+                    o.put("winner", match.winnerId); o.put("decided", match.decided); o.put("bye", match.bye);
+                    o.put("pairsScheduled", match.pairsScheduled); o.put("pairsCompleted", match.pairsCompleted);
+                    o.put("engineAPoints", match.engineAPoints); o.put("engineBPoints", match.engineBPoints);
+                    JSONArray games = new JSONArray(); for (Integer index : match.gameIndices) games.put(index); o.put("games", games);
+                    matches.put(o);
+                }
+                root.put("cupMatches", matches);
+            }
+            JSONArray queue = new JSONArray(); for (Integer index : playQueue) queue.put(index); root.put("playQueue", queue);
+            root.put("activePairingIndex", activePairingIndex);
+            revision = ++latestSaveRevision;
         }
-        root.put("openingPgn", openingPgn); root.put("openingPgnFileName", openingPgnFileName); root.put("openingBinPath", openingBinPath); root.put("openingPlies", openingPlies); root.put("openingStartIndex", openingStartIndex); root.put("repeatOpening", repeatOpening); root.put("tournamentElapsedMs", tournamentElapsedMs);
-        root.put("startPositionMode", startPositionMode.name()); root.put("chess960Enabled", startPositionMode == StartPositionMode.CHESS960);
-        root.put("chess960StartId", chess960StartId); root.put("startingPositionSeed", startingPositionSeed); root.put("openingFen", openingFen);
-        root.put("anomalyRuleSettingsSaved", anomalyRuleSettingsSaved); root.put("anomalyRulesEnabled", anomalyRulesEnabled);
-        root.put("anomalyRuleStartFullMove", anomalyRuleStartFullMove); root.put("anomalyMaximumFullMoves", anomalyMaximumFullMoves);
-        JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); o.put("executableId", e.executableId); ea.put(o); } root.put("engines", ea);
-        JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); o.put("whiteEvalPawns", Double.isFinite(p.whiteEvalPawns) ? p.whiteEvalPawns : JSONObject.NULL); o.put("blackEvalPawns", Double.isFinite(p.blackEvalPawns) ? p.blackEvalPawns : JSONObject.NULL); o.put("anomalyReviewed", p.anomalyReviewed); o.put("replayPending", p.replayPending); o.put("openingAssigned", p.openingAssigned); o.put("openingIndex", p.openingIndex); o.put("openingName", p.openingName); o.put("openingSanLine", p.openingSanLine); o.put("pgnDate", p.pgnDate); o.put("cupMatchNumber", p.cupMatchNumber); o.put("cupPairNumber", p.cupPairNumber); o.put("cupGameInPair", p.cupGameInPair); if (ratingEnabled) o.put("ratingSequence", p.ratingSequence); o.put("whiteNameAtPlay", p.whiteNameAtPlay); o.put("blackNameAtPlay", p.blackNameAtPlay); pa.put(o); } root.put("pairings", pa);
-        if (format == Format.SWISS) {
-            root.put("swissRoundsTotal", swissRoundsTotal);
-            root.put("swissCurrentRound", swissCurrentRound);
-            root.put("swissSeedingMode", swissSeedingMode.name());
-            root.put("swissRandomSeed", swissRandomSeed);
-            JSONArray strengthOrder = new JSONArray();
-            for (String engineId : swissStrengthOrder) strengthOrder.put(engineId);
-            root.put("swissStrengthOrder", strengthOrder);
-            JSONArray byes = new JSONArray();
-            for (SwissBye bye : swissByes) {
-                JSONObject entry = new JSONObject(); entry.put("round", bye.round); entry.put("engine", bye.engineId); byes.put(entry);
-            }
-            root.put("swissByes", byes);
-            JSONArray matches = new JSONArray();
-            for (SwissMatch match : swissMatches) {
-                JSONObject entry = new JSONObject(); entry.put("round", match.round);
-                entry.put("first", match.firstEngineId); entry.put("second", match.secondEngineId);
-                entry.put("firstGame", match.firstGameIndex); entry.put("secondGame", match.secondGameIndex);
-                matches.put(entry);
-            }
-            root.put("swissMatches", matches);
-        }
-        if (format == Format.CUP) {
-            root.put("cupSeedingMode", cupSeedingMode.name()); root.put("cupRandomSeed", cupRandomSeed);
-            root.put("cupBracketSize", cupBracketSize); root.put("cupCurrentStage", cupCurrentStage);
-            root.put("cupCheckpointPending", cupCheckpointPending); root.put("cupFinished", cupFinished);
-            root.put("cupNextMatchNumber", cupNextMatchNumber); root.put("cupNextGameNumber", cupNextGameNumber);
-            root.put("cupPgnFileBaseName", cupPgnFileBaseName);
-            JSONArray strength = new JSONArray(); for (String id : cupStrengthOrder) strength.put(id); root.put("cupStrengthOrder", strength);
-            JSONArray slots = new JSONArray(); for (String id : cupSeedSlots) { if (id == null || id.isEmpty()) slots.put(JSONObject.NULL); else slots.put(id); } root.put("cupSeedSlots", slots);
-            JSONArray matches = new JSONArray();
-            for (CupMatch match : cupMatches) {
-                JSONObject o = new JSONObject(); o.put("stage", match.stageIndex); o.put("number", match.matchNumber);
-                o.put("regularPairLimit", match.regularPairLimit); o.put("engineA", match.engineAId); o.put("engineB", match.engineBId);
-                o.put("winner", match.winnerId); o.put("decided", match.decided); o.put("bye", match.bye);
-                o.put("pairsScheduled", match.pairsScheduled); o.put("pairsCompleted", match.pairsCompleted);
-                o.put("engineAPoints", match.engineAPoints); o.put("engineBPoints", match.engineBPoints);
-                JSONArray games = new JSONArray(); for (Integer index : match.gameIndices) games.put(index); o.put("games", games);
-                matches.put(o);
-            }
-            root.put("cupMatches", matches);
-        }
-        JSONArray queue = new JSONArray(); for (Integer index : playQueue) queue.put(index); root.put("playQueue", queue);
-        root.put("activePairingIndex", activePairingIndex);
-        byte[] bytes = root.toString().getBytes(Charset.forName("UTF-8"));
+        // JSONObject serialization walks the entire schedule and every stored PGN.
+        // Keep this expensive operation outside synchronized(this) so a save for a
+        // large tournament cannot block board/clock/schedule readers on the UI thread.
+        final byte[] bytes = root.toString().getBytes(Charset.forName("UTF-8"));
+        synchronized (saveIoLock) {
+            // A newer in-memory snapshot supersedes this one. If it has not yet
+            // written, its caller will acquire saveIoLock next and persist it.
+            if (revision < latestSaveRevision) return;
         // Commit a complete, CRC-verified gzip snapshot atomically to private storage first.
         writeAtomicCompressed(new File(context.getFilesDir(), fileName), bytes);
         synchronized (TournamentManager.class) { RESERVED_TOURNAMENT_FILE_NAMES.remove(fileName); }
@@ -2468,6 +2523,7 @@ public final class TournamentManager {
             } catch (IOException | SecurityException fallbackError) {
                 externalSaveError = "Could not mirror tournament JSON to shared or app external storage: " + fallbackError.getMessage();
             }
+        }
         }
     }
 

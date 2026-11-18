@@ -79,6 +79,12 @@ public final class TournamentRunner {
     private volatile int activeWhiteId, activeBlackId;
     private long turnGeneration;
     private volatile boolean stopped, finished, paused;
+    /** A finished game is persisted on a worker while the live runner lock stays free. */
+    private volatile boolean finalizingGame;
+    private volatile boolean nextGamePending;
+    /** Prevent a Resume tap and the delayed auto-advance worker from starting the same pairing twice. */
+    private boolean startingNextGame;
+    private boolean retryStartAfterStartingGame;
     private final ArrayList<Position> positionHistory = new ArrayList<>();
     private final ArrayList<String> whiteAnalysisHistory = new ArrayList<>();
     private final ArrayList<String> blackAnalysisHistory = new ArrayList<>();
@@ -243,24 +249,39 @@ public final class TournamentRunner {
     }
 
     /** Resume the same in-memory game position using the already-loaded UCI processes. */
-    public synchronized void resume() {
-        if (stopped || finished || !paused) return;
-        paused = false;
-        if (game == null || pairing == null) {
-            startNextGame();
-            return;
+    public void resume() {
+        boolean startFreshGame;
+        synchronized (this) {
+            if (stopped || finished || !paused) return;
+            paused = false;
+            // A result writer owns the completed PGN until it commits. It will
+            // schedule the next game, unless a later pause/stop intervenes.
+            if (finalizingGame) return;
+            // The delayed-advance worker may already be in the process of creating
+            // the next game. Let that one startup finish; retry only if it exits
+            // without having produced a live game.
+            if (startingNextGame) {
+                retryStartAfterStartingGame = true;
+                return;
+            }
+            startFreshGame = nextGamePending || game == null || pairing == null;
+            if (startFreshGame) nextGamePending = false;
+            if (!startFreshGame) {
+                // The engines were deliberately not unloaded on pause. Re-queue their
+                // configured engine IDs and continue from the exact same Game position.
+                activeWhiteId = ++whiteSearchId;
+                activeBlackId = ++blackSearchId;
+                whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.executableId);
+                blackPlayer.queueStartEngine(activeBlackId, blackEngine.executableId);
+                notifyPosition();
+                requestMove(game.currPos().whiteMove);
+            }
         }
-        // The engines were deliberately not unloaded on pause. Re-queue their configured
-        // engine IDs (a no-op when the correct process is already loaded) and continue from
-        // the exact same Game position.
-        activeWhiteId = ++whiteSearchId;
-        activeBlackId = ++blackSearchId;
-        whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.executableId);
-        blackPlayer.queueStartEngine(activeBlackId, blackEngine.executableId);
-        // This is a continuation of the same in-memory game. Do not emit
-        // onGameStarted here: the UI treats that callback as a new-game reset.
-        notifyPosition();
-        requestMove(game.currPos().whiteMove);
+        if (startFreshGame) {
+            Thread starter = new Thread(this::startNextGame, "Tournament-Resume-Starter");
+            starter.setDaemon(true);
+            starter.start();
+        }
     }
 
     public synchronized boolean isPaused() { return paused; }
@@ -287,6 +308,14 @@ public final class TournamentRunner {
         (whiteSide ? whitePlayer : blackPlayer).setEngineUCIOptions(options);
     }
     public boolean isStopped() { return stopped; }
+
+    /** Wait on a worker thread until a completed game and its PGN callback have persisted. */
+    public void awaitPendingGameFinalization() throws InterruptedException {
+        synchronized (this) {
+            while (finalizingGame) wait();
+        }
+    }
+
     private boolean usesClock() {
         TournamentManager.TimeMode mode = tournament.timeMode();
         return mode == TournamentManager.TimeMode.CLOCK || mode == TournamentManager.TimeMode.MOVE_PERIOD;
@@ -306,6 +335,7 @@ public final class TournamentRunner {
     public synchronized void stop() {
         stopped = true;
         paused = false;
+        nextGamePending = false;
         turnGeneration++;
         if (clock != null) clock.pause();
         whitePlayer.shutdownEngine();
@@ -395,7 +425,29 @@ public final class TournamentRunner {
     }
 
     private void startNextGame() {
-        if (stopped || finished || paused) return;
+        synchronized (this) {
+            if (stopped || finished || paused || finalizingGame || startingNextGame) return;
+            startingNextGame = true;
+        }
+        boolean retry = false;
+        try {
+            startNextGameInternal();
+        } finally {
+            synchronized (this) {
+                startingNextGame = false;
+                if (retryStartAfterStartingGame) {
+                    retryStartAfterStartingGame = false;
+                    retry = !stopped && !finished && !paused && !finalizingGame &&
+                            (game == null || pairing == null || game.getGameState() != Game.GameState.ALIVE);
+                }
+                notifyAll();
+            }
+            if (retry) startNextGame();
+        }
+    }
+
+    private void startNextGameInternal() {
+        if (stopped || finished || paused || finalizingGame) return;
         pairing = tournament.current();
         latestWhiteEvalPawns = Double.NaN;
         latestBlackEvalPawns = Double.NaN;
@@ -582,7 +634,7 @@ public final class TournamentRunner {
     }
 
     private synchronized void requestMove(boolean whiteToMove) {
-        if (stopped || finished || paused || game == null || game.getGameState() != Game.GameState.ALIVE) return;
+        if (stopped || finished || paused || finalizingGame || game == null || game.getGameState() != Game.GameState.ALIVE) return;
         if (usesClock() && clock.isExpired()) {
             game.markTimeout(whiteToMove);
             finishCurrentGame(resultForState(game.getGameState()));
@@ -641,7 +693,7 @@ public final class TournamentRunner {
         Thread watchdog = new Thread(() -> {
             while (true) {
                 synchronized (TournamentRunner.this) {
-                    if (stopped || finished || paused || turnToken != turnGeneration || game == null ||
+                    if (stopped || finished || paused || finalizingGame || turnToken != turnGeneration || game == null ||
                             game.getGameState() != Game.GameState.ALIVE || game.currPos().whiteMove != whiteToMove)
                         return;
                     if (usesClock() && clock.isExpired()) {
@@ -680,7 +732,7 @@ public final class TournamentRunner {
 
     private synchronized void onSearchResult(boolean whiteEngineSide, int id, String cmd,
                                              boolean acceptedAtArrival, String analysisAtBestMove) {
-        if (stopped || finished || paused || game == null) return;
+        if (stopped || finished || paused || finalizingGame || game == null) return;
         if (whiteEngineSide ? id != activeWhiteId : id != activeBlackId) return;
         boolean whiteToMove = game.currPos().whiteMove;
         if (whiteToMove != whiteEngineSide) return;
@@ -874,43 +926,95 @@ public final class TournamentRunner {
     }
 
     private synchronized void finishCurrentGame(TournamentManager.Outcome outcome, String explicitReason) {
-        if (stopped || finished || pairing == null || outcome == TournamentManager.Outcome.UNFINISHED) return;
+        if (stopped || finished || pairing == null || finalizingGame || outcome == TournamentManager.Outcome.UNFINISHED) return;
+        finalizingGame = true;
         turnGeneration++;
-        boolean wasHumanAdjudication = humanAdjudication;
-        String stateReason = terminationForState(game.getGameState());
-        String resultReason = explicitReason != null && !explicitReason.trim().isEmpty() ? explicitReason :
+        if (clock != null) clock.pause();
+        whitePlayer.stopSearch();
+        blackPlayer.stopSearch();
+
+        final boolean wasHumanAdjudication = humanAdjudication;
+        final String stateReason = terminationForState(game.getGameState());
+        final String resultReason = explicitReason != null && !explicitReason.trim().isEmpty() ? explicitReason :
                 (wasHumanAdjudication ? "automatic evaluation adjudication" : stateReason);
         game.tree.setTournamentTermination(wasHumanAdjudication ? "adjudication" : resultReason);
         humanAdjudication = false;
-        String pgn = game.tree.toPGN(pgnOptions);
-        try {
-            tournament.recordResult(pairing.index, outcome, pgn, latestWhiteEvalPawns, latestBlackEvalPawns);
-        } catch (IOException | JSONException e) {
-            listener.onError("Could not save tournament result", e);
-            stop();
-            return;
-        } catch (RuntimeException e) {
-            if (tournament.format() != TournamentManager.Format.SWISS && tournament.format() != TournamentManager.Format.CUP) throw e;
-            listener.onError(tournament.format() == TournamentManager.Format.CUP
-                    ? "Could not update the next Cup match" : "Could not update the next Swiss round", e);
-            stop();
-            return;
-        }
-        TournamentManager.Pairing completed = pairing;
-        pairing = null;
-        listener.onGameFinished(completed, outcome, pgn, resultReason);
-        // Do not sleep on the caller: manual adjudication can originate on the UI thread.
-        // A separate continuation lets Android render the result for at least 500 ms.
-        Thread advance = new Thread(() -> {
-            try { Thread.sleep(500); }
-            catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-            synchronized (TournamentRunner.this) {
-                if (stopped || finished || paused) return;
+
+        // Snapshot stable references and scalar metadata. The game is frozen while
+        // finalizingGame is true, so PGN serialization can safely run without holding
+        // this monitor and without blocking clock/UI readers.
+        final GameTree completedTree = game.tree;
+        final TournamentManager.Pairing completedPairing = pairing;
+        final int completedIndex = pairing.index;
+        final double completedWhiteEval = latestWhiteEvalPawns;
+        final double completedBlackEval = latestBlackEvalPawns;
+
+        Thread finalizer = new Thread(() -> {
+            final String pgn;
+            try {
+                long pgnStartNs = System.nanoTime();
+                String completedPgn = completedTree.toPGN(pgnOptions);
+                long pgnBuildMs = (System.nanoTime() - pgnStartNs) / 1_000_000L;
+                long saveStartNs = System.nanoTime();
+                tournament.recordResult(completedIndex, outcome, completedPgn, completedWhiteEval, completedBlackEval);
+                long resultSaveMs = (System.nanoTime() - saveStartNs) / 1_000_000L;
+                if (pgnBuildMs >= 100L || resultSaveMs >= 100L)
+                    Log.w("CET-TournamentSave", "Game " + (completedIndex + 1) +
+                            " finalization pgnBuild=" + pgnBuildMs + "ms resultSave=" + resultSaveMs + "ms");
+                pgn = completedPgn;
+            } catch (IOException | JSONException | RuntimeException error) {
+                stop();
+                synchronized (TournamentRunner.this) {
+                    finalizingGame = false;
+                    TournamentRunner.this.notifyAll();
+                }
+                listener.onError("Could not save tournament result", error);
+                return;
             }
-            startNextGame();
-        }, "Tournament-Next-Game");
-        advance.setDaemon(true);
-        advance.start();
+
+            synchronized (TournamentRunner.this) {
+                if (pairing == completedPairing) pairing = null;
+            }
+            // Listener implementations marshal display work to the UI. Automatic PGN
+            // export now also runs on this worker instead of the Android main thread.
+            long callbackStartNs = System.nanoTime();
+            try {
+                listener.onGameFinished(completedPairing, outcome, pgn, resultReason);
+            } catch (RuntimeException callbackError) {
+                stop();
+                listener.onError("Tournament result was saved, but the result display callback failed", callbackError);
+            } finally {
+                long callbackMs = (System.nanoTime() - callbackStartNs) / 1_000_000L;
+                if (callbackMs >= 100L)
+                    Log.w("CET-TournamentSave", "Game " + (completedIndex + 1) +
+                            " result callback/PGN export=" + callbackMs + "ms");
+                synchronized (TournamentRunner.this) {
+                    finalizingGame = false;
+                    nextGamePending = true;
+                    TournamentRunner.this.notifyAll();
+                }
+            }
+
+            // Keep the result visible for at least 500 ms. A pause or stop during the
+            // write prevents auto-advancing; resume() will start the next pairing.
+            Thread advance = new Thread(() -> {
+                try { Thread.sleep(500); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+                startPendingNextGame();
+            }, "Tournament-Next-Game");
+            advance.setDaemon(true);
+            advance.start();
+        }, "Tournament-Game-Finalizer");
+        finalizer.setDaemon(true);
+        finalizer.start();
+    }
+
+    private void startPendingNextGame() {
+        synchronized (this) {
+            if (stopped || finished || paused || finalizingGame || !nextGamePending) return;
+            nextGamePending = false;
+        }
+        startNextGame();
     }
 
     private final class EngineListener implements SearchListener {
@@ -961,7 +1065,7 @@ public final class TournamentRunner {
         }
 
         private boolean isCurrentSearch(int id) {
-            return !stopped && !finished && (white ? id == activeWhiteId : id == activeBlackId);
+            return !stopped && !finished && !finalizingGame && (white ? id == activeWhiteId : id == activeBlackId);
         }
         @Override public void notifyDepth(int id, int depth) {
             if (!isCurrentSearch(id)) return;
