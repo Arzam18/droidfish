@@ -48,6 +48,8 @@ public class PGNOptions {
         public boolean clockInfo;
         public boolean pgnPromotions;
         public boolean moveNrAfterNag;
+        /** Print n... after comments before Black's move. Default preserves legacy export. */
+        public boolean blackMoveNrAfterComment = true;
         public int pieceType;
     }
 

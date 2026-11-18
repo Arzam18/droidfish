@@ -27,6 +27,7 @@ import android.os.Environment;
 import android.view.View;
 import android.view.GestureDetector;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -72,6 +73,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Simple native setup and live-results screen for CET-style engine tournaments. */
 public final class TournamentActivity extends Activity {
@@ -151,8 +156,25 @@ public final class TournamentActivity extends Activity {
     private boolean loadingTournamentSetup;
     private static final int REQUEST_ENGINE_ICON_FOLDER = 7318;
     private ListView mirrorScheduleList;
+    private ScrollView mirrorMovesListScroll;
+    private int mirrorMovesListScrollY;
+    private boolean mirrorMovesListWasAtBottom = true;
+    private boolean mirrorMovesListHasSavedPosition;
+    private int mirrorScheduleFirstVisiblePosition;
+    private int mirrorScheduleFirstVisibleTop;
+    private boolean mirrorScheduleHasSavedScroll;
     private final ArrayList<String> mirrorScheduleRows = new ArrayList<>();
     private final ArrayList<Integer> mirrorSchedulePairingIndexes = new ArrayList<>();
+    private TournamentManager scheduleMoveCountCacheOwner;
+    private final HashMap<Integer, ScheduleMoveCountCacheEntry> scheduleMoveCountCache = new HashMap<>();
+    private static final class ScheduleMoveCountCacheEntry {
+        final String pgnReference;
+        final int fullMoves;
+        ScheduleMoveCountCacheEntry(String pgnReference, int fullMoves) {
+            this.pgnReference = pgnReference;
+            this.fullMoves = fullMoves;
+        }
+    }
     private final Handler mirrorScheduleClickHandler = new Handler(Looper.getMainLooper());
     private Runnable mirrorSchedulePendingClick;
     private int mirrorSchedulePendingPosition = -1;
@@ -181,6 +203,7 @@ public final class TournamentActivity extends Activity {
     private String mirrorTcLabel = "—";
     private final ArrayList<Position> mirrorPositions = new ArrayList<>();
     private final ArrayList<String> mirrorLiveSanMoves = new ArrayList<>();
+    private final ArrayList<String> mirrorLiveComments = new ArrayList<>();
     private final ArrayList<String> mirrorLiveAnalysisByPly = new ArrayList<>();
     private boolean mirrorLiveHistoryInitialized;
     private int mirrorPly = -1;
@@ -261,6 +284,16 @@ public final class TournamentActivity extends Activity {
     private long tournamentElapsedAccumulatedMs = 0L;
     private long tournamentElapsedStartNs = 0L;
     private long lastTournamentElapsedSaveNs = 0L;
+    private static final AtomicReference<TournamentManager> PENDING_ELAPSED_SAVE = new AtomicReference<>();
+    private static final AtomicBoolean ELAPSED_SAVE_WORKER_ACTIVE = new AtomicBoolean(false);
+    private static final ExecutorService TOURNAMENT_SAVE_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread thread = new Thread(() -> {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+            r.run();
+        }, "DroidFish-Tournament-Save");
+        thread.setDaemon(true);
+        return thread;
+    });
     private long eventLastResumeNs = 0L;
     private boolean eventTimerHomeTriggered = false;
     private boolean heatCycleEnabled = false;
@@ -271,7 +304,24 @@ public final class TournamentActivity extends Activity {
     private long heatPauseDurationMs = 5 * 60_000L;
     private long heatPlayDurationMs = 2 * 60_000L;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
-    private final Runnable clockRefresh = new Runnable() { public void run() { refreshLiveClocks(); tickAutomaticTimers(); uiHandler.postDelayed(this, 250); } };
+    private final AtomicReference<String> pendingWhiteEngineAnalysisUi = new AtomicReference<>();
+    private final AtomicReference<String> pendingBlackEngineAnalysisUi = new AtomicReference<>();
+    private final AtomicBoolean engineAnalysisUiUpdatePosted = new AtomicBoolean(false);
+    private long lastClockRefreshNs;
+    private final Runnable clockRefresh = new Runnable() {
+        @Override public void run() {
+            long now = System.nanoTime();
+            if (lastClockRefreshNs != 0L) {
+                long gapMs = (now - lastClockRefreshNs) / 1_000_000L;
+                if (gapMs >= 750L)
+                    android.util.Log.w("CET-UiLag", "Clock refresh delayed by " + gapMs + " ms");
+            }
+            lastClockRefreshNs = now;
+            refreshLiveClocks();
+            tickAutomaticTimers();
+            uiHandler.postDelayed(this, 250);
+        }
+    };
 
     private static final class EngineChoice {
         final String id, name;
@@ -696,19 +746,21 @@ public final class TournamentActivity extends Activity {
         menu.setOnClickListener(v -> {
             if (savedTournamentReviewMode) {
                 new AlertDialog.Builder(TournamentActivity.this).setTitle("Saved tournament review")
-                        .setItems(new String[]{"Tournament list", "See Rating", "Flip Board"}, (dialog, which) -> {
+                        .setItems(new String[]{"Tournament list", "See Rating", "Move animation speed", "Flip Board"}, (dialog, which) -> {
                             if (which == 0) chooseSavedTournament();
                             else if (which == 1) showRatingsDialog();
+                            else if (which == 2) showTournamentMoveAnimationDialog();
                             else toggleTournamentFlip();
                         }).show();
             } else {
                 new AlertDialog.Builder(TournamentActivity.this).setTitle("Tournament menu")
-                        .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Schedule", "See Rating"}, (dialog, which) -> {
+                        .setItems(new String[]{"Adjudicate", "Setup", "Flip Board", "Schedule", "See Rating", "Move animation speed"}, (dialog, which) -> {
                             if (which == 0) showAdjudicationDialog();
                             else if (which == 1) setContentView(setupView);
                             else if (which == 2) toggleTournamentFlip();
                             else if (which == 3) showScheduleDialog();
-                            else showRatingsDialog();
+                            else if (which == 4) showRatingsDialog();
+                            else showTournamentMoveAnimationDialog();
                         }).show();
             }
         });
@@ -970,18 +1022,20 @@ public final class TournamentActivity extends Activity {
         menu.setOnClickListener(v -> {
             if (savedTournamentReviewMode) {
                 new AlertDialog.Builder(TournamentActivity.this).setTitle("Saved tournament review")
-                        .setItems(new String[]{"Tournament list", "See Rating", "Flip Board"}, (dialog, which) -> {
+                        .setItems(new String[]{"Tournament list", "See Rating", "Move animation speed", "Flip Board"}, (dialog, which) -> {
                             if (which == 0) chooseSavedTournament();
                             else if (which == 1) showRatingsDialog();
+                            else if (which == 2) showTournamentMoveAnimationDialog();
                             else toggleTournamentFlip();
                         }).show();
             } else {
                 new AlertDialog.Builder(TournamentActivity.this).setTitle("Tournament menu")
-                        .setItems(new String[]{"Adjudicate", "Temporary variation", "Setup", "Flip Board"}, (dialog, which) -> {
+                        .setItems(new String[]{"Adjudicate", "Temporary variation", "Setup", "Flip Board", "Move animation speed"}, (dialog, which) -> {
                             if (which == 0) showAdjudicationDialog();
                             else if (which == 1) toggleMirrorBranchMode();
                             else if (which == 2) setContentView(setupView);
-                            else toggleTournamentFlip();
+                            else if (which == 3) toggleTournamentFlip();
+                            else showTournamentMoveAnimationDialog();
                         }).show();
             }
         });
@@ -1285,7 +1339,7 @@ public final class TournamentActivity extends Activity {
         return scroll;
     }
 
-    /** Long-press the mirror board to hide every control and show only the chessboard. */
+    /** Long-press the mirror board to focus on the board while keeping both player clocks and names visible. */
     private void toggleMirrorBoardOnlyMode() {
         if (mirrorPage == null || mirrorBoardFrame == null || mirrorScroll == null) return;
         mirrorBoardOnlyMode = !mirrorBoardOnlyMode;
@@ -1295,7 +1349,7 @@ public final class TournamentActivity extends Activity {
             mirrorPage.setGravity(android.view.Gravity.CENTER);
             for (int i = 0; i < mirrorPage.getChildCount(); i++) {
                 View child = mirrorPage.getChildAt(i);
-                child.setVisibility(child == mirrorBoardFrame ? View.VISIBLE : View.GONE);
+                child.setVisibility((child == mirrorBoardFrame || child == mirrorBlackRow || child == mirrorWhiteRow) ? View.VISIBLE : View.GONE);
             }
             if (mirrorControlBar != null) mirrorControlBar.setVisibility(View.GONE);
         } else {
@@ -1555,6 +1609,8 @@ public final class TournamentActivity extends Activity {
                         moveAtPly(mirrorPositions, Math.max(0, mirrorPositions.size() - 1)));
                 tournamentBoard.setMoveHints(null);
                 tournamentBoard.setSelection(-1);
+                tournamentBoard.requestLayout();
+                tournamentBoard.invalidate();
             }
             setContentView(playView);
         } else {
@@ -1607,19 +1663,45 @@ public final class TournamentActivity extends Activity {
      * but the runner's position callbacks begin at the opening position. Rebuild
      * the mirror-only history once when those two counts do not line up.
      */
-    private void ensureMirrorHistoryMatchesLivePgn(Position livePosition, boolean forceRebuild) {
+    private void ensureMirrorHistoryMatchesLivePgn(Position livePosition, boolean forceRebuild,
+                                                   Move lastMove, Position previousPosition) {
+        // Normal engine turns are incremental: the runner already supplies the exact
+        // move and prior position. Avoid reparsing the complete PGN on every ply. This
+        // matters on single-core phones, where repeated PGN parsing competed with search.
+        if (!forceRebuild && mirrorLiveHistoryInitialized && !mirrorPositions.isEmpty()) {
+            Position tail = mirrorPositions.get(mirrorPositions.size() - 1);
+            if (samePosition(tail, livePosition)) return;
+            if (lastMove != null && previousPosition != null && samePosition(tail, previousPosition)) {
+                try {
+                    Position expected = new Position(tail);
+                    expected.makeMove(lastMove, new org.petero.droidfish.gamelogic.UndoInfo());
+                    if (samePosition(expected, livePosition)) {
+                        mirrorPositions.add(new Position(livePosition));
+                        while (mirrorLiveComments.size() < mirrorLiveSanMoves.size()) mirrorLiveComments.add("");
+                        return;
+                    }
+                } catch (RuntimeException ignored) { }
+            }
+            // Never rebuild from currentPgnMoves here: incremental runner callbacks
+            // deliberately omit the full PGN, so that field may be an older snapshot.
+            // Retain the last consistent history and let the next explicit full snapshot
+            // (resume/review/export) resynchronize it rather than silently rolling back.
+            android.util.Log.w("TournamentHistory", "Ignored out-of-sequence live move; kept last consistent history");
+            return;
+        }
+
+        // Rebuild only at game start, after a full PGN refresh (openings/resume), or
+        // when an incremental move cannot be reconciled with the stored history.
         ArrayList<String> parsedComments = new ArrayList<>();
         ArrayList<String> parsedMoves = parseMirrorMoves(currentPgnMoves, parsedComments);
         if (parsedMoves.isEmpty()) {
             mirrorPositions.clear();
             mirrorPositions.add(new Position(livePosition == null ? standardStartPosition() : livePosition));
+            mirrorLiveSanMoves.clear();
+            mirrorLiveComments.clear();
             return;
         }
-        if (!forceRebuild && mirrorPositions.size() == parsedMoves.size() + 1 && !mirrorPositions.isEmpty() &&
-                samePosition(mirrorPositions.get(mirrorPositions.size() - 1), livePosition)) return;
 
-        // The runner now sends a complete live PGN (headers + movetext), so use
-        // DroidFish's parser to retain the exact ply sequence and comments.
         try {
             GameTree history = new GameTree(null);
             PGNOptions options = new PGNOptions();
@@ -1641,13 +1723,15 @@ public final class TournamentActivity extends Activity {
                     if (livePosition != null && !samePosition(rebuilt.get(rebuilt.size() - 1), livePosition))
                         rebuilt.set(rebuilt.size() - 1, new Position(livePosition));
                     mirrorPositions.clear(); mirrorPositions.addAll(rebuilt);
+                    mirrorLiveSanMoves.clear(); mirrorLiveSanMoves.addAll(parsedMoves);
+                    mirrorLiveComments.clear(); mirrorLiveComments.addAll(parsedComments);
                     return;
                 }
             }
         } catch (Exception ignored) { }
 
-        // Fallback for a temporarily incomplete PGN parser snapshot. SAN is
-        // replayed one ply at a time from the tournament's standard start position.
+        // Fallback for a temporarily incomplete PGN parser snapshot. SAN is replayed
+        // from the standard start only as a recovery path, never on every move.
         try {
             ArrayList<Position> rebuilt = new ArrayList<>();
             Position cursor = standardStartPosition();
@@ -1661,6 +1745,8 @@ public final class TournamentActivity extends Activity {
             if (livePosition != null && !samePosition(rebuilt.get(rebuilt.size() - 1), livePosition))
                 rebuilt.set(rebuilt.size() - 1, new Position(livePosition));
             mirrorPositions.clear(); mirrorPositions.addAll(rebuilt);
+            mirrorLiveSanMoves.clear(); mirrorLiveSanMoves.addAll(parsedMoves);
+            mirrorLiveComments.clear(); mirrorLiveComments.addAll(parsedComments);
         } catch (Exception ignored) { }
     }
 
@@ -1743,6 +1829,21 @@ public final class TournamentActivity extends Activity {
     private void renderMirrorSection() {
         if (mirrorSectionHost == null) return;
         LinearLayout parentHost = mirrorSectionHost;
+        // Capture scroll state before detaching a section that is about to be rebuilt.
+        // This prevents a live move/result update from flashing the list back to row 1.
+        if (mirrorSelectedTab == 0 && mirrorMovesListScroll != null && mirrorMovesListScroll.getParent() != null) {
+            mirrorMovesListScrollY = mirrorMovesListScroll.getScrollY();
+            View child = mirrorMovesListScroll.getChildAt(0);
+            int contentHeight = child == null ? 0 : child.getHeight();
+            int viewportHeight = mirrorMovesListScroll.getHeight();
+            mirrorMovesListWasAtBottom = contentHeight - (mirrorMovesListScrollY + viewportHeight) <= dp(32);
+            mirrorMovesListHasSavedPosition = true;
+        } else if (mirrorSelectedTab == 2 && mirrorScheduleList != null && mirrorScheduleList.getParent() != null) {
+            mirrorScheduleFirstVisiblePosition = mirrorScheduleList.getFirstVisiblePosition();
+            View firstChild = mirrorScheduleList.getChildAt(0);
+            mirrorScheduleFirstVisibleTop = firstChild == null ? 0 : firstChild.getTop();
+            mirrorScheduleHasSavedScroll = true;
+        }
         boolean graphSelected = mirrorSelectedTab == 1 && mirrorStandingsSubTab == 1;
         LinearLayout.LayoutParams hostParams = (LinearLayout.LayoutParams) parentHost.getLayoutParams();
         int normalPanelHeight = Math.max(dp(260), Math.min(dp(520), (int)(getResources().getDisplayMetrics().heightPixels * 0.48f)));
@@ -1817,7 +1918,7 @@ public final class TournamentActivity extends Activity {
         // sizing the controls or rendering the move list. This keeps book moves
         // and engine moves on the same ply index even after a delayed callback.
         if (!mirrorReplayMode && latestPosition != null)
-            ensureMirrorHistoryMatchesLivePgn(latestPosition, false);
+            ensureMirrorHistoryMatchesLivePgn(latestPosition, false, null, null);
         int displayPly = mirrorDisplayedPly();
         int displayTotal = Math.max(0, currentMirrorPositions().size() - 1);
         mirrorStatusText = text(mirrorReplayMode ?
@@ -1864,6 +1965,7 @@ public final class TournamentActivity extends Activity {
 
     private void renderMirrorMoveList() {
         ScrollView movesScroll = new MirrorSectionScrollView(this);
+        mirrorMovesListScroll = movesScroll;
         movesScroll.setFillViewport(false);
         LinearLayout moves = new LinearLayout(this);
         moves.setOrientation(LinearLayout.VERTICAL);
@@ -1871,6 +1973,10 @@ public final class TournamentActivity extends Activity {
         ArrayList<String> comments;
         comments = new ArrayList<>();
         sans = currentMirrorSanMoves(comments);
+        // Snapshot the position history once. currentMirrorPositions() returns a
+        // defensive copy, so calling it inside each cell would make this renderer
+        // quadratic in move count on long games.
+        ArrayList<Position> displayPositions = currentMirrorPositions();
         // Navigation is driven by the same rebuilt PGN position history as this
         // list; never silently truncate a complete move list to callback count.
         int maxMoves = sans.size();
@@ -1891,11 +1997,18 @@ public final class TournamentActivity extends Activity {
                     boolean selectedMove = ply == mirrorDisplayedPly();
                     cell.setBackgroundColor(selectedMove ? 0xFF465A68 : (((start / 2) & 1) == 0 ? 0xFF333333 : 0xFF2D2D2D));
                     if (ply <= maxMoves) {
-                        Position beforeMove = ply - 1 < currentMirrorPositions().size()
-                                ? currentMirrorPositions().get(ply - 1) : null;
+                        Position beforeMove = ply - 1 < displayPositions.size()
+                                ? displayPositions.get(ply - 1) : null;
                         int moveNumber = beforeMove == null ? (ply + 1) / 2 : beforeMove.fullMoveCounter;
                         boolean whiteMove = beforeMove == null ? ((ply & 1) == 1) : beforeMove.whiteMove;
-                        String prefix = moveNumber + (whiteMove ? "." : "...");
+                        boolean showMoveNumber = true;
+                        if (!whiteMove && ply > 1 && ply - 2 < displayPositions.size()) {
+                            Position previousMoveStart = displayPositions.get(ply - 2);
+                            // Standard PGN omits n... when Black immediately follows White's n. move.
+                            showMoveNumber = !(previousMoveStart.whiteMove &&
+                                    previousMoveStart.fullMoveCounter == moveNumber);
+                        }
+                        String prefix = !showMoveNumber ? "" : (moveNumber + (whiteMove ? "." : "..."));
                         String comment = ply - 1 < comments.size() ? comments.get(ply - 1) : "";
                         String displayComment = mirrorMoveCommentDisplay(comment);
                         android.text.SpannableString styled = new android.text.SpannableString(prefix + sans.get(ply - 1) +
@@ -1917,15 +2030,23 @@ public final class TournamentActivity extends Activity {
         }
         movesScroll.addView(moves, new ScrollView.LayoutParams(-1, -2));
         mirrorSectionHost.addView(movesScroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        if ((!mirrorReplayMode && mirrorPly < 0) || mirrorReplayLiveSnapshot) {
-            movesScroll.post(() -> movesScroll.fullScroll(View.FOCUS_DOWN));
-        } else if (mirrorDisplayedPly() > 0) {
-            final int selectedRow = Math.max(0, (mirrorDisplayedPly() - 1) / 2);
-            movesScroll.post(() -> {
-                View row = moves.getChildAt(selectedRow);
-                if (row != null) movesScroll.smoothScrollTo(0, row.getTop());
-            });
-        }
+        final boolean followLive = (!mirrorReplayMode && mirrorPly < 0) || mirrorReplayLiveSnapshot;
+        final boolean restoreBottom = !mirrorMovesListHasSavedPosition || mirrorMovesListWasAtBottom;
+        final int savedY = mirrorMovesListScrollY;
+        movesScroll.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                if (movesScroll.getViewTreeObserver().isAlive())
+                    movesScroll.getViewTreeObserver().removeOnPreDrawListener(this);
+                View content = movesScroll.getChildAt(0);
+                int maxY = content == null ? 0 : Math.max(0, content.getHeight() - movesScroll.getHeight());
+                int targetY = followLive && restoreBottom ? maxY : Math.max(0, Math.min(savedY, maxY));
+                movesScroll.scrollTo(0, targetY);
+                mirrorMovesListScrollY = targetY;
+                mirrorMovesListWasAtBottom = maxY - targetY <= dp(32);
+                mirrorMovesListHasSavedPosition = true;
+                return true;
+            }
+        });
     }
 
     private void renderMirrorAnalysisSection() {
@@ -2080,8 +2201,9 @@ public final class TournamentActivity extends Activity {
                 final int targetPly = mirrorAnalysisTargetPly;
                 if (infos == null || infos.isEmpty() || infos.get(0) == null) return;
                 PvInfo pv = infos.get(0);
-                String eval = pv.isMate ? ((pv.score >= 0 ? "+M" : "-M") + Math.abs(pv.score)) :
-                        String.format(java.util.Locale.US, "%+.2f", pv.score / 100.0);
+                int whitePerspectiveScore = (pos != null && pos.whiteMove) ? pv.score : -pv.score;
+                String eval = pv.isMate ? ((whitePerspectiveScore >= 0 ? "+M" : "-M") + Math.abs(whitePerspectiveScore)) :
+                        String.format(java.util.Locale.US, "%+.2f", whitePerspectiveScore / 100.0);
                 StringBuilder line = new StringBuilder();
                 ArrayList<Move> hints = new ArrayList<>();
                 Position cursor = new Position(pos);
@@ -2481,8 +2603,7 @@ public final class TournamentActivity extends Activity {
                 if (mirrorReplayMode) {
                     sourceComments = new ArrayList<>(mirrorReplayComments);
                 } else {
-                    sourceComments = new ArrayList<>();
-                    parseMirrorMoves(currentPgnMoves, sourceComments);
+                    sourceComments = new ArrayList<>(mirrorLiveComments);
                 }
                 for (int i = 0; i < mirrorBranchBaseMoves.size(); i++) {
                     String comment = i < sourceComments.size() ? sourceComments.get(i) : "";
@@ -2501,6 +2622,19 @@ public final class TournamentActivity extends Activity {
             if (commentsOut != null) { commentsOut.clear(); commentsOut.addAll(mirrorReplayComments); }
             return new ArrayList<>(mirrorReplayMoves);
         }
+        if (mirrorLiveHistoryInitialized && mirrorLiveSanMoves.size() + 1 == mirrorPositions.size()) {
+            if (commentsOut != null) {
+                commentsOut.clear();
+                for (int i = 0; i < mirrorLiveSanMoves.size(); i++) {
+                    String comment = i < mirrorLiveComments.size() ? mirrorLiveComments.get(i) : "";
+                    // Live analysis snapshots are keyed by resulting-position ply.
+                    if ((comment == null || comment.trim().isEmpty()) && i + 1 < mirrorLiveAnalysisByPly.size())
+                        comment = mirrorLiveAnalysisByPly.get(i + 1);
+                    commentsOut.add(comment == null ? "" : comment);
+                }
+            }
+            return new ArrayList<>(mirrorLiveSanMoves);
+        }
         ArrayList<String> parsedComments = new ArrayList<>();
         ArrayList<String> parsed = parseMirrorMoves(currentPgnMoves, parsedComments);
         if (!parsed.isEmpty()) {
@@ -2508,8 +2642,6 @@ public final class TournamentActivity extends Activity {
                 commentsOut.clear();
                 for (int i = 0; i < parsed.size(); i++) {
                     String comment = i < parsedComments.size() ? parsedComments.get(i) : "";
-                    // Live snapshots are keyed by resulting-position ply; SAN
-                    // move index 0 therefore maps to snapshot index 1.
                     if ((comment == null || comment.trim().isEmpty()) && i + 1 < mirrorLiveAnalysisByPly.size())
                         comment = mirrorLiveAnalysisByPly.get(i + 1);
                     commentsOut.add(comment == null ? "" : comment);
@@ -3596,7 +3728,7 @@ public final class TournamentActivity extends Activity {
                     : (cup ? "Pair " + pairing.cupPairNumber + " · Game " + pairing.cupGameInPair
                     : Integer.toString(pairing.index + 1));
             String row = prefix + ". " + white + " - " + black + " (" + mirrorScheduleResultLabel(pairing) + ")" + state +
-                    "\n" + countFullMoves(pairing.pgn) + " moves";
+                    "\n" + cachedFullMoveCount(tournament, pairing) + " moves";
             addMirrorScheduleRow(row, pairing.index);
         }
         if (mirrorScheduleRows.isEmpty()) addMirrorScheduleRow("No scheduled games.", -1);
@@ -3643,7 +3775,7 @@ public final class TournamentActivity extends Activity {
                 row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
                 LinearLayout center = new LinearLayout(TournamentActivity.this); center.setOrientation(LinearLayout.VERTICAL); center.setGravity(android.view.Gravity.CENTER);
                 TextView result = text(mirrorScheduleResultLabel(pairing)); result.setTextSize(14); result.setTypeface(null, android.graphics.Typeface.BOLD);
-                TextView moves = text(countFullMoves(pairing.pgn) + " Moves"); moves.setTextSize(11); moves.setTextColor(0xFFBFCBD2);
+                TextView moves = text(cachedFullMoveCount(tournament, pairing) + " Moves"); moves.setTextSize(11); moves.setTextColor(0xFFBFCBD2);
                 center.addView(result, new LinearLayout.LayoutParams(-2, -2)); center.addView(moves, new LinearLayout.LayoutParams(-2, -2));
                 row.addView(center, new LinearLayout.LayoutParams(dp(82), -2));
                 LinearLayout right = new LinearLayout(TournamentActivity.this); right.setGravity(android.view.Gravity.CENTER_VERTICAL);
@@ -3662,17 +3794,31 @@ public final class TournamentActivity extends Activity {
             }
         };
         list.setAdapter(adapter);
-        list.post(() -> {
-            int currentPairingIndex = currentGameNumber > 0 ? currentGameNumber - 1 : -1;
-            if (currentPairingIndex >= 0) {
-                for (int rowIndex = 0; rowIndex < mirrorSchedulePairingIndexes.size(); rowIndex++) {
-                    if (mirrorSchedulePairingIndexes.get(rowIndex) == currentPairingIndex) {
-                        list.setSelection(rowIndex);
-                        return;
+        if (mirrorScheduleHasSavedScroll) {
+            final int restorePosition = mirrorScheduleFirstVisiblePosition;
+            final int restoreTop = mirrorScheduleFirstVisibleTop;
+            list.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+                @Override public boolean onPreDraw() {
+                    if (list.getViewTreeObserver().isAlive())
+                        list.getViewTreeObserver().removeOnPreDrawListener(this);
+                    list.setSelectionFromTop(Math.max(0, Math.min(restorePosition, adapter.getCount() - 1)), restoreTop);
+                    mirrorScheduleHasSavedScroll = false;
+                    return true;
+                }
+            });
+        } else {
+            list.post(() -> {
+                int currentPairingIndex = currentGameNumber > 0 ? currentGameNumber - 1 : -1;
+                if (currentPairingIndex >= 0) {
+                    for (int rowIndex = 0; rowIndex < mirrorSchedulePairingIndexes.size(); rowIndex++) {
+                        if (mirrorSchedulePairingIndexes.get(rowIndex) == currentPairingIndex) {
+                            list.setSelection(rowIndex);
+                            return;
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
         // A delayed single tap opens the selected PGN; a second tap on the same
         // row within the platform double-tap window opens adjudication instead.
         list.setOnItemClickListener((parent, view, position, id) -> {
@@ -3887,8 +4033,13 @@ public final class TournamentActivity extends Activity {
 
     /** Freeze the currently running game's move history for schedule review without pausing it. */
     private void openMirrorLiveGameSnapshot(TournamentManager.Pairing pairing) {
+        TournamentRunner liveRunner = runner;
+        if (liveRunner != null) {
+            try { currentPgnMoves = liveRunner.currentPgn(); }
+            catch (RuntimeException e) { Toast.makeText(this, "Could not capture live PGN: " + e.getMessage(), Toast.LENGTH_LONG).show(); return; }
+        }
         ArrayList<String> comments = new ArrayList<>();
-        ArrayList<String> moves = parseMirrorMoves(currentPgnMoves, comments);
+        ArrayList<String> moves = currentMirrorSanMoves(comments);
         if (!mirrorLiveHistoryInitialized || mirrorPositions.size() != moves.size() + 1) {
             Toast.makeText(this, "The live game history is still synchronizing. Try again shortly.", Toast.LENGTH_SHORT).show();
             return;
@@ -4285,7 +4436,8 @@ public final class TournamentActivity extends Activity {
             @Override public void notifySearchResult(int id,String cmd,Move ponder) { }
             @Override public void notifyPV(int id,Position pos,ArrayList<PvInfo> infos,Move ponderMove) {
                 if (infos==null || infos.isEmpty() || infos.get(0)==null) return; PvInfo pv=infos.get(0);
-                String eval=pv.isMate?((pv.score>=0?"+M":"-M")+Math.abs(pv.score)) : String.format(java.util.Locale.US,"%+.2f",pv.score/100.0);
+                int whitePerspectiveScore = (pos != null && pos.whiteMove) ? pv.score : -pv.score;
+                String eval=pv.isMate?((whitePerspectiveScore>=0?"+M":"-M")+Math.abs(whitePerspectiveScore)) : String.format(java.util.Locale.US,"%+.2f",whitePerspectiveScore/100.0);
                 StringBuilder variation=new StringBuilder(); Position cursor=new Position(pos); ArrayList<Move> hints=new ArrayList<>();
                 if(pv.pv!=null) for(Move m:pv.pv) { if(hints.size()<2) hints.add(m); String san=TextIO.moveToString(cursor,m,false,false); if(variation.length()>0)variation.append(' '); if(cursor.whiteMove)variation.append(cursor.fullMoveCounter).append('.'); variation.append(san); cursor.makeMove(m,new org.petero.droidfish.gamelogic.UndoInfo()); }
                 String output="Eval: "+eval+"    Depth: "+pv.depth+"    Nodes: "+compactViewerCount(pv.nodes)+"    NPS: "+compactViewerCount(pv.nps)+"\n"+variation;
@@ -4384,6 +4536,21 @@ public final class TournamentActivity extends Activity {
                     })
                     .setPositiveButton("CLOSE", null).show();
         }
+    }
+
+    private void showTournamentMoveAnimationDialog() {
+        final int[] durations = {0, 80, 180, 450, 800};
+        final String[] labels = {"Off (lightest)", "Fast (80 ms)", "Normal (180 ms)", "Slow (450 ms)", "Very slow (800 ms)"};
+        android.content.SharedPreferences preferences = getPreferences(MODE_PRIVATE);
+        int current = preferences.getInt("tournamentMoveAnimationMs", 180);
+        int selected = 2;
+        for (int i = 0; i < durations.length; i++) if (durations[i] == current) { selected = i; break; }
+        new AlertDialog.Builder(this).setTitle("Piece move animation")
+                .setSingleChoiceItems(labels, selected, (dialog, which) -> {
+                    preferences.edit().putInt("tournamentMoveAnimationMs", durations[which]).apply();
+                    dialog.dismiss();
+                    Toast.makeText(this, "Move animation: " + labels[which], Toast.LENGTH_SHORT).show();
+                }).setNegativeButton("CLOSE", null).show();
     }
 
     private void showRatingsDialog() {
@@ -4507,6 +4674,10 @@ public final class TournamentActivity extends Activity {
     }
 
     private void showMovesDialog() {
+        if (runner != null) {
+            try { currentPgnMoves = runner.currentPgn(); }
+            catch (RuntimeException ignored) { }
+        }
         String moves = currentPgnMoves == null || currentPgnMoves.isEmpty() ? "No moves played yet." : currentPgnMoves;
         TextView body = text(moves); body.setTextIsSelectable(true); body.setTextSize(16); body.setPadding(dp(12), dp(8), dp(12), dp(8));
         ScrollView sc = new ScrollView(this); sc.addView(body);
@@ -4655,7 +4826,7 @@ public final class TournamentActivity extends Activity {
             String black = pairing.isComplete() && !pairing.blackNameAtPlay.isEmpty()
                     ? pairing.blackNameAtPlay : engineDisplayName(engines, pairing.blackEngineId);
             String result = pairingResultLabel(pairing.outcome);
-            int endedAtMoves = countFullMoves(pairing.pgn);
+            int endedAtMoves = cachedFullMoveCount(tournament, pairing);
             int queuePosition = priorityQueue.indexOf(pairing.index) + 1;
             String state = pairing.replayPending ? " · replay queued" : (queuePosition > 0 ? " · priority #" + queuePosition : "");
             String gamePrefix = swiss ? "R" + pairing.round + "." + pairing.gameNumber
@@ -4674,7 +4845,12 @@ public final class TournamentActivity extends Activity {
             copy.append("No scheduled games.");
         }
         cachedScheduleContents = copy.toString();
+        final int cachedFirstPosition = cachedScheduleList == null ? 0 : cachedScheduleList.getFirstVisiblePosition();
+        View cachedFirstChild = cachedScheduleList == null ? null : cachedScheduleList.getChildAt(0);
+        final int cachedFirstTop = cachedFirstChild == null ? 0 : cachedFirstChild.getTop();
         cachedScheduleAdapter.notifyDataSetChanged();
+        if (cachedScheduleList != null) cachedScheduleList.post(() ->
+                cachedScheduleList.setSelectionFromTop(cachedFirstPosition, cachedFirstTop));
         if (cachedScheduleDialog != null) cachedScheduleDialog.setTitle(scheduleTitle(tournament));
         if (cachedScheduleBracketButton != null)
             cachedScheduleBracketButton.setVisibility(tournament.format() == TournamentManager.Format.CUP ? View.VISIBLE : View.GONE);
@@ -6114,11 +6290,37 @@ public final class TournamentActivity extends Activity {
     }
 
     private void persistTournamentElapsedTime() {
-        TournamentManager t = activeTournamentManager;
+        final TournamentManager t = activeTournamentManager;
         if (t == null) return;
         t.setTournamentElapsedMs(currentTournamentElapsedMs());
-        try { t.save(); } catch (Exception ignored) { }
+        // Full JSON serialization, GZIP compression, verification and external mirrors
+        // must never run on the Android UI thread or compete synchronously with a move.
+        PENDING_ELAPSED_SAVE.set(t);
+        scheduleElapsedSaveWorker();
         lastTournamentElapsedSaveNs = System.nanoTime();
+    }
+
+    private static void scheduleElapsedSaveWorker() {
+        if (!ELAPSED_SAVE_WORKER_ACTIVE.compareAndSet(false, true)) return;
+        TOURNAMENT_SAVE_EXECUTOR.execute(() -> {
+            try {
+                TournamentManager pending;
+                while ((pending = PENDING_ELAPSED_SAVE.getAndSet(null)) != null) {
+                    long saveStartNs = System.nanoTime();
+                    try {
+                        pending.save();
+                        long saveMs = (System.nanoTime() - saveStartNs) / 1_000_000L;
+                        if (saveMs >= 100L)
+                            android.util.Log.w("CET-TournamentSave", "Background checkpoint took " + saveMs + " ms");
+                    } catch (Exception e) {
+                        android.util.Log.e("TournamentSave", "Background elapsed checkpoint failed", e);
+                    }
+                }
+            } finally {
+                ELAPSED_SAVE_WORKER_ACTIVE.set(false);
+                if (PENDING_ELAPSED_SAVE.get() != null) scheduleElapsedSaveWorker();
+            }
+        });
     }
 
     private void restoreAdvancedTimerSettings() {
@@ -6185,7 +6387,10 @@ public final class TournamentActivity extends Activity {
         long now = System.nanoTime();
         if (!r.isPaused()) {
             resumeTournamentElapsedClock();
-            if (lastTournamentElapsedSaveNs == 0L || now - lastTournamentElapsedSaveNs >= 5_000_000_000L) persistTournamentElapsedTime();
+            // Elapsed time is only a recovery checkpoint; result, pause and stop paths
+            // still request immediate saves. Sixty-second checkpoints avoid repeatedly
+            // serializing and compressing the whole tournament during engine searches.
+            if (lastTournamentElapsedSaveNs == 0L || now - lastTournamentElapsedSaveNs >= 60_000_000_000L) persistTournamentElapsedTime();
             if (eventLastResumeNs == 0L) resumeEventElapsedClock();
             if (heatCycleEnabled && !heatCooling && heatLastResumeNs != 0L) {
                 heatPlayAccumulatedMs += Math.max(0L, (now - heatLastResumeNs) / 1_000_000L);
@@ -6670,6 +6875,7 @@ public final class TournamentActivity extends Activity {
         mirrorPly = -1;
         mirrorPositions.clear();
         mirrorLiveSanMoves.clear();
+        mirrorLiveComments.clear();
         mirrorLiveAnalysisByPly.clear();
         mirrorLiveHistoryInitialized = false;
         latestPosition = standardStartPosition();
@@ -7024,6 +7230,69 @@ public final class TournamentActivity extends Activity {
         return formatted + "\nTBHits: " + hits;
     }
 
+    /** Coalesce analysis callbacks so a busy UI processes only the newest line per side. */
+    private void postEngineAnalysisUpdate(boolean white, String analysis) {
+        if (white) pendingWhiteEngineAnalysisUi.set(analysis);
+        else pendingBlackEngineAnalysisUi.set(analysis);
+        if (engineAnalysisUiUpdatePosted.compareAndSet(false, true))
+            uiHandler.post(this::drainEngineAnalysisUpdates);
+    }
+
+    private void drainEngineAnalysisUpdates() {
+        String white = pendingWhiteEngineAnalysisUi.getAndSet(null);
+        String black = pendingBlackEngineAnalysisUi.getAndSet(null);
+        if (white != null) applyEngineAnalysisUpdate(true, white);
+        if (black != null) applyEngineAnalysisUpdate(false, black);
+        engineAnalysisUiUpdatePosted.set(false);
+        if ((pendingWhiteEngineAnalysisUi.get() != null || pendingBlackEngineAnalysisUi.get() != null) &&
+                engineAnalysisUiUpdatePosted.compareAndSet(false, true))
+            uiHandler.post(this::drainEngineAnalysisUpdates);
+    }
+
+    private void applyEngineAnalysisUpdate(boolean white, String analysis) {
+        TextView target = isMirrorShowing() ? null : (white ? whiteAnalysisText : blackAnalysisText);
+        if (white) lastWhiteAnalysis = analysis; else lastBlackAnalysis = analysis;
+        if (!mirrorReplayMode) {
+            if (mirrorBlackAnalysisText != null) mirrorBlackAnalysisText.setText(formatEngineOutputTbHits(lastBlackAnalysis));
+            if (mirrorWhiteAnalysisText != null) mirrorWhiteAnalysisText.setText(formatEngineOutputTbHits(lastWhiteAnalysis));
+        }
+        if (isMirrorShowing() && mirrorEngineOutputHidden) updateMirrorFocusPanels();
+        if (target != null) {
+            String mainBoardText = formatEngineOutputTbHits(analysis);
+            android.text.SpannableString styled = new android.text.SpannableString(mainBoardText);
+            int variationStart = mainBoardText.indexOf('\n');
+            if (variationStart >= 0) variationStart = mainBoardText.indexOf('\n', variationStart + 1);
+            if (variationStart >= 0 && variationStart + 1 < mainBoardText.length()) {
+                styled.setSpan(new android.text.style.RelativeSizeSpan(0.75f), variationStart + 1,
+                        mainBoardText.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            target.setText(styled);
+        }
+        if (!isMirrorShowing() && tournamentBoard != null && showTournamentArrowsCheck != null && showTournamentArrowsCheck.isChecked()
+                && android.preference.PreferenceManager.getDefaultSharedPreferences(TournamentActivity.this).getString("thinkingArrows", "4").equals("0") == false) {
+            try {
+                int variationStart = analysis.indexOf('\n');
+                if (variationStart >= 0) variationStart = analysis.indexOf('\n', variationStart + 1);
+                if (variationStart >= 0 && variationStart + 1 < analysis.length()) {
+                    String pvLine = analysis.substring(variationStart + 1).trim();
+                    // PVs are SAN and may start with "60...Rg2" or "61.Rh5".
+                    pvLine = pvLine.replaceFirst("^\\d+\\.{1,3}", "");
+                    int end = pvLine.indexOf(' '); if (end >= 0) pvLine = pvLine.substring(0, end);
+                    org.petero.droidfish.gamelogic.Move move = org.petero.droidfish.gamelogic.TextIO.stringToMove(new Position(latestPosition), pvLine);
+                    if (move != null) {
+                        if (white) whiteHintMove = move; else blackHintMove = move;
+                        java.util.ArrayList<org.petero.droidfish.gamelogic.Move> hints = new java.util.ArrayList<>();
+                        if (whiteHintMove != null) hints.add(whiteHintMove);
+                        if (blackHintMove != null) hints.add(blackHintMove);
+                        tournamentBoard.setMoveHints(hints);
+                    }
+                }
+            } catch (RuntimeException ignored) { }
+        } else if (!isMirrorShowing() && tournamentBoard != null) {
+            whiteHintMove = null; blackHintMove = null; tournamentBoard.setMoveHints(null);
+        }
+    }
+
     private void launchPreparedTournament(final TournamentManager tournament) {
         savedTournamentReviewMode = false;
         stopMirrorAutoPlay();
@@ -7070,10 +7339,12 @@ public final class TournamentActivity extends Activity {
                     if (mirrorAnalysisEngine != null) { try { mirrorAnalysisEngine.stopSearch(); } catch (RuntimeException ignored) { } }
                     mirrorReplayPgn = "";
                     currentPgnMoves = "";
+                    pendingWhiteEngineAnalysisUi.set(null);
+                    pendingBlackEngineAnalysisUi.set(null);
                     lastWhiteAnalysis = "Book."; lastBlackAnalysis = "Book."; mirrorLastMoveTimeMs = 0;
                     mirrorLatestAnalysisOutput = "Select an engine, then turn analysis on.";
                     updateMirrorShortcutAnalysisState();
-                    mirrorLiveSanMoves.clear(); mirrorLiveAnalysisByPly.clear();
+                    mirrorLiveSanMoves.clear(); mirrorLiveComments.clear(); mirrorLiveAnalysisByPly.clear();
                     mirrorBranchMode = false; mirrorBranchRoot = mirrorBranchCurrent = null;
                     mirrorBranchBasePositions.clear(); mirrorBranchBaseMoves.clear();
                     mirrorNavigationMode = false;
@@ -7093,7 +7364,13 @@ public final class TournamentActivity extends Activity {
                     latestPosition = standardStartPosition();
                     mirrorPositions.add(new Position(latestPosition));
                     mirrorNavigatedLastMove = null;
-                    if (tournamentBoard != null) tournamentBoard.setPosition(new Position(latestPosition));
+                    if (tournamentBoard != null) {
+                        tournamentBoard.setPosition(new Position(latestPosition));
+                        // The board may have been attached while the layout was hidden;
+                        // force the first draw so the starting pieces appear immediately.
+                        tournamentBoard.requestLayout();
+                        tournamentBoard.invalidate();
+                    }
                     if (mirrorBoard != null) {
                         mirrorBoard.setPosition(new Position(latestPosition));
                         updateMirrorLastMove(0, null);
@@ -7113,6 +7390,14 @@ public final class TournamentActivity extends Activity {
                     updateTurnNameLabels();
                     refreshMirrorRanks();
                     if (!mirrorReplayMode && isMirrorShowing()) renderMirrorSection();
+                    // Attach/layout the Main Board first, then re-apply the current
+                    // position on the view queue. This avoids the initial blank-board
+                    // frame seen when the tournament starts from a previously hidden view.
+                    if (tournamentBoard != null) tournamentBoard.post(() -> {
+                        if (latestPosition != null) tournamentBoard.setPosition(new Position(latestPosition));
+                        tournamentBoard.requestLayout();
+                        tournamentBoard.invalidate();
+                    });
                 });
             }
             @Override public void onPositionChanged(Position position, boolean whiteToMove,
@@ -7125,7 +7410,11 @@ public final class TournamentActivity extends Activity {
                                                     String whiteName, String blackName, String pgnMoves,
                                                     org.petero.droidfish.gamelogic.Move lastMove) {
                 final org.petero.droidfish.gamelogic.Move moveToHighlight = lastMove;
+                final long callbackPostedNs = System.nanoTime();
                 runOnUiThread(() -> {
+                    long uiDelayMs = Math.max(0L, (System.nanoTime() - callbackPostedNs) / 1_000_000L);
+                    if (uiDelayMs >= 250L)
+                        android.util.Log.w("CET-UiLag", "Position callback delayed by " + uiDelayMs + " ms");
                     String analysisForLastMove = null;
                     Position previousPosition = mirrorPositions.isEmpty() ? null : new Position(mirrorPositions.get(mirrorPositions.size() - 1));
                     if (lastMove != null && previousPosition != null && !samePosition(previousPosition, position)) {
@@ -7144,10 +7433,17 @@ public final class TournamentActivity extends Activity {
                     if (tournamentBoard != null) tournamentBoard.setMoveHints(null);
                     currentWhiteToMove = whiteToMove;
                     updateTurnNameLabels();
-                    currentPgnMoves = pgnMoves == null ? "" : pgnMoves;
-                    boolean rebuildMirrorHistory = !mirrorLiveHistoryInitialized;
-                    ensureMirrorHistoryMatchesLivePgn(position, rebuildMirrorHistory);
+                    if (pgnMoves != null) currentPgnMoves = pgnMoves;
+                    boolean rebuildMirrorHistory = !mirrorLiveHistoryInitialized || pgnMoves != null;
+                    ensureMirrorHistoryMatchesLivePgn(position, rebuildMirrorHistory, moveToHighlight, previousPosition);
                     mirrorLiveHistoryInitialized = true;
+                    if (moveToHighlight != null && previousPosition != null && !samePosition(previousPosition, position)) {
+                        int animationMs = getPreferences(MODE_PRIVATE).getInt("tournamentMoveAnimationMs", 180);
+                        if (isMirrorShowing() && !mirrorReplayMode && mirrorPly < 0 && mirrorBoard != null)
+                            mirrorBoard.setAnimMove(previousPosition, moveToHighlight, true, animationMs);
+                        else if (!isMirrorShowing() && tournamentBoard != null)
+                            tournamentBoard.setAnimMove(previousPosition, moveToHighlight, true, animationMs);
+                    }
                     if (analysisForLastMove != null) {
                         int analysisPly = mirrorPositions.size() - 1;
                         if (analysisPly >= 0) {
@@ -7161,8 +7457,6 @@ public final class TournamentActivity extends Activity {
                     invalidateMirrorMovesSubCache(0);
                     invalidateMirrorMovesSubCache(2);
                     invalidateMirrorSectionCache(0);
-                    if (mirrorScheduleList != null && mirrorScheduleList.getAdapter() instanceof android.widget.BaseAdapter)
-                        ((android.widget.BaseAdapter) mirrorScheduleList.getAdapter()).notifyDataSetChanged();
                     invalidateMirrorStandingsSubCache(1);
                     invalidateMirrorSectionCache(1);
                     if (isMirrorShowing() && !mirrorReplayMode && (mirrorSelectedTab == 0 ||
@@ -7178,51 +7472,12 @@ public final class TournamentActivity extends Activity {
                     blackClockText.setText(formatClock(blackTimeMs));
                     whiteClockText.setAlpha(whiteToMove ? 1.0f : 0.72f);
                     blackClockText.setAlpha(whiteToMove ? 0.72f : 1.0f);
-                    moveStatusText.setText("PGN: " + currentMirrorSanMoves(null).size() + " plies");
+                    int livePlyCount = mirrorLiveHistoryInitialized ? mirrorLiveSanMoves.size() : currentMirrorSanMoves(null).size();
+                    moveStatusText.setText("PGN: " + livePlyCount + " plies");
                 });
             }
             @Override public void onEngineAnalysis(boolean white, String analysis) {
-                runOnUiThread(() -> {
-                    TextView target = isMirrorShowing() ? null : (white ? whiteAnalysisText : blackAnalysisText);
-                    if (white) lastWhiteAnalysis = analysis; else lastBlackAnalysis = analysis;
-                    if (!mirrorReplayMode) {
-                        if (mirrorBlackAnalysisText != null) mirrorBlackAnalysisText.setText(formatEngineOutputTbHits(lastBlackAnalysis));
-                        if (mirrorWhiteAnalysisText != null) mirrorWhiteAnalysisText.setText(formatEngineOutputTbHits(lastWhiteAnalysis));
-                    }
-                    if (isMirrorShowing() && mirrorEngineOutputHidden) updateMirrorFocusPanels();
-                    if (target != null) {
-                        String mainBoardText = formatEngineOutputTbHits(analysis);
-                        android.text.SpannableString styled = new android.text.SpannableString(mainBoardText);
-                        int variationStart = mainBoardText.indexOf('\n');
-                        if (variationStart >= 0) variationStart = mainBoardText.indexOf('\n', variationStart + 1);
-                        if (variationStart >= 0 && variationStart + 1 < mainBoardText.length()) {
-                            styled.setSpan(new android.text.style.RelativeSizeSpan(0.75f), variationStart + 1,
-                                    mainBoardText.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                        }
-                        target.setText(styled);
-                    }
-                    if (!isMirrorShowing() && tournamentBoard != null && showTournamentArrowsCheck != null && showTournamentArrowsCheck.isChecked()
-                            && android.preference.PreferenceManager.getDefaultSharedPreferences(TournamentActivity.this).getString("thinkingArrows", "4").equals("0") == false) {
-                        try {
-                            int variationStart = analysis.indexOf('\n');
-                            if (variationStart >= 0) variationStart = analysis.indexOf('\n', variationStart + 1);
-                            if (variationStart >= 0 && variationStart + 1 < analysis.length()) {
-                                String pvLine = analysis.substring(variationStart + 1).trim();
-                                // PVs are SAN and may start with "60...Rg2" or "61.Rh5".
-                                pvLine = pvLine.replaceFirst("^\\d+\\.{1,3}", "");
-                                int end = pvLine.indexOf(' '); if (end >= 0) pvLine = pvLine.substring(0, end);
-                                org.petero.droidfish.gamelogic.Move move = org.petero.droidfish.gamelogic.TextIO.stringToMove(new Position(latestPosition), pvLine);
-                                    if (move != null) {
-                                        if (white) whiteHintMove = move; else blackHintMove = move;
-                                        java.util.ArrayList<org.petero.droidfish.gamelogic.Move> hints = new java.util.ArrayList<>();
-                                        if (whiteHintMove != null) hints.add(whiteHintMove);
-                                        if (blackHintMove != null) hints.add(blackHintMove);
-                                        tournamentBoard.setMoveHints(hints);
-                                    }
-                                }
-                        } catch (RuntimeException ignored) { }
-                    } else if (!isMirrorShowing() && tournamentBoard != null) { whiteHintMove = null; blackHintMove = null; tournamentBoard.setMoveHints(null); }
-                });
+                postEngineAnalysisUpdate(white, analysis);
             }
             @Override public void onReviewPosition(Position position, int ply, int totalPlies,
                                                    String whiteAnalysis, String blackAnalysis, long moveTimeMs) {
@@ -7253,6 +7508,7 @@ public final class TournamentActivity extends Activity {
                 onGameFinished(pairing, outcome, pgn, "adjudication");
             }
             @Override public void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn, String reason) {
+                // A complete immutable game PGN is available at this point; retain it for review.
                 // Persist the cumulative PGN immediately on the callback thread, not only in a
                 // queued UI update: the Activity may be backgrounded or destroyed right now.
                 Exception autoSaveError = null;
@@ -7260,6 +7516,13 @@ public final class TournamentActivity extends Activity {
                 catch (Exception e) { autoSaveError = e; }
                 final Exception savedError = autoSaveError;
                 runOnUiThread(() -> {
+                    currentPgnMoves = pgn == null ? "" : pgn;
+                    if (pgn != null && latestPosition != null) {
+                        // One full reconciliation at game completion repairs any delayed
+                        // live callback without reparsing the growing PGN during the game.
+                        ensureMirrorHistoryMatchesLivePgn(latestPosition, true, null, null);
+                        mirrorLiveHistoryInitialized = true;
+                    }
                     String resultText;
                     switch (outcome) {
                         case WHITE_WIN: resultText = "WHITE WINS"; break;
@@ -7351,8 +7614,34 @@ public final class TournamentActivity extends Activity {
         applyTournamentKeepScreenOn();
     }
 
+    /** Cache completed-game move counts; schedule refreshes should not reparse every old PGN. */
+    private int cachedFullMoveCount(TournamentManager tournament, TournamentManager.Pairing pairing) {
+        if (scheduleMoveCountCacheOwner != tournament) {
+            scheduleMoveCountCache.clear();
+            scheduleMoveCountCacheOwner = tournament;
+        }
+        String pgn = pairing == null ? null : pairing.pgn;
+        if (pgn == null || pgn.isEmpty()) return 0;
+        ScheduleMoveCountCacheEntry cached = scheduleMoveCountCache.get(pairing.index);
+        if (cached != null && cached.pgnReference == pgn) return cached.fullMoves;
+        int count = countFullMoves(pgn);
+        if (pairing.isComplete()) scheduleMoveCountCache.put(pairing.index, new ScheduleMoveCountCacheEntry(pgn, count));
+        return count;
+    }
+
     private int countFullMoves(String pgn) {
         if (pgn == null || pgn.trim().isEmpty()) return 0;
+        // Count SAN plies on the actual main line, independent of the full-move
+        // number embedded in a starting FEN. This avoids reporting move 58 for a
+        // 31-move game that began from a FEN whose counter was already at 28.
+        int plies = parseMirrorMoves(pgn, null).size();
+        if (plies > 0) return (plies + 1) / 2;
+        // Compatibility fallback for PGNs without parseable movetext.
+        java.util.regex.Matcher plyCount = java.util.regex.Pattern.compile("(?im)^\\s*\\[PlyCount\\s+\"(\\d+)\"\\]").matcher(pgn);
+        if (plyCount.find()) {
+            try { return (Integer.parseInt(plyCount.group(1)) + 1) / 2; }
+            catch (NumberFormatException ignored) { }
+        }
         java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:^|\\s)(\\d+)\\.").matcher(pgn);
         int max = 0; while (m.find()) try { max = Math.max(max, Integer.parseInt(m.group(1))); } catch (NumberFormatException ignored) { }
         return max;
