@@ -1152,6 +1152,14 @@ public class GameTree {
         /** Get the PGN comment printed after this move. */
         public String getPostComment() { return postComment == null ? "" : postComment; }
 
+        /** Store the clock remaining after this move for standard PGN [%clk] export. */
+        public void setRemainingTimeMs(int remainingTimeMs) {
+            remainingTime = Math.max(0, remainingTimeMs);
+        }
+
+        /** Clock remaining after this move, or Integer.MIN_VALUE when it is unknown. */
+        public int getRemainingTimeMs() { return remainingTime; }
+
         public boolean hasSibling() {
             return parent != null && parent.children.size() > 1;
         }
