@@ -134,10 +134,11 @@ public class NetworkEngine extends UCIEngineBase {
                 String line;
                 boolean first = true;
                 while ((line = br.readLine()) != null) {
+                    long receivedAtNs = System.nanoTime();
                     if (Thread.currentThread().isInterrupted())
                         return;
                     synchronized (engineToGui) {
-                        engineToGui.addLine(line);
+                        engineToGui.addLine(line, receivedAtNs);
                         if (first) {
                             startedOk = true;
                             isRunning = true;
@@ -237,6 +238,12 @@ public class NetworkEngine extends UCIEngineBase {
 //            System.out.printf("Engine -> GUI: %s\n", ret);
         }
         return ret;
+    }
+
+    @Override
+    public EngineLine readLineFromEngineWithTimestamp(int timeoutMillis) {
+        LocalPipe.TimedLine ret = engineToGui.readLineWithTimestamp(timeoutMillis);
+        return ret == null ? null : new EngineLine(ret.line, ret.receivedAtNs);
     }
 
     @Override

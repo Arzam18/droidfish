@@ -130,10 +130,11 @@ public class ExternalEngine extends UCIEngineBase {
                 try {
                     boolean first = true;
                     while ((line = br.readLine()) != null) {
+                        long receivedAtNs = System.nanoTime();
                         if (Thread.currentThread().isInterrupted())
                             return;
                         synchronized (inLines) {
-                            inLines.addLine(line);
+                            inLines.addLine(line, receivedAtNs);
                             if (first) {
                                 startedOk = true;
                                 isRunning = true;
@@ -348,6 +349,12 @@ public class ExternalEngine extends UCIEngineBase {
 //            System.out.printf("Engine -> GUI: %s\n", ret);
         }
         return ret;
+    }
+
+    @Override
+    public EngineLine readLineFromEngineWithTimestamp(int timeoutMillis) {
+        LocalPipe.TimedLine ret = inLines.readLineWithTimestamp(timeoutMillis);
+        return ret == null ? null : new EngineLine(ret.line, ret.receivedAtNs);
     }
 
     // XXX Writes should be handled by separate thread.

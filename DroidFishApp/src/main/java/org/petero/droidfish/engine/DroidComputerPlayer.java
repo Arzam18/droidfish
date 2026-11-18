@@ -315,8 +315,12 @@ public class DroidComputerPlayer {
             return false;
         boolean modified = false;
         UCIEngine uci = uciEngine;
-        if (uci != null)
+        if (uci != null) {
             modified = uci.setUCIOptions(pendingOptions);
+            // Request native UCI WDL after saved engine options so a stale ini entry
+            // cannot silently disable engine-provided WDL for tournament records.
+            modified |= uci.setOption("UCI_ShowWDL", true);
+        }
         pendingOptions.clear();
         return modified;
     }
@@ -781,7 +785,7 @@ public class DroidComputerPlayer {
     }
 
 
-    private final static long guiUpdateInterval = 100;
+    private final static long guiUpdateInterval = 200; // 5 Hz: keep UCI parsing immediate, coalesce screen callbacks.
     private long lastGUIUpdate = 0;
 
     private void monitorLoop(UCIEngine uci) {
@@ -789,20 +793,20 @@ public class DroidComputerPlayer {
             int timeout = getReadTimeout();
             if (Thread.currentThread().isInterrupted())
                 return;
-            String s = uci.readLineFromEngine(timeout);
+            UCIEngine.EngineLine input = uci.readLineFromEngineWithTimestamp(timeout);
             long t0 = System.currentTimeMillis();
-            while (s != null && !s.isEmpty()) {
+            while (input != null && input.line != null && !input.line.isEmpty()) {
                 if (Thread.currentThread().isInterrupted())
                     return;
-                processEngineOutput(uci, s);
-                s = uci.readLineFromEngine(1);
+                processEngineOutput(uci, input.line, input.receivedAtNs);
+                input = uci.readLineFromEngineWithTimestamp(1);
                 long t1 = System.currentTimeMillis();
                 if (t1 - t0 >= 1000)
                     break;
             }
-            if ((s == null) || Thread.currentThread().isInterrupted())
+            if ((input == null) || Thread.currentThread().isInterrupted())
                 return;
-            processEngineOutput(uci, s);
+            processEngineOutput(uci, input.line, input.receivedAtNs);
             if (Thread.currentThread().isInterrupted())
                 return;
             notifyGUI();
@@ -812,7 +816,7 @@ public class DroidComputerPlayer {
     }
 
     /** Process one line of data from the engine. */
-    private synchronized void processEngineOutput(UCIEngine uci, String s) {
+    private synchronized void processEngineOutput(UCIEngine uci, String s, long lineReceivedNs) {
         if (Thread.currentThread().isInterrupted())
             return;
 
@@ -830,6 +834,9 @@ public class DroidComputerPlayer {
                 pendingOptions.clear();
                 uci.initOptions(engineOptions);
                 uci.applyIniFile();
+                // Engines without UCI_ShowWDL simply ignore this request; only native
+                // engine-provided WDL is displayed or saved by the tournament.
+                uci.setOption("UCI_ShowWDL", true);
                 uci.writeLineToEngine("ucinewgame");
                 uci.writeLineToEngine("isready");
                 engineState.setState(MainState.WAIT_READY);
@@ -860,7 +867,7 @@ public class DroidComputerPlayer {
                     Move nextPonderMove = TextIO.UCIstringToMove(nextPonderMoveStr);
 
                     if (engineState.state == MainState.SEARCH)
-                        reportMove(bestMove, nextPonderMove);
+                        reportMove(bestMove, nextPonderMove, lineReceivedNs);
 
                     engineState.setState(MainState.IDLE);
                     searchRequest = null;
@@ -906,7 +913,7 @@ public class DroidComputerPlayer {
         return false;
     }
 
-    private void reportMove(String bestMove, Move nextPonderMove) {
+    private void reportMove(String bestMove, Move nextPonderMove, long bestMoveReceivedNs) {
         SearchRequest sr = searchRequest;
         boolean canPonder = true;
 
@@ -948,7 +955,7 @@ public class DroidComputerPlayer {
         // Flush any pending UCI info now so the tournament PGN records the final
         // analysis belonging to this search rather than the previous UI refresh.
         if (flushAnalysisBeforeResult) notifyGUI(true);
-        listener.notifySearchResult(sr.searchId, bestMove, nextPonderMove);
+        listener.notifySearchResult(sr.searchId, bestMove, nextPonderMove, bestMoveReceivedNs);
     }
 
     /** Convert a string to tokens by splitting at whitespace characters. */
@@ -1013,6 +1020,8 @@ public class DroidComputerPlayer {
     private int statHash = 0;
     private int statSelDepth = 0;
     private int statNps = 0;
+    private boolean statHasWdl = false;
+    private int statWdlWin = 0, statWdlDraw = 0, statWdlLoss = 0;
     private ArrayList<String> statPV = new ArrayList<>();
     private String statCurrMove = "";
     private int statCurrMoveNr = 0;
@@ -1032,6 +1041,8 @@ public class DroidComputerPlayer {
         statHash = 0;
         statSelDepth = 0;
         statNps = 0;
+        statHasWdl = false;
+        statWdlWin = statWdlDraw = statWdlLoss = 0;
         depthModified = true;
         currMoveModified = true;
         pvModified = true;
@@ -1088,6 +1099,17 @@ public class DroidComputerPlayer {
                 } else if (is.equals("nps")) {
                     statNps = Integer.parseInt(tokens[i++]);
                     statsModified = true;
+                } else if (is.equals("wdl") && i + 2 < nTokens) {
+                    statWdlWin = Integer.parseInt(tokens[i++]);
+                    statWdlDraw = Integer.parseInt(tokens[i++]);
+                    statWdlLoss = Integer.parseInt(tokens[i++]);
+                    statHasWdl = true;
+                    statsModified = true;
+                    // Some engines emit a WDL-bearing info line without a PV token.
+                    // Publish its latest statistics rather than silently dropping WDL.
+                    havePvData = true;
+                    statPV.clear();
+                    statPVDepth = statCurrDepth;
                 } else if (is.equals("multipv")) {
                     pvNum = Integer.parseInt(tokens[i++]) - 1;
                     if (pvNum < 0) pvNum = 0;
@@ -1117,7 +1139,7 @@ public class DroidComputerPlayer {
             }
             if (havePvData) {
                 while (statPvInfo.size() < pvNum)
-                    statPvInfo.add(new PvInfo(0, 0, 0, 0, 0, 0, 0, 0, false, false, false, new ArrayList<>()));
+                    statPvInfo.add(new PvInfo(0, 0, 0, 0, 0, 0, 0, 0, false, 0, 0, 0, false, false, false, new ArrayList<>()));
                 if (statPvInfo.size() == pvNum)
                     statPvInfo.add(null);
                 ArrayList<Move> moves = new ArrayList<>();
@@ -1130,6 +1152,7 @@ public class DroidComputerPlayer {
                 }
                 statPvInfo.set(pvNum, new PvInfo(statPVDepth, statScore, statTime, statNodes, statNps,
                                                  statTBHits, statHash, statSelDepth,
+                                                 statHasWdl, statWdlWin, statWdlDraw, statWdlLoss,
                                                  statIsMate, statUpperBound, statLowerBound, moves));
             }
         } catch (NumberFormatException nfe) {

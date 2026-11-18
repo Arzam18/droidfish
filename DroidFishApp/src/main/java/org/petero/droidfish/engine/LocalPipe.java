@@ -23,7 +23,17 @@ import java.util.Locale;
 
 /** Implements line-based text communication between threads. */
 public class LocalPipe {
-    private LinkedList<String> lines = new LinkedList<>();
+    /** A queued line and the time its producer completed the line. */
+    public static final class TimedLine {
+        public final String line;
+        public final long receivedAtNs;
+        TimedLine(String line, long receivedAtNs) {
+            this.line = line;
+            this.receivedAtNs = receivedAtNs;
+        }
+    }
+
+    private LinkedList<TimedLine> lines = new LinkedList<>();
     private boolean closed = false;
 
     /** Write a line to the pipe. */
@@ -39,13 +49,18 @@ public class LocalPipe {
     }
 
     public final synchronized void addLine(String line) {
+        addLine(line, System.nanoTime());
+    }
+
+    /** Write a line with a timestamp captured by the producer immediately after reading it. */
+    public final synchronized void addLine(String line, long receivedAtNs) {
         while (lines.size() > 10000) {
             try {
                 wait(10);
             } catch (InterruptedException ignore) {
             }
         }
-        lines.add(line);
+        lines.add(new TimedLine(line, receivedAtNs));
         notify();
     }
 
@@ -54,8 +69,8 @@ public class LocalPipe {
         return readLine(-1);
     }
 
-    /** Read a line from the pipe. Returns null on failure. Returns empty string on timeout. */
-    public final synchronized String readLine(int timeoutMillis) {
+    /** Read a line and retain its producer timestamp. Returns null on failure. */
+    public final synchronized TimedLine readLineWithTimestamp(int timeoutMillis) {
         if (closed)
             return null;
         try {
@@ -66,13 +81,19 @@ public class LocalPipe {
                     wait();
             }
             if (lines.isEmpty())
-                return closed ? null : "";
-            String ret = lines.get(0);
-            lines.remove(0);
+                return closed ? null : new TimedLine("", System.nanoTime());
+            TimedLine ret = lines.removeFirst();
+            notifyAll();
             return ret;
         } catch (InterruptedException e) {
             return null;
         }
+    }
+
+    /** Read a line from the pipe. Returns null on failure. Returns empty string on timeout. */
+    public final synchronized String readLine(int timeoutMillis) {
+        TimedLine ret = readLineWithTimestamp(timeoutMillis);
+        return ret == null ? null : ret.line;
     }
 
     /** Close pipe. Makes readLine() return null. */

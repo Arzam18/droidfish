@@ -55,6 +55,16 @@ public interface UCIEngine {
     /** Shut down engine. */
     void shutDown();
 
+    /** A line from the engine together with its monotonic receive timestamp. */
+    public static final class EngineLine {
+        public final String line;
+        public final long receivedAtNs;
+        public EngineLine(String line, long receivedAtNs) {
+            this.line = line;
+            this.receivedAtNs = receivedAtNs;
+        }
+    }
+
     /**
      * Read a line from the engine.
      * @param timeoutMillis Maximum time to wait for data.
@@ -63,6 +73,16 @@ public interface UCIEngine {
      *         or null if I/O error.
      */
     String readLineFromEngine(int timeoutMillis);
+
+    /**
+     * Timestamped read. Implementations with a separate process-output reader
+     * should preserve the timestamp from that reader; other engines use the
+     * compatible default timestamp taken immediately after their read returns.
+     */
+    default EngineLine readLineFromEngineWithTimestamp(int timeoutMillis) {
+        String line = readLineFromEngine(timeoutMillis);
+        return line == null ? null : new EngineLine(line, System.nanoTime());
+    }
 
     /** Write a line to the engine. \n will be added automatically. */
     void writeLineToEngine(String data);
