@@ -303,6 +303,14 @@ public final class TournamentActivity extends Activity {
         thread.setDaemon(true);
         return thread;
     });
+    private static final ExecutorService TOURNAMENT_LIFECYCLE_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread thread = new Thread(() -> {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+            r.run();
+        }, "DroidFish-Tournament-Lifecycle");
+        thread.setDaemon(true);
+        return thread;
+    });
     private long eventLastResumeNs = 0L;
     private boolean eventTimerHomeTriggered = false;
     private boolean heatCycleEnabled = false;
@@ -646,24 +654,27 @@ public final class TournamentActivity extends Activity {
         whitePanel.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
         ImageView blackLogo = createExpandedEngineLogo(false);
         ImageView whiteLogo = createExpandedEngineLogo(true);
-        expandedBlackName = text(currentBlackName); expandedBlackName.setTextSize(16); expandedBlackName.setTypeface(null, android.graphics.Typeface.BOLD);
-        expandedWhiteName = text(currentWhiteName); expandedWhiteName.setTextSize(16); expandedWhiteName.setTypeface(null, android.graphics.Typeface.BOLD);
-        expandedBlackAnalysis = text(formatEngineMetrics(lastBlackAnalysis)); expandedBlackAnalysis.setTextSize(16); expandedBlackAnalysis.setTextColor(0xFFE0E0E0);
-        expandedWhiteAnalysis = text(formatEngineMetrics(lastWhiteAnalysis)); expandedWhiteAnalysis.setTextSize(16); expandedWhiteAnalysis.setTextColor(0xFFE0E0E0);
+        expandedBlackName = text("Black: " + currentBlackName); expandedBlackName.setTextSize(18); expandedBlackName.setTypeface(null, android.graphics.Typeface.BOLD);
+        expandedWhiteName = text("White: " + currentWhiteName); expandedWhiteName.setTextSize(18); expandedWhiteName.setTypeface(null, android.graphics.Typeface.BOLD);
+        expandedBlackName.setGravity(android.view.Gravity.CENTER);
+        expandedWhiteName.setGravity(android.view.Gravity.CENTER);
+        expandedBlackAnalysis = text(formatEngineMetrics(lastBlackAnalysis)); expandedBlackAnalysis.setTextSize(18); expandedBlackAnalysis.setTextColor(0xFFFFFFFF);
+        expandedWhiteAnalysis = text(formatEngineMetrics(lastWhiteAnalysis)); expandedWhiteAnalysis.setTextSize(18); expandedWhiteAnalysis.setTextColor(0xFFFFFFFF);
         expandedBlackAnalysis.setGravity(android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL);
         expandedWhiteAnalysis.setGravity(android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL);
         expandedBlackAnalysis.setMaxLines(5); expandedWhiteAnalysis.setMaxLines(5);
+        expandedBlackAnalysis.setLineSpacing(dp(2), 1.0f); expandedWhiteAnalysis.setLineSpacing(dp(2), 1.0f);
         expandedBlackPv = createSingleLinePv(lastBlackAnalysis);
         expandedWhitePv = createSingleLinePv(lastWhiteAnalysis);
-        // Focus layout: Black logo above its name; White logo below its name.
-        blackPanel.addView(blackLogo, new LinearLayout.LayoutParams(dp(68), dp(58)));
+        // Focus layout: keep both sides consistent, with the larger engine logo above its name.
+        blackPanel.addView(blackLogo, new LinearLayout.LayoutParams(dp(88), dp(72)));
         blackPanel.addView(expandedBlackName, fullWidth());
-        blackPanel.addView(expandedBlackAnalysis, new LinearLayout.LayoutParams(-1, dp(112)));
-        blackPanel.addView(expandedBlackPv, new LinearLayout.LayoutParams(-1, dp(28)));
+        blackPanel.addView(expandedBlackAnalysis, new LinearLayout.LayoutParams(-1, dp(132)));
+        blackPanel.addView(expandedBlackPv, new LinearLayout.LayoutParams(-1, dp(30)));
+        whitePanel.addView(whiteLogo, new LinearLayout.LayoutParams(dp(88), dp(72)));
         whitePanel.addView(expandedWhiteName, fullWidth());
-        whitePanel.addView(whiteLogo, new LinearLayout.LayoutParams(dp(68), dp(58)));
-        whitePanel.addView(expandedWhiteAnalysis, new LinearLayout.LayoutParams(-1, dp(112)));
-        whitePanel.addView(expandedWhitePv, new LinearLayout.LayoutParams(-1, dp(28)));
+        whitePanel.addView(expandedWhiteAnalysis, new LinearLayout.LayoutParams(-1, dp(132)));
+        whitePanel.addView(expandedWhitePv, new LinearLayout.LayoutParams(-1, dp(30)));
         engineRow.addView(blackPanel, new LinearLayout.LayoutParams(0, -2, 1));
         engineRow.addView(whitePanel, new LinearLayout.LayoutParams(0, -2, 1));
         root.addView(engineRow, fullWidth());
@@ -749,7 +760,7 @@ public final class TournamentActivity extends Activity {
 
     private HorizontalScrollView createSingleLinePv(String analysis) {
         TextView pv = text(extractPrincipalVariationLine(analysis));
-        pv.setTextSize(15);
+        pv.setTextSize(17);
         pv.setTextColor(0xFFE0E0E0);
         pv.setSingleLine(true);
         pv.setHorizontallyScrolling(true);
@@ -762,7 +773,7 @@ public final class TournamentActivity extends Activity {
     }
 
     private String extractPrincipalVariationLine(String analysis) {
-        if (analysis == null || analysis.trim().isEmpty()) return "PV: —";
+        if (analysis == null || analysis.trim().isEmpty()) return "—";
         String[] lines = analysis.split("\\r?\\n");
         for (int i = lines.length - 1; i >= 0; i--) {
             String line = lines[i].trim();
@@ -771,16 +782,17 @@ public final class TournamentActivity extends Activity {
             line = line.replaceFirst("^\\d+\\.{1,3}\\s*", "");
             if (line.matches("(?i).*(?:[a-h][1-8]|O-O).*")) return line;
         }
-        return "PV: —";
+        return "—";
     }
 
     private String formatEngineMetrics(String analysis) {
-        if (analysis == null) return "Eval: —\nDepth: —\nSelDepth: —\nNPS: —\nNodes: —";
+        if (analysis == null || analysis.trim().isEmpty()) return "Eval: —\nDepth: —\nSelDepth: —\nNPS: —\nNodes: —";
         String value = analysis.split("\\r?\\n", 2)[0];
         value = value.replaceAll("(?i)\\s+Time:\\s*[^\\s]+", "");
         value = value.replaceAll("(?i)\\s+Hash:\\s*[^\\s]+", "");
-        value = value.replaceAll("(Nodes:\\s*[^\\s]+)\\s+(NPS:\\s*[^\\s]+)", "$2 $1");
-        value = value.replaceAll("\\s+(?=(?:Depth|SelDepth|Nodes|NPS):)", "\\n");
+        value = value.replaceAll("(?i)\\s*TBHits:\\s*[^\\s]+", "");
+        value = value.replaceAll("(Nodes:\\s*[^\\s]+)\\s+(NPS:\\s*[^\\s]+)", "$2\n$1");
+        value = value.replaceAll("\\s+(?=(?:Depth|SelDepth|Nodes|NPS):)", "\n");
         value = value.replaceAll("(?i)^\\s*Eval\\s*:", "Eval:");
         return value.trim();
     }
@@ -795,8 +807,8 @@ public final class TournamentActivity extends Activity {
 
     private void updateExpandedMainBoard() {
         if (expandedMainDialog == null || !expandedMainDialog.isShowing()) return;
-        if (expandedWhiteName != null) expandedWhiteName.setText(appendResultScore(currentWhiteName, currentBoardWhiteScore));
-        if (expandedBlackName != null) expandedBlackName.setText(appendResultScore(currentBlackName, currentBoardBlackScore));
+        if (expandedWhiteName != null) expandedWhiteName.setText("White: " + appendResultScore(currentWhiteName, currentBoardWhiteScore));
+        if (expandedBlackName != null) expandedBlackName.setText("Black: " + appendResultScore(currentBlackName, currentBoardBlackScore));
         if (expandedWhiteName != null) expandedWhiteName.setTextColor(currentWhiteToMove ? 0xFFFFFFFF : 0xFF9A9A9A);
         if (expandedBlackName != null) expandedBlackName.setTextColor(currentWhiteToMove ? 0xFF9A9A9A : 0xFFFFFFFF);
         if (expandedWhiteAnalysis != null) expandedWhiteAnalysis.setText(formatEngineMetrics(lastWhiteAnalysis));
@@ -819,11 +831,11 @@ public final class TournamentActivity extends Activity {
     private String expandedVariationText() {
         ArrayList<String> moves = new ArrayList<>(mirrorLiveSanMoves);
         if (moves.isEmpty() && currentPgnMoves != null && !currentPgnMoves.isEmpty()) moves = extractViewerMoves(currentPgnMoves);
-        if (moves.isEmpty()) return "Game variation";
+        if (moves.isEmpty()) return "—";
         int start = Math.max(0, moves.size() - 16);
         StringBuilder out = new StringBuilder();
         for (int i = start; i < moves.size(); i++) {
-            if (out.length() > 0) out.append(' ');
+            if (out.length() > 0) out.append("  ");
             if ((i & 1) == 0) out.append(i / 2 + 1).append('.');
             out.append(moves.get(i));
         }
@@ -1573,7 +1585,7 @@ public final class TournamentActivity extends Activity {
         ArrayList<Position> history = currentMirrorPositions();
         StringBuilder moves = new StringBuilder();
         for (int i = 0; i < sans.size(); i++) {
-            if (moves.length() > 0) moves.append(' ');
+            if (moves.length() > 0) moves.append("  ");
             Position before = i < history.size() ? history.get(i) : null;
             int moveNumber = before == null ? (i / 2) + 1 : before.fullMoveCounter;
             boolean whiteMove = before == null ? ((i & 1) == 0) : before.whiteMove;
@@ -4680,7 +4692,15 @@ public final class TournamentActivity extends Activity {
         gvWhiteAnalysis.setText("White "+whiteAnalysis);
         gvBlackAnalysis.setText("Black "+blackAnalysis);
         StringBuilder moves=new StringBuilder();
-        for(int i=0;i<gameViewerMoves.size() && i<gameViewerPly;i++) { if(i%2==0) { if(moves.length()>0)moves.append(' '); moves.append((i/2+1)).append('.'); } else moves.append(' '); moves.append(gameViewerMoves.get(i)); }
+        for (int i = 0; i < gameViewerMoves.size() && i < gameViewerPly; i++) {
+            if ((i & 1) == 0) {
+                if (moves.length() > 0) moves.append("  ");
+                moves.append((i / 2) + 1).append('.');
+            } else {
+                moves.append("  ");
+            }
+            moves.append(gameViewerMoves.get(i));
+        }
         gvMoves.setText(moves.length()==0?"No moves yet.":moves.toString()); gvStatus.setText("Ply "+gameViewerPly+" / "+(gameViewerPositions.size()-1));
     }
     private String findPgnClockAnnotation(String comment) {
@@ -7615,8 +7635,8 @@ public final class TournamentActivity extends Activity {
         String formatted = value.replaceAll("(?i)\\s*TBHits:\\s*[^\\s]+", "");
         formatted = formatted.replaceAll("(?i)\\s+Time:\\s*[^\\s]+", "");
         formatted = formatted.replaceAll("(?i)\\s+Hash:\\s*[^\\s]+", "");
-        formatted = formatted.replaceAll("(?i)(Nodes:\\s*[^\\s]+)\\s+(NPS:\\s*[^\\s]+)", "$2\\n$1");
-        formatted = formatted.replaceAll("\\s+(?=(?:Depth|SelDepth|Nodes|NPS):)", "\\n");
+        formatted = formatted.replaceAll("(?i)(Nodes:\\s*[^\\s]+)\\s+(NPS:\\s*[^\\s]+)", "$2\n$1");
+        formatted = formatted.replaceAll("\\s+(?=(?:Depth|SelDepth|Nodes|NPS):)", "\n");
         return formatted.trim();
     }
 
@@ -7665,14 +7685,10 @@ public final class TournamentActivity extends Activity {
         if (isMirrorShowing() && mirrorEngineOutputHidden) updateMirrorFocusPanels();
         if (target != null) {
             String mainBoardText = formatEngineOutput(analysis);
-            android.text.SpannableString styled = new android.text.SpannableString(mainBoardText);
-            int variationStart = mainBoardText.indexOf('\n');
-            if (variationStart >= 0) variationStart = mainBoardText.indexOf('\n', variationStart + 1);
-            if (variationStart >= 0 && variationStart + 1 < mainBoardText.length()) {
-                styled.setSpan(new android.text.style.RelativeSizeSpan(0.75f), variationStart + 1,
-                        mainBoardText.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            }
-            target.setText(styled);
+            // Keep every engine metric at the same readable size. Previously the
+            // span began after the second newline; once metrics are truly multiline,
+            // that accidentally shrank SelDepth, NPS and Nodes as well as the PV.
+            target.setText(mainBoardText);
         }
         if (!isMirrorShowing() && tournamentBoard != null && showTournamentArrowsCheck != null && showTournamentArrowsCheck.isChecked()
                 && android.preference.PreferenceManager.getDefaultSharedPreferences(TournamentActivity.this).getString("thinkingArrows", "4").equals("0") == false) {
@@ -7808,7 +7824,7 @@ public final class TournamentActivity extends Activity {
                     currentWhiteEngineId = pairing.whiteEngineId;
                     currentBlackEngineId = pairing.blackEngineId;
                     updateTurnNameLabels();
-                    refreshMirrorRanks();
+                    updateMirrorRankedNames();
                     if (!mirrorReplayMode && isMirrorShowing()) renderMirrorSection();
                     // Attach/layout the Main Board first, then re-apply the current
                     // position on the view queue. This avoids the initial blank-board
@@ -7945,6 +7961,21 @@ public final class TournamentActivity extends Activity {
                 try { saveTournamentPgnAutomatically(tournament); }
                 catch (Exception e) { autoSaveError = e; }
                 final Exception savedError = autoSaveError;
+                String standingsSummary = null;
+                HashMap<String, Integer> ranksAfterGame = null;
+                try {
+                    List<TournamentManager.Standing> completedStandings = tournament.standings();
+                    List<TournamentManager.Engine> completedEngines = tournament.engines();
+                    standingsSummary = formatStandings(tournament, completedStandings, completedEngines);
+                    ranksAfterGame = new HashMap<>();
+                    for (int i = 0; i < completedStandings.size(); i++)
+                        ranksAfterGame.put(completedStandings.get(i).engineId, i + 1);
+                } catch (RuntimeException standingsError) {
+                    android.util.Log.w("CET-TournamentSave", "Could not prepare standings snapshot after Game " +
+                            (pairing.index + 1), standingsError);
+                }
+                final String savedStandingsSummary = standingsSummary;
+                final HashMap<String, Integer> savedRanksAfterGame = ranksAfterGame;
                 runOnUiThread(() -> {
                     currentPgnMoves = pgn == null ? "" : pgn;
                     if (pgn != null && latestPosition != null) {
@@ -7980,8 +8011,12 @@ public final class TournamentActivity extends Activity {
                     // independently so it is actually visible to the user.
                     android.widget.Toast.makeText(TournamentActivity.this, result,
                             android.widget.Toast.LENGTH_LONG).show();
-                    standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
-                    refreshMirrorRanks();
+                    if (savedStandingsSummary != null) standingsText.setText(savedStandingsSummary);
+                    if (savedRanksAfterGame != null && activeTournamentManager == tournament) {
+                        mirrorRanks.clear();
+                        mirrorRanks.putAll(savedRanksAfterGame);
+                        updateMirrorRankedNames();
+                    }
                     invalidateMirrorStandingsSubCache(0); invalidateMirrorStandingsSubCache(2);
                     invalidateMirrorSectionCache(1); invalidateMirrorSectionCache(2); invalidateMirrorSectionCache(3);
                     if (isMirrorShowing() && (mirrorSelectedTab == 1 || mirrorSelectedTab == 2 || mirrorSelectedTab == 3)) renderMirrorSection();
@@ -7997,6 +8032,12 @@ public final class TournamentActivity extends Activity {
             }
             @Override public void onTournamentFinished() {
                 freezeTournamentElapsedClock();
+                String finalStandings = null;
+                try { finalStandings = formatStandings(tournament, tournament.standings(), tournament.engines()); }
+                catch (RuntimeException standingsError) {
+                    android.util.Log.w("CET-TournamentSave", "Could not prepare final standings", standingsError);
+                }
+                final String finalStandingsSummary = finalStandings;
                 runOnUiThread(() -> {
                     runner = null;
                     applyTournamentKeepScreenOn();
@@ -8007,13 +8048,13 @@ public final class TournamentActivity extends Activity {
                         statusText.setText(message + " Engine update checkpoint.");
                         moveStatusText.setText("CUP CHECKPOINT · " + next.toUpperCase(java.util.Locale.US));
                         startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(false);
-                        standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
+                        if (finalStandingsSummary != null) standingsText.setText(finalStandingsSummary);
                         invalidateCachedSchedule(tournament);
                         showCupStageCheckpointDialog(tournament);
                     } else {
                         statusText.setText("Tournament complete");
                         moveStatusText.setText("TOURNAMENT COMPLETE");
-                        standingsText.setText(formatStandings(tournament, tournament.standings(), tournament.engines()));
+                        if (finalStandingsSummary != null) standingsText.setText(finalStandingsSummary);
                         startButton.setEnabled(true); resumeButton.setEnabled(true); stopButton.setEnabled(false);
                     }
                 });
@@ -8086,26 +8127,47 @@ public final class TournamentActivity extends Activity {
     }
 
     private void stopAndSaveTournament() {
-        if (runner == null) { setContentView(playView); return; }
-        TournamentRunner oldRunner = runner;
-        try {
+        final TournamentRunner oldRunner = runner;
+        if (oldRunner == null) { setContentView(playView); return; }
+        oldRunner.pause();
+        if (stopButton != null) stopButton.setEnabled(false);
+        if (statusText != null) statusText.setText("Saving tournament in background…");
+        TOURNAMENT_LIFECYCLE_EXECUTOR.execute(() -> {
+            Exception failure = null;
             TournamentManager activeTournament = activeTournamentManager;
-            if (activeTournament == null) activeTournament = TournamentManager.restore(this);
-            oldRunner.pause();
-            freezeTournamentElapsedClock();
-            activeTournament.save();
-            saveTournamentPgnAutomatically(activeTournament);
-            oldRunner.stop();
-            runner = null;
-            startButton.setEnabled(true);
-            resumeButton.setEnabled(true);
-            stopButton.setEnabled(false);
-            statusText.setText("Tournament stopped and saved. Use Resume Saved Tournament to continue.");
-            Toast.makeText(this, "Tournament saved", Toast.LENGTH_LONG).show();
-            setContentView(setupView);
-        } catch (Exception e) {
-            Toast.makeText(this, "Could not save tournament: " + e.getMessage(), Toast.LENGTH_LONG).show();
-        }
+            try {
+                // Do not race the just-finished game's PGN/result writer with this
+                // explicit stop/save transaction. Waiting happens only on this worker.
+                oldRunner.awaitPendingGameFinalization();
+                if (activeTournament == null) activeTournament = TournamentManager.restore(TournamentActivity.this);
+                activeTournamentManager = activeTournament;
+                freezeTournamentElapsedClock();
+                activeTournament.save();
+                saveTournamentPgnAutomatically(activeTournament);
+                oldRunner.stop();
+            } catch (Exception e) {
+                failure = e;
+            }
+            final TournamentManager savedTournament = activeTournament;
+            final Exception saveFailure = failure;
+            runOnUiThread(() -> {
+                if (saveFailure == null) {
+                    if (runner == oldRunner) runner = null;
+                    if (savedTournament != null) activeTournamentManager = savedTournament;
+                    if (startButton != null) startButton.setEnabled(true);
+                    if (resumeButton != null) resumeButton.setEnabled(true);
+                    if (stopButton != null) stopButton.setEnabled(false);
+                    if (statusText != null) statusText.setText("Tournament stopped and saved. Use Resume Saved Tournament to continue.");
+                    Toast.makeText(TournamentActivity.this, "Tournament saved", Toast.LENGTH_LONG).show();
+                    setContentView(setupView);
+                } else {
+                    if (stopButton != null) stopButton.setEnabled(true);
+                    if (statusText != null) statusText.setText("Tournament is paused; save failed.");
+                    Toast.makeText(TournamentActivity.this,
+                            "Could not save tournament: " + saveFailure.getMessage(), Toast.LENGTH_LONG).show();
+                }
+            });
+        });
     }
 
     private void exportTournamentPgn() {
