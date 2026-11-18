@@ -195,6 +195,10 @@ public final class TournamentRunner {
         pgnOptions = new PGNOptions();
         // Tournament move comments are part of the exported record, not optional UI comments.
         pgnOptions.exp.comments = true;
+        // Preserve native GameTree clock data as standard PGN [%clk hh:mm:ss]
+        // annotations. The PGN reader consumes [%clk] into Node.remainingTime,
+        // so embedding it in ordinary comment text is not sufficient.
+        pgnOptions.exp.clockInfo = true;
         pgnOptions.exp.blackMoveNrAfterComment = false;
         whiteAnalysisListener = new EngineListener(true);
         blackAnalysisListener = new EngineListener(false);
@@ -415,7 +419,9 @@ public final class TournamentRunner {
             if (result == null || !Boolean.TRUE.equals(result.first) || result.second == null) break;
             applied++;
             addCurrentMoveComment("Book.");
-            listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove, 0, 0,
+            long whiteMs = clock == null || !usesClock() ? 0L : clock.remainingMs(true);
+            long blackMs = clock == null || !usesClock() ? 0L : clock.remainingMs(false);
+            listener.onPositionChanged(new Position(game.currPos()), game.currPos().whiteMove, whiteMs, blackMs,
                     whiteEngine.displayName, blackEngine.displayName, currentPgnMoves(), game.getLastMove());
             try { Thread.sleep(delayMs); }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
@@ -776,6 +782,7 @@ public final class TournamentRunner {
         try {
             PGNOptions options = new PGNOptions();
             options.exp.comments = true;
+            options.exp.clockInfo = true;
             options.exp.nag = true;
             options.exp.variations = false;
             options.exp.blackMoveNrAfterComment = false;
@@ -801,8 +808,17 @@ public final class TournamentRunner {
     private void addCurrentMoveComment(String comment) {
         try {
             android.util.Pair<java.util.List<GameTree.Node>, Integer> list = game.tree.getMoveList();
-            if (list != null && list.first != null && !list.first.isEmpty())
-                list.first.get(list.first.size() - 1).setPostComment(comment);
+            if (list != null && list.first != null && !list.first.isEmpty()) {
+                GameTree.Node node = list.first.get(list.first.size() - 1);
+                node.setPostComment(comment);
+                // Opening/book plies are applied before the clock starts, so their
+                // recorded remaining time is the unchanged initial clock value.
+                if (clock != null && usesClock()) {
+                    boolean whiteMoved = !game.currPos().whiteMove;
+                    long remaining = clock.remainingMs(whiteMoved);
+                    node.setRemainingTimeMs((int)Math.min(Integer.MAX_VALUE, Math.max(0L, remaining)));
+                }
+            }
         } catch (RuntimeException ignored) { }
     }
 
@@ -841,7 +857,7 @@ public final class TournamentRunner {
                     whiteWdl = " WhiteWDL: W:" + whiteWin + "% D:" + draw + "% L:" + whiteLoss + "%";
                 }
             }
-            long remaining = clock == null ? 0 : clock.remainingMs(whiteMoved);
+            long remaining = clock == null || !usesClock() ? -1L : clock.remainingMs(whiteMoved);
             String pv = "";
             if (analysisAtBestMove != null) {
                 String[] lines = analysisAtBestMove.split("\\r?\\n");
@@ -853,15 +869,11 @@ public final class TournamentRunner {
                     }
                 }
             }
-            long safeClock = Math.max(0L, remaining);
-            long clockSeconds = safeClock / 1000L;
-            long clockTenths = (safeClock % 1000L) / 100L;
-            String pgnClock = String.format(java.util.Locale.US, "%d:%02d:%02d.%d",
-                    clockSeconds / 3600L, (clockSeconds / 60L) % 60L, clockSeconds % 60L, clockTenths);
-            String clockComment = usesClock() ? " [%clk " + pgnClock + "]" : "";
+            if (usesClock() && remaining >= 0L)
+                node.setRemainingTimeMs((int)Math.min(Integer.MAX_VALUE, remaining));
             String comment = "Eval: " + eval + " Depth: " + depth + " SelDepth: " + selDepth +
                     " Nodes: " + nodes + " NPS: " + nps + " EngineTime: " + engineTime +
-                    " Hash: " + hash + (usesClock() ? " Clock: " + clockText(remaining) : "") + clockComment +
+                    " Hash: " + hash +
                     " MoveTime: " + moveTimeText(moveMs) + (pv.isEmpty() ? "" : " PV: " + pv) + engineWdl + whiteWdl;
             // The engine-provided WDL remains in the engine's own perspective. No
             // probability is estimated when UCI_ShowWDL is unsupported.
