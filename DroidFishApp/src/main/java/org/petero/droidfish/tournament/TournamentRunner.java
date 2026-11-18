@@ -754,32 +754,48 @@ public final class TournamentRunner {
         } catch (RuntimeException ignored) { }
     }
 
+    private String commentField(String text, String key) {
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(
+                "(?i)(?:^|\\s)" + java.util.regex.Pattern.quote(key) + "\\s*:\\s*([^\\s]+)").matcher(text);
+        return matcher.find() ? matcher.group(1).trim() : "n/a";
+    }
+
     private void addMoveAnalysisComment(boolean whiteMoved, long moveMs, String analysisAtBestMove) {
         try {
             android.util.Pair<java.util.List<GameTree.Node>, Integer> list = game.tree.getMoveList();
             if (list == null || list.first == null || list.first.isEmpty()) return;
             GameTree.Node node = list.first.get(list.first.size() - 1);
-            String analysis = analysisAtBestMove;
-            String eval = "n/a", depth = "n/a", nodes = "n/a", nps = "n/a", tbHits = "n/a", wdl = "";
-            if (analysis != null) {
-                java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                        "Eval:\\s*(.*?)\\s+Depth:\\s*(.*?)\\s+Nodes:\\s*(.*?)\\s+NPS:\\s*(\\S+)")
-                        .matcher(analysis.replace('\n', ' '));
-                if (m.find()) {
-                    eval = m.group(1).trim(); depth = m.group(2).trim();
-                    nodes = m.group(3).trim(); nps = m.group(4).trim();
-                }
-                java.util.regex.Matcher tb = java.util.regex.Pattern.compile("TBHits:\\s*(\\S+)").matcher(analysis.replace('\n', ' '));
-                if (tb.find()) tbHits = tb.group(1).trim();
+            String eval = "n/a", depth = "n/a", selDepth = "n/a", nodes = "n/a", nps = "n/a";
+            String engineTime = "n/a", hash = "n/a", engineWdl = "", whiteWdl = "";
+            if (analysisAtBestMove != null) {
+                String flat = analysisAtBestMove.replace('\n', ' ');
+                eval = commentField(flat, "Eval");
+                depth = commentField(flat, "Depth");
+                selDepth = commentField(flat, "SelDepth");
+                nodes = commentField(flat, "Nodes");
+                nps = commentField(flat, "NPS");
+                engineTime = commentField(flat, "Time");
+                hash = commentField(flat, "Hash");
                 java.util.regex.Matcher w = java.util.regex.Pattern.compile(
-                        "W:\\s*(\\d+)%\\s+D:\\s*(\\d+)%\\s+L:\\s*(\\d+)%").matcher(analysis);
-                if (w.find()) wdl = " W:" + w.group(1) + "% D:" + w.group(2) + "% L:" + w.group(3) + "%";
+                        "(?i)Engine\\s+WDL:\\s*W:\\s*([0-9]+(?:\\.[0-9]+)?)%\\s+D:\\s*([0-9]+(?:\\.[0-9]+)?)%\\s+L:\\s*([0-9]+(?:\\.[0-9]+)?)%")
+                        .matcher(flat);
+                if (w.find()) {
+                    String engineWin = w.group(1), draw = w.group(2), engineLoss = w.group(3);
+                    engineWdl = " EngineWDL: W:" + engineWin + "% D:" + draw + "% L:" + engineLoss + "%";
+                    // Persist an additional White-perspective form for the tournament
+                    // graph, whose two traces represent the White and Black engines.
+                    String whiteWin = whiteMoved ? engineWin : engineLoss;
+                    String whiteLoss = whiteMoved ? engineLoss : engineWin;
+                    whiteWdl = " WhiteWDL: W:" + whiteWin + "% D:" + draw + "% L:" + whiteLoss + "%";
+                }
             }
             long remaining = clock == null ? 0 : clock.remainingMs(whiteMoved);
-            String comment = "Eval: " + eval + " Depth: " + depth + " Nodes: " + nodes
-                    + " NPS: " + nps + " TBHits: " + tbHits + " Clock: " + clockText(remaining)
-                    + " Time: " + moveTimeText(moveMs) + wdl;
-            // Do not include the engine's PV/variation in the PGN comment.
+            String comment = "Eval: " + eval + " Depth: " + depth + " SelDepth: " + selDepth +
+                    " Nodes: " + nodes + " NPS: " + nps + " EngineTime: " + engineTime +
+                    " Hash: " + hash + " Clock: " + clockText(remaining) +
+                    " Time: " + moveTimeText(moveMs) + engineWdl + whiteWdl;
+            // The engine-provided WDL remains in the engine's own perspective. No
+            // probability is estimated when UCI_ShowWDL is unsupported.
             node.setPostComment(comment);
         } catch (RuntimeException ignored) { }
     }
@@ -886,8 +902,11 @@ public final class TournamentRunner {
         private volatile int lastDepth;
         private volatile long lastNodes;
         private volatile int lastNps;
-        private volatile long lastTbHits;
+        private volatile int lastSelDepth;
+        private volatile int lastHashFull;
         private volatile int lastTimeMs;
+        private volatile boolean hasNativeWdl;
+        private volatile int lastWdlWin, lastWdlDraw, lastWdlLoss;
         private volatile String lastPv = "";
         private volatile boolean hasCurrentSearchInfo;
         // Keep the newest raw PV and format it only when the UI snapshot is due.
@@ -902,8 +921,11 @@ public final class TournamentRunner {
             lastDepth = 0;
             lastNodes = 0;
             lastNps = 0;
-            lastTbHits = 0;
+            lastSelDepth = 0;
+            lastHashFull = 0;
             lastTimeMs = 0;
+            hasNativeWdl = false;
+            lastWdlWin = lastWdlDraw = lastWdlLoss = 0;
             lastPv = "";
             pendingPvPosition = null;
             pendingPvInfo = null;
@@ -915,7 +937,7 @@ public final class TournamentRunner {
         }
 
         String snapshotForMove() {
-            if (!hasCurrentSearchInfo) return "Eval: n/a Depth: n/a Nodes: n/a NPS: n/a";
+            if (!hasCurrentSearchInfo) return "Eval: n/a Depth: n/a SelDepth: n/a Nodes: n/a NPS: n/a";
             // Flush the most recent depth/PV/stats before writing the PGN comment.
             publishAnalysis(true);
             return white ? latestWhiteAnalysis : latestBlackAnalysis;
@@ -949,8 +971,15 @@ public final class TournamentRunner {
                 lastDepth = pv.depth;
                 lastNodes = pv.nodes;
                 lastNps = pv.nps;
-                lastTbHits = pv.tbHits;
+                lastSelDepth = pv.seldepth;
+                lastHashFull = pv.hash;
                 lastTimeMs = pv.time;
+                if (pv.hasWdl) {
+                    hasNativeWdl = true;
+                    lastWdlWin = pv.wdlWin;
+                    lastWdlDraw = pv.wdlDraw;
+                    lastWdlLoss = pv.wdlLoss;
+                }
                 // DroidComputerPlayer creates a fresh PvInfo snapshot for
                 // each UCI info line. Retain that object directly instead of cloning
                 // the Position and allocating another copy of every PV Move here.
@@ -964,7 +993,7 @@ public final class TournamentRunner {
         }
         @Override public void notifyStats(int id, long nodes, int nps, long tbHits, int hash, int time, int seldepth) {
             if (!isCurrentSearch(id)) return;
-            lastNodes = nodes; lastNps = nps; lastTbHits = tbHits; lastTimeMs = time;
+            lastNodes = nodes; lastNps = nps; lastSelDepth = seldepth; lastHashFull = hash; lastTimeMs = time;
             hasCurrentSearchInfo = true;
             publishAnalysis(false);
         }
@@ -1030,22 +1059,6 @@ public final class TournamentRunner {
             if (value >= 1_000) return String.format(java.util.Locale.US, "%.0fK", value / 1_000.0);
             return Long.toString(value);
         }
-        /** Approximate W/D/L from the displayed centipawn score; informational only. */
-        private String estimateWdl(String score) {
-            try {
-                String value = score.trim();
-                if (value.startsWith("+M") || value.startsWith("-M"))
-                    return value.startsWith("+") ? "99,1,0" : "0,1,99";
-                double cp = Double.parseDouble(value) * 100.0;
-                double expected = 1.0 / (1.0 + Math.exp(-cp * 0.004));
-                double draw = 0.32 * Math.exp(-Math.abs(cp) / 180.0);
-                double win = Math.max(0.0, expected - draw / 2.0);
-                int w = (int)Math.round(win * 100.0);
-                int d = (int)Math.round(draw * 100.0);
-                int l = Math.max(0, 100 - w - d);
-                return w + "," + d + "," + l;
-            } catch (RuntimeException ex) { return "33,34,33"; }
-        }
         private void publishAnalysis(boolean force) {
             if (stopped || finished) return;
             long nowNs = System.nanoTime();
@@ -1090,11 +1103,14 @@ public final class TournamentRunner {
             String nodes = compactCount(lastNodes);
             String nps = compactCount(lastNps);
             String variation = pvLine == null ? "" : pvLine.trim();
-            String wdl = estimateWdl(score);
-            String header = "Eval: " + score + "    Depth: " + lastDepth + "    Nodes: " + nodes +
-                    "    NPS: " + nps + "    TBHits: " + compactCount(lastTbHits);
-            String text = header + "\nW: " + wdl.split(",")[0] + "%   D: " + wdl.split(",")[1] + "%   L: " + wdl.split(",")[2] + "%"
-                    + (variation.length() == 0 ? "" : "\n" + variation);
+            String header = "Eval: " + score + "    Depth: " + lastDepth +
+                    "    SelDepth: " + lastSelDepth + "    Nodes: " + nodes +
+                    "    NPS: " + nps + "    Time: " + String.format(java.util.Locale.US, "%.2fs", Math.max(0, lastTimeMs) / 1000.0) +
+                    (lastHashFull > 0 ? "    Hash: " + String.format(java.util.Locale.US, "%.1f%%", lastHashFull / 10.0) : "");
+            String engineWdlLine = hasNativeWdl ? "\nEngine WDL: W: " + String.format(java.util.Locale.US, "%.1f%%", lastWdlWin / 10.0) +
+                    " D: " + String.format(java.util.Locale.US, "%.1f%%", lastWdlDraw / 10.0) +
+                    " L: " + String.format(java.util.Locale.US, "%.1f%%", lastWdlLoss / 10.0) : "";
+            String text = header + engineWdlLine + (variation.length() == 0 ? "" : "\n" + variation);
             if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
             if (!positionHistory.isEmpty() && reviewPly < 0) {
                 int last = positionHistory.size() - 1;
@@ -1103,8 +1119,11 @@ public final class TournamentRunner {
             listener.onEngineAnalysis(white, text);
         }
         @Override public void notifySearchResult(int id, String cmd, Move ponder) {
-            // Stop the clock at bestmove arrival, not when the deferred board update runs.
-            long arrivalNs = System.nanoTime();
+            notifySearchResult(id, cmd, ponder, System.nanoTime());
+        }
+        @Override public void notifySearchResult(int id, String cmd, Move ponder, long arrivalNs) {
+            // Use the monotonic timestamp recorded by the engine reader immediately after
+            // it received the complete bestmove line, before analysis flush or UI work.
             int activeId = white ? activeWhiteId : activeBlackId;
             CetClock activeClock = clock;
             long remainingBeforeArrival = activeClock == null || !usesClock() ? -1L : activeClock.remainingMs(white);
