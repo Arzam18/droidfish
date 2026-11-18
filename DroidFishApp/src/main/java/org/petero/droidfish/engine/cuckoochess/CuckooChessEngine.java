@@ -118,6 +118,14 @@ public class CuckooChessEngine extends UCIEngineBase {
     }
 
     @Override
+    public final EngineLine readLineFromEngineWithTimestamp(int timeoutMillis) {
+        if ((engineThread != null) && !engineThread.isAlive())
+            return null;
+        LocalPipe.TimedLine ret = engineToGui.readLineWithTimestamp(timeoutMillis);
+        return ret == null ? null : new EngineLine(ret.line, ret.receivedAtNs);
+    }
+
+    @Override
     public final synchronized void writeLineToEngine(String data) {
 //        System.out.printf("GUI -> Engine: %s\n", data);
         guiToEngine.addLine(data);
