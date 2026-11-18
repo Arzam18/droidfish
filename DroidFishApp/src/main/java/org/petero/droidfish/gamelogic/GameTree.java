@@ -341,9 +341,6 @@ public class GameTree {
     /** Walks the game tree in PGN export order. */
     public final void pgnTreeWalker(PGNOptions options, PgnToken.PgnTokenReceiver out) {
         String pgnResultString = getPGNResultStringMainLine();
-        // Include the main-line ply count, as tournament PGN viewers commonly expect it.
-        setTagPair("PlyCount", Integer.toString(currentNode.getPathFromRoot().size()));
-
         // Write seven tag roster
         addTagPair(out, "Event",  event);
         addTagPair(out, "Site",   site);
@@ -1311,7 +1308,12 @@ public class GameTree {
                         out.processToken(this, PgnToken.INTEGER, Integer.valueOf(mn.moveNo).toString());
                         out.processToken(this, PgnToken.PERIOD, null);
                     } else {
-                        if (needMoveNr) {
+                        // Tournament analysis comments sit between White's and Black's
+                        // move. Standard movetext keeps the black SAN beside White's SAN
+                        // (1.e4 e5); emit n... only for an initial black-to-move position
+                        // or when the caller explicitly requests the extended numbering.
+                        boolean initialBlackMove = parent == null || parent.parent == null;
+                        if (needMoveNr && (options.exp.blackMoveNrAfterComment || initialBlackMove)) {
                             out.processToken(this, PgnToken.INTEGER, Integer.valueOf(mn.moveNo).toString());
                             for (int i = 0; i < 3; i++)
                                 out.processToken(this, PgnToken.PERIOD, null);
