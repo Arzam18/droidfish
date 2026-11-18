@@ -34,6 +34,11 @@ public interface SearchListener {
         public long tbHits;
         public int hash;
         public int seldepth;
+        /** Native UCI "wdl" values, conventionally reported in per-mille. */
+        public boolean hasWdl;
+        public int wdlWin;
+        public int wdlDraw;
+        public int wdlLoss;
         public boolean isMate;
         public boolean upperBound;
         public boolean lowerBound;
@@ -41,6 +46,13 @@ public interface SearchListener {
         public String pvStr = "";
 
         public PvInfo(int depth, int score, int time, long nodes, int nps, long tbHits, int hash, int seldepth,
+                      boolean isMate, boolean upperBound, boolean lowerBound, ArrayList<Move> pv) {
+            this(depth, score, time, nodes, nps, tbHits, hash, seldepth,
+                    false, 0, 0, 0, isMate, upperBound, lowerBound, pv);
+        }
+
+        public PvInfo(int depth, int score, int time, long nodes, int nps, long tbHits, int hash, int seldepth,
+                      boolean hasWdl, int wdlWin, int wdlDraw, int wdlLoss,
                       boolean isMate, boolean upperBound, boolean lowerBound, ArrayList<Move> pv) {
             this.depth = depth;
             this.score = score;
@@ -50,6 +62,10 @@ public interface SearchListener {
             this.tbHits = tbHits;
             this.hash = hash;
             this.seldepth = seldepth;
+            this.hasWdl = hasWdl;
+            this.wdlWin = wdlWin;
+            this.wdlDraw = wdlDraw;
+            this.wdlLoss = wdlLoss;
             this.isMate = isMate;
             this.upperBound = upperBound;
             this.lowerBound = lowerBound;
@@ -78,6 +94,14 @@ public interface SearchListener {
 
     /** Report move (or command, such as "resign") played by the engine. */
     void notifySearchResult(int id, String cmd, Move ponder);
+
+    /**
+     * Report the engine move with the monotonic timestamp recorded as soon as the
+     * complete bestmove line was read. Existing listeners remain source-compatible.
+     */
+    default void notifySearchResult(int id, String cmd, Move ponder, long receivedAtNs) {
+        notifySearchResult(id, cmd, ponder);
+    }
 
     /** Report engine name. */
     void notifyEngineName(String engineName);

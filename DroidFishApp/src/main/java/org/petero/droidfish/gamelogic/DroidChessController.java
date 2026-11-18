@@ -711,10 +711,11 @@ public class DroidChessController {
         private String currMoveStr = "";
         private long currNodes = 0;
         private int currNps = 0;
-        private long currTBHits = 0;
         private int currHash = 0;
         private int currTime = 0;
         private int currSelDepth = 0;
+        private boolean currHasWdl = false;
+        private int currWdlWin = 0, currWdlDraw = 0, currWdlLoss = 0;
 
         private boolean whiteMove = true;
         private String bookInfo = "";
@@ -731,6 +732,8 @@ public class DroidChessController {
             ponderMove = null;
             pvInfoV.clear();
             currDepth = 0;
+            currHasWdl = false;
+            currWdlWin = currWdlDraw = currWdlLoss = 0;
             bookInfo = "";
             bookMoves = null;
             eco = "";
@@ -765,7 +768,7 @@ public class DroidChessController {
             if (currDepth > 0) {
                 statStrTmp.append(String.format(Locale.US, "d:%d", currDepth));
                 if (currSelDepth > 0)
-                    statStrTmp.append(String.format(Locale.US, "/%d", currSelDepth));
+                    statStrTmp.append(String.format(Locale.US, " sd:%d", currSelDepth));
                 if (currMoveNr > 0)
                     statStrTmp.append(String.format(Locale.US, " %d:%s", currMoveNr, currMoveStr));
                 if (currTime < 99995) {
@@ -779,12 +782,11 @@ public class DroidChessController {
                 appendWithPrefix(statStrTmp, currNodes);
                 statStrTmp.append(" nps:");
                 appendWithPrefix(statStrTmp, currNps);
-                if (currTBHits > 0) {
-                    statStrTmp.append(" tb:");
-                    appendWithPrefix(statStrTmp, currTBHits);
-                }
                 if (currHash > 0)
                     statStrTmp.append(String.format(Locale.US, " h:%d", currHash / 10));
+                if (currHasWdl)
+                    statStrTmp.append(String.format(Locale.US, " wdl:%.1f/%.1f/%.1f",
+                            currWdlWin / 10.0, currWdlDraw / 10.0, currWdlLoss / 10.0));
             }
             final String statStr = statStrTmp.toString();
             final String newPV = buf.toString();
@@ -853,12 +855,24 @@ public class DroidChessController {
             this.ponderMove = ponderMove;
             pvInfoSearchId = id;
             pvInfoV = (ArrayList<PvInfo>) pvInfo.clone();
+            boolean primaryPv = true;
             for (PvInfo pv : pvInfo) {
                 currTime = pv.time;
                 currNodes = pv.nodes;
                 currNps = pv.nps;
-                currTBHits = pv.tbHits;
+                currSelDepth = pv.seldepth;
                 currHash = pv.hash;
+                // UCI WDL describes the engine's current primary evaluation. Do not
+                // let secondary MultiPV entries overwrite the displayed triplet.
+                if (primaryPv) {
+                    currHasWdl = pv.hasWdl;
+                    if (pv.hasWdl) {
+                        currWdlWin = pv.wdlWin;
+                        currWdlDraw = pv.wdlDraw;
+                        currWdlLoss = pv.wdlLoss;
+                    }
+                    primaryPv = false;
+                }
 
                 StringBuilder buf = new StringBuilder();
                 Position tmpPos = new Position(pos);
@@ -890,7 +904,6 @@ public class DroidChessController {
         public void notifyStats(int id, long nodes, int nps, long tbHits, int hash, int time, int seldepth) {
             currNodes = nodes;
             currNps = nps;
-            currTBHits = tbHits;
             currHash = hash;
             currTime = time;
             currSelDepth = seldepth;
