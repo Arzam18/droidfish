@@ -19,6 +19,7 @@
 package org.petero.droidfish.engine;
 
 import android.util.Pair;
+import android.util.Log;
 
 import java.util.ArrayList;
 import java.util.Locale;
@@ -636,14 +637,17 @@ public class DroidComputerPlayer {
 
         engineState.searchId = searchRequest.searchId;
 
-        // Reduce remaining time if there was an engine delay
+        // Reduce remaining time if there was an engine delay. Tournament timing starts
+        // before request dispatch, so this delay is also charged by CetClock; retaining
+        // the same subtraction keeps the engine's UCI clock aligned with the watchdog.
+        int engineStartDelayMs = 0;
         if (isSearch) {
             long now = System.currentTimeMillis();
-            int delay = (int)(now - searchRequest.startTime);
+            engineStartDelayMs = (int)Math.max(0L, Math.min(Integer.MAX_VALUE, now - searchRequest.startTime));
             boolean wtm = searchRequest.currPos.whiteMove ^ (searchRequest.ponderMove != null);
             if (searchRequest.tournamentGoCommand == null) {
-                if (wtm) searchRequest.wTime = Math.max(1, searchRequest.wTime - delay);
-                else searchRequest.bTime = Math.max(1, searchRequest.bTime - delay);
+                if (wtm) searchRequest.wTime = Math.max(1, searchRequest.wTime - engineStartDelayMs);
+                else searchRequest.bTime = Math.max(1, searchRequest.bTime - engineStartDelayMs);
             }
         }
 
@@ -710,7 +714,16 @@ public class DroidComputerPlayer {
                     goStr.append(TextIO.moveToUCIString(m));
                 }
             }
+            long goDispatchStartNs = System.nanoTime();
             uciEngine.writeLineToEngine(goStr.toString());
+            long goDispatchDurationMs = Math.max(0L, (System.nanoTime() - goDispatchStartNs) / 1_000_000L);
+            if (sr.cetTimeManagement && (engineStartDelayMs >= 50 ||
+                    (sr.currPos != null && (sr.currPos.whiteMove ? sr.wTime : sr.bTime) <= 10000))) {
+                int activeRemainingMs = sr.currPos == null ? -1 : (sr.currPos.whiteMove ? sr.wTime : sr.bTime);
+                Log.w("CET-EngineDispatch", "go sent delayMs=" + engineStartDelayMs +
+                        " writeMs=" + goDispatchDurationMs + " activeRemainingMs=" + activeRemainingMs +
+                        " engine=" + sr.engine);
+            }
             engineState.setState((sr.ponderMove == null) ? MainState.SEARCH : MainState.PONDER);
         } else { // Analyze
             StringBuilder posStr = new StringBuilder();
