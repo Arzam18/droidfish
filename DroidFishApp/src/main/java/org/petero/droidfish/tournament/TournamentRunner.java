@@ -790,10 +790,27 @@ public final class TournamentRunner {
                 }
             }
             long remaining = clock == null ? 0 : clock.remainingMs(whiteMoved);
+            String pv = "";
+            if (analysisAtBestMove != null) {
+                String[] lines = analysisAtBestMove.split("\\r?\\n");
+                for (int i = lines.length - 1; i >= 0; i--) {
+                    String candidate = lines[i].trim();
+                    if (!candidate.isEmpty() && !candidate.regionMatches(true, 0, "Engine WDL:", 0, 11)) {
+                        pv = candidate.replaceFirst("^\\d+\\.{1,3}\\s*", "");
+                        break;
+                    }
+                }
+            }
+            long safeClock = Math.max(0L, remaining);
+            long clockSeconds = safeClock / 1000L;
+            long clockTenths = (safeClock % 1000L) / 100L;
+            String pgnClock = String.format(java.util.Locale.US, "%d:%02d:%02d.%d",
+                    clockSeconds / 3600L, (clockSeconds / 60L) % 60L, clockSeconds % 60L, clockTenths);
+            String clockComment = usesClock() ? " [%clk " + pgnClock + "]" : "";
             String comment = "Eval: " + eval + " Depth: " + depth + " SelDepth: " + selDepth +
                     " Nodes: " + nodes + " NPS: " + nps + " EngineTime: " + engineTime +
-                    " Hash: " + hash + " Clock: " + clockText(remaining) +
-                    " Time: " + moveTimeText(moveMs) + engineWdl + whiteWdl;
+                    " Hash: " + hash + (usesClock() ? " Clock: " + clockText(remaining) : "") + clockComment +
+                    " MoveTime: " + moveTimeText(moveMs) + (pv.isEmpty() ? "" : " PV: " + pv) + engineWdl + whiteWdl;
             // The engine-provided WDL remains in the engine's own perspective. No
             // probability is estimated when UCI_ShowWDL is unsupported.
             node.setPostComment(comment);
