@@ -319,7 +319,7 @@ public class DroidComputerPlayer {
             modified = uci.setUCIOptions(pendingOptions);
             // Request native UCI WDL after saved engine options so a stale ini entry
             // cannot silently disable engine-provided WDL for tournament records.
-            modified |= uci.setOption("UCI_ShowWDL", true);
+            uci.setOption("UCI_ShowWDL", true);
         }
         pendingOptions.clear();
         return modified;
