@@ -37,7 +37,6 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Rect;
-import android.os.Handler;
 import android.util.AttributeSet;
 import android.view.MotionEvent;
 import android.view.View;
@@ -142,8 +141,6 @@ public abstract class ChessBoard extends View {
         invalidate();
     }
 
-    private Handler handlerTimer = new Handler();
-
     private final class AnimInfo {
         AnimInfo() { startTime = -1; }
         boolean paused;
@@ -172,11 +169,9 @@ public abstract class ChessBoard extends View {
             double animState = (now - startTime) / (double)(stopTime - startTime);
             drawAnimPiece(canvas, piece2, from2, to2, animState);
             drawAnimPiece(canvas, piece1, from1, to1, animState);
-            long now2 = System.currentTimeMillis();
-            long delay = 10 - (now2 - now);
-//          System.out.printf("delay:%d\n", delay);
-            if (delay < 1) delay = 1;
-            handlerTimer.postDelayed(ChessBoard.this::invalidate, delay);
+            // Schedule the next frame on the display's vsync boundary. The move
+            // duration remains unchanged; this avoids a 100 Hz timer/invalidate loop.
+            ChessBoard.this.postInvalidateOnAnimation();
         }
         private void drawAnimPiece(Canvas canvas, int piece, int from, int to, double animState) {
             if (piece == Piece.EMPTY)
@@ -489,6 +484,10 @@ public abstract class ChessBoard extends View {
 //      System.out.printf("draw: %d\n", t1-t0);
     }
 
+    private final Path moveHintPath = new Path();
+    private final Matrix moveHintMatrix = new Matrix();
+    private final Path dragMarkerPath = new Path();
+
     private void drawMoveHints(Canvas canvas) {
         if ((moveHints == null) || blindMode)
             return;
@@ -520,23 +519,23 @@ public abstract class ChessBoard extends View {
             float y5 = -d / 2;
             float x6 = 0;
             float y6 = y5 / 2;
-            Path path = new Path();
-            path.moveTo(x2, y2);
-            path.lineTo(x3, y3);
-//          path.lineTo(x4, y4);
-            path.lineTo(x5, y5);
-            path.lineTo(x6, y6);
-            path.lineTo(x6, -y6);
-            path.lineTo(x5, -y5);
-//          path.lineTo(x4, -y4);
-            path.lineTo(x3, -y3);
-            path.close();
-            Matrix mtx = new Matrix();
-            mtx.postRotate((float)(Math.atan2(y1 - y0, x1 - x0) * 180 / Math.PI));
-            mtx.postTranslate(x0, y0);
-            path.transform(mtx);
+            moveHintPath.reset();
+            moveHintPath.moveTo(x2, y2);
+            moveHintPath.lineTo(x3, y3);
+//          moveHintPath.lineTo(x4, y4);
+            moveHintPath.lineTo(x5, y5);
+            moveHintPath.lineTo(x6, y6);
+            moveHintPath.lineTo(x6, -y6);
+            moveHintPath.lineTo(x5, -y5);
+//          moveHintPath.lineTo(x4, -y4);
+            moveHintPath.lineTo(x3, -y3);
+            moveHintPath.close();
+            moveHintMatrix.reset();
+            moveHintMatrix.postRotate((float)(Math.atan2(y1 - y0, x1 - x0) * 180 / Math.PI));
+            moveHintMatrix.postTranslate(x0, y0);
+            moveHintPath.transform(moveHintMatrix);
             Paint p = moveMarkPaint.get(i);
-            canvas.drawPath(path, p);
+            canvas.drawPath(moveHintPath, p);
         }
     }
 
@@ -589,21 +588,21 @@ public abstract class ChessBoard extends View {
         float L = sqSize * 2.0f;
         float d1 = sqSize * 0.03f;
         float d2 = sqSize * 0.06f;
-        Path path = new Path();
-        path.moveTo(x0 - L,  y0 - d1);
-        path.lineTo(x0 - d2, y0 - d2);
-        path.lineTo(x0 - d1, y0 - L );
-        path.lineTo(x0 + d1, y0 - L );
-        path.lineTo(x0 + d2, y0 - d2);
-        path.lineTo(x0 + L,  y0 - d1);
-        path.lineTo(x0 + L,  y0 + d1);
-        path.lineTo(x0 + d2, y0 + d2);
-        path.lineTo(x0 + d1, y0 + L );
-        path.lineTo(x0 - d1, y0 + L );
-        path.lineTo(x0 - d2, y0 + d2);
-        path.lineTo(x0 - L,  y0 + d1);
-        path.close();
-        canvas.drawPath(path, moveMarkPaint.get(2));
+        dragMarkerPath.reset();
+        dragMarkerPath.moveTo(x0 - L,  y0 - d1);
+        dragMarkerPath.lineTo(x0 - d2, y0 - d2);
+        dragMarkerPath.lineTo(x0 - d1, y0 - L );
+        dragMarkerPath.lineTo(x0 + d1, y0 - L );
+        dragMarkerPath.lineTo(x0 + d2, y0 - d2);
+        dragMarkerPath.lineTo(x0 + L,  y0 - d1);
+        dragMarkerPath.lineTo(x0 + L,  y0 + d1);
+        dragMarkerPath.lineTo(x0 + d2, y0 + d2);
+        dragMarkerPath.lineTo(x0 + d1, y0 + L );
+        dragMarkerPath.lineTo(x0 - d1, y0 + L );
+        dragMarkerPath.lineTo(x0 - d2, y0 + d2);
+        dragMarkerPath.lineTo(x0 - L,  y0 + d1);
+        dragMarkerPath.close();
+        canvas.drawPath(dragMarkerPath, moveMarkPaint.get(2));
     }
 
     protected static class XYCoord {
