@@ -768,7 +768,7 @@ public class DroidChessController {
             if (currDepth > 0) {
                 statStrTmp.append(String.format(Locale.US, "d:%d", currDepth));
                 if (currSelDepth > 0)
-                    statStrTmp.append(String.format(Locale.US, " sd:%d", currSelDepth));
+                    statStrTmp.append(String.format(Locale.US, "/%d", currSelDepth));
                 if (currMoveNr > 0)
                     statStrTmp.append(String.format(Locale.US, " %d:%s", currMoveNr, currMoveStr));
                 if (currTime < 99995) {
