@@ -91,7 +91,10 @@ public final class TournamentActivity extends Activity {
     private TournamentChessBoard expandedMainBoard;
     private TextView expandedWhiteName, expandedBlackName, expandedWhiteAnalysis, expandedBlackAnalysis,
             expandedWhiteClock, expandedBlackClock, expandedWhiteMoveTime, expandedBlackMoveTime,
-            expandedWhiteEngineTitle, expandedBlackEngineTitle;
+            expandedWhiteEngineTitle, expandedBlackEngineTitle,
+            expandedWhiteOutputClock, expandedBlackOutputClock,
+            expandedWhiteOutputMoveTime, expandedBlackOutputMoveTime;
+    private Button expandedFlipBoardButton, expandedPlayPauseButton;
     private HorizontalScrollView expandedWhitePv, expandedBlackPv;
     private ScrollView expandedMainScroll;
     private ImageView expandedWhiteLogo, expandedBlackLogo;
@@ -100,6 +103,7 @@ public final class TournamentActivity extends Activity {
     private LinearLayout expandedRoot, expandedPanelsRow, expandedBlackInfo, expandedWhiteInfo;
     private FrameLayout expandedBoardFrame;
     private boolean expandedWhitePanelBelowBoard, expandedPanelsSwapped;
+    private boolean expandedBottomPanelWhite = true;
     private boolean expandedBlackLogoAfterInfo, expandedWhiteLogoAfterInfo;
     private String expandedMovesSignature = "";
     private boolean tournamentUiFlipped = false;
@@ -129,6 +133,7 @@ public final class TournamentActivity extends Activity {
     private LinearLayout mirrorBlackAnalysisScroll, mirrorWhiteAnalysisScroll;
     private ScrollView mirrorBlackPvScroll, mirrorWhitePvScroll;
     private LinearLayout mirrorBlackOutputPanel, mirrorWhiteOutputPanel;
+    private LinearLayout mirrorBlackPlayerGroup, mirrorWhitePlayerGroup;
     private MirrorEvaluationBar mirrorBlackEvaluationBar, mirrorWhiteEvaluationBar;
     private View mirrorBoardFrame, mirrorGraphScrollSpacer;
     private HorizontalScrollView mirrorMoveStripScroll, mirrorShortcutAnalysisScroll;
@@ -414,6 +419,7 @@ public final class TournamentActivity extends Activity {
             lastClockRefreshNs = now;
             refreshLiveClocks();
             tickAutomaticTimers();
+            updateExpandedBoardControls();
             uiHandler.postDelayed(this, 100);
         }
     };
@@ -736,6 +742,7 @@ public final class TournamentActivity extends Activity {
         enginePanelsRow.setGravity(android.view.Gravity.TOP);
         expandedBlackAnalysisPanel = createExpandedAnalysisPanel(false);
         expandedWhiteAnalysisPanel = createExpandedAnalysisPanel(true);
+        expandedBottomPanelWhite = !tournamentUiFlipped;
         LinearLayout.LayoutParams blackPanelParams = new LinearLayout.LayoutParams(0, -2, 1.0f);
         blackPanelParams.rightMargin = dp(2);
         LinearLayout.LayoutParams whitePanelParams = new LinearLayout.LayoutParams(0, -2, 1.0f);
@@ -745,8 +752,7 @@ public final class TournamentActivity extends Activity {
         root.addView(enginePanelsRow, fullWidth());
         expandedBlackPlayerRow = createExpandedPlayerRow(false);
         expandedWhitePlayerRow = createExpandedPlayerRow(true);
-        if (tournamentUiFlipped) root.addView(expandedWhitePlayerRow, fullWidth());
-        else root.addView(expandedBlackPlayerRow, fullWidth());
+        // Player rows are inserted around the board by applyExpandedPlayerRowOrder().
 
         // Measure the board from the full content width, not a percentage of screen
         // height. It therefore uses the remaining screen width instead of being
@@ -774,19 +780,45 @@ public final class TournamentActivity extends Activity {
         boardParams.topMargin = dp(5);
         boardParams.bottomMargin = dp(5);
         root.addView(boardFrame, boardParams);
-        if (tournamentUiFlipped) root.addView(expandedBlackPlayerRow, fullWidth());
-        else root.addView(expandedWhitePlayerRow, fullWidth());
+        // The opposite player's row is inserted by applyExpandedPlayerRowOrder().
+        applyExpandedPlayerRowOrder(true);
 
         expandedMovesContainer = new LinearLayout(this);
         LinearLayout movesSection = (LinearLayout)expandedMovesContainer;
         movesSection.setOrientation(LinearLayout.VERTICAL);
         movesSection.setPadding(dp(5), dp(5), dp(5), dp(8));
+        LinearLayout movesToolbar = new LinearLayout(this);
+        movesToolbar.setOrientation(LinearLayout.HORIZONTAL);
+        movesToolbar.setGravity(android.view.Gravity.CENTER_VERTICAL);
         TextView movesTitle = text("MOVES");
         movesTitle.setTextSize(14);
         movesTitle.setTypeface(null, android.graphics.Typeface.BOLD);
         movesTitle.setTextColor(0xFFBFCBD2);
+        movesTitle.setGravity(android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.LEFT);
         movesTitle.setPadding(dp(5), dp(5), dp(5), dp(5));
-        movesSection.addView(movesTitle, fullWidth());
+        movesToolbar.addView(movesTitle, new LinearLayout.LayoutParams(0, dp(44), 1.0f));
+        expandedFlipBoardButton = new Button(this);
+        expandedFlipBoardButton.setText("🔁");
+        expandedFlipBoardButton.setTextSize(19);
+        expandedFlipBoardButton.setAllCaps(false);
+        expandedFlipBoardButton.setMinHeight(0);
+        expandedFlipBoardButton.setMinimumHeight(dp(40));
+        expandedFlipBoardButton.setPadding(dp(5), 0, dp(5), 0);
+        movesToolbar.addView(expandedFlipBoardButton, new LinearLayout.LayoutParams(dp(48), dp(44)));
+        expandedFlipBoardButton.setOnClickListener(v -> toggleTournamentFlip());
+        expandedPlayPauseButton = new Button(this);
+        expandedPlayPauseButton.setText("▶️");
+        expandedPlayPauseButton.setTextSize(19);
+        expandedPlayPauseButton.setAllCaps(false);
+        expandedPlayPauseButton.setMinHeight(0);
+        expandedPlayPauseButton.setMinimumHeight(dp(40));
+        expandedPlayPauseButton.setPadding(dp(5), 0, dp(5), 0);
+        LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(dp(52), dp(44));
+        playParams.leftMargin = dp(3);
+        movesToolbar.addView(expandedPlayPauseButton, playParams);
+        expandedPlayPauseButton.setOnClickListener(v -> togglePauseResume());
+        movesSection.addView(movesToolbar, fullWidth());
+        updateExpandedBoardControls();
         expandedMovesRows = new LinearLayout(this);
         expandedMovesRows.setOrientation(LinearLayout.VERTICAL);
         ScrollView movesScroll = createIndependentVerticalScrollView();
@@ -796,6 +828,7 @@ public final class TournamentActivity extends Activity {
         movesScroll.addView(expandedMovesRows, new ScrollView.LayoutParams(-1, -2));
         movesSection.addView(movesScroll, new LinearLayout.LayoutParams(-1, dp(180)));
         root.addView(expandedMovesContainer, fullWidth());
+        applyExpandedPanelRowOrder();
 
         dialog.setContentView(pageScroll);
         dialog.setOnDismissListener(d -> {
@@ -809,12 +842,16 @@ public final class TournamentActivity extends Activity {
             expandedWhiteEngineTitle = expandedBlackEngineTitle = null;
             expandedWhitePv = expandedBlackPv = null;
             expandedWhiteClock = expandedBlackClock = expandedWhiteMoveTime = expandedBlackMoveTime = null;
+            expandedWhiteOutputClock = expandedBlackOutputClock = null;
+            expandedWhiteOutputMoveTime = expandedBlackOutputMoveTime = null;
+            expandedFlipBoardButton = expandedPlayPauseButton = null;
             expandedBlackLogo = expandedWhiteLogo = null;
             expandedBlackAnalysisPanel = expandedWhiteAnalysisPanel = expandedMovesContainer = null;
             expandedRoot = expandedPanelsRow = expandedBlackInfo = expandedWhiteInfo = null;
             expandedBoardFrame = null;
             expandedWhitePanelBelowBoard = false;
             expandedPanelsSwapped = false;
+            expandedBottomPanelWhite = !tournamentUiFlipped;
             expandedBlackLogoAfterInfo = expandedWhiteLogoAfterInfo = false;
             expandedMovesRows = null; expandedMovesSignature = "";
         });
@@ -840,13 +877,42 @@ public final class TournamentActivity extends Activity {
         label.setTextColor(white ? 0xFFFFD9A8 : 0xFFB9D9F4);
         label.setGravity(android.view.Gravity.CENTER);
         if (white) expandedWhiteEngineTitle = label; else expandedBlackEngineTitle = label;
+
         TextView metrics = text(formatEngineMetrics(white ? lastWhiteAnalysis : lastBlackAnalysis));
         metrics.setTextSize(18);
         metrics.setTextColor(0xFFFFFFFF);
         metrics.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
-        metrics.setMaxLines(5);
+        metrics.setMaxLines(4);
         metrics.setLineSpacing(dp(2), 1.0f);
         if (white) expandedWhiteAnalysis = metrics; else expandedBlackAnalysis = metrics;
+
+        TextView outputClock = text("—");
+        outputClock.setTextSize(21);
+        outputClock.setTypeface(null, android.graphics.Typeface.BOLD);
+        outputClock.setGravity(android.view.Gravity.RIGHT | android.view.Gravity.CENTER_VERTICAL);
+        TextView outputMoveTime = text("—");
+        outputMoveTime.setTextSize(15);
+        outputMoveTime.setGravity(android.view.Gravity.RIGHT | android.view.Gravity.CENTER_VERTICAL);
+        if (white) {
+            expandedWhiteOutputClock = outputClock;
+            expandedWhiteOutputMoveTime = outputMoveTime;
+        } else {
+            expandedBlackOutputClock = outputClock;
+            expandedBlackOutputMoveTime = outputMoveTime;
+        }
+        LinearLayout timingColumn = new LinearLayout(this);
+        timingColumn.setOrientation(LinearLayout.VERTICAL);
+        timingColumn.setGravity(android.view.Gravity.RIGHT | android.view.Gravity.TOP);
+        timingColumn.addView(outputClock, new LinearLayout.LayoutParams(-1, -2));
+        timingColumn.addView(outputMoveTime, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout metricsRow = new LinearLayout(this);
+        metricsRow.setOrientation(LinearLayout.HORIZONTAL);
+        metricsRow.setGravity(android.view.Gravity.TOP | android.view.Gravity.CENTER_VERTICAL);
+        metricsRow.addView(metrics, new LinearLayout.LayoutParams(0, -2, 1.0f));
+        LinearLayout.LayoutParams timingParams = new LinearLayout.LayoutParams(dp(90), -2);
+        timingParams.leftMargin = dp(14);
+        metricsRow.addView(timingColumn, timingParams);
+
         HorizontalScrollView pv = createSingleLinePv(white ? lastWhiteAnalysis : lastBlackAnalysis);
         pv.setBackgroundColor(white ? 0xFF40382F : 0xFF354450);
         if (white) expandedWhitePv = pv; else expandedBlackPv = pv;
@@ -854,7 +920,7 @@ public final class TournamentActivity extends Activity {
         LinearLayout info = new LinearLayout(this);
         info.setOrientation(LinearLayout.VERTICAL);
         info.addView(label, fullWidth());
-        info.addView(metrics, fullWidth());
+        info.addView(metricsRow, fullWidth());
         info.addView(pv, new LinearLayout.LayoutParams(-1, dp(38)));
         if (white) expandedWhiteInfo = info; else expandedBlackInfo = info;
 
@@ -912,9 +978,10 @@ public final class TournamentActivity extends Activity {
     }
 
     private void toggleExpandedWhitePanelPlacement() {
-        if (expandedRoot == null || expandedPanelsRow == null || expandedWhiteAnalysisPanel == null ||
-                expandedMovesContainer == null || expandedBoardFrame == null) return;
+        if (expandedRoot == null || expandedPanelsRow == null || expandedMovesContainer == null ||
+                expandedBoardFrame == null) return;
         expandedWhitePanelBelowBoard = !expandedWhitePanelBelowBoard;
+        if (expandedWhitePanelBelowBoard) expandedBottomPanelWhite = !tournamentUiFlipped;
         expandedWhiteLogoAfterInfo = expandedWhitePanelBelowBoard;
         expandedBlackLogoAfterInfo = expandedWhitePanelBelowBoard;
         applyExpandedAnalysisPanelLayouts();
@@ -926,19 +993,8 @@ public final class TournamentActivity extends Activity {
                 expandedBlackInfo, expandedBlackPv, expandedWhitePanelBelowBoard, expandedBlackLogoAfterInfo);
         configureExpandedAnalysisPanel((LinearLayout)expandedWhiteAnalysisPanel, expandedWhiteLogo,
                 expandedWhiteInfo, expandedWhitePv, expandedWhitePanelBelowBoard, expandedWhiteLogoAfterInfo);
-        if (expandedWhitePanelBelowBoard) {
-            ViewGroup parent = (ViewGroup)expandedWhiteAnalysisPanel.getParent();
-            if (parent != null) parent.removeView(expandedWhiteAnalysisPanel);
-            int movesIndex = expandedRoot.indexOfChild(expandedMovesContainer);
-            if (movesIndex < 0) movesIndex = expandedRoot.getChildCount();
-            expandedRoot.addView(expandedWhiteAnalysisPanel, movesIndex,
-                    new LinearLayout.LayoutParams(-1, -2));
-            applyExpandedPanelRowOrder();
-        } else {
-            ViewGroup parent = (ViewGroup)expandedWhiteAnalysisPanel.getParent();
-            if (parent != null) parent.removeView(expandedWhiteAnalysisPanel);
-            applyExpandedPanelRowOrder();
-        }
+        applyExpandedPlayerRowOrder(!expandedWhitePanelBelowBoard);
+        applyExpandedPanelRowOrder();
         expandedRoot.requestLayout();
     }
 
@@ -947,8 +1003,6 @@ public final class TournamentActivity extends Activity {
         if (panel == null || logo == null || info == null || variation == null) return;
         if (panel.getParent() instanceof ViewGroup) ((ViewGroup)panel.getParent()).removeView(panel);
         panel.removeAllViews();
-        // A horizontal content row is nested inside the panel, so detach its
-        // reusable children before putting them into the next arrangement.
         if (info.getParent() instanceof ViewGroup) ((ViewGroup)info.getParent()).removeView(info);
         if (logo.getParent() instanceof ViewGroup) ((ViewGroup)logo.getParent()).removeView(logo);
         if (variation.getParent() instanceof ViewGroup && variation.getParent() != info)
@@ -957,17 +1011,19 @@ public final class TournamentActivity extends Activity {
         panel.setGravity(android.view.Gravity.TOP);
 
         TextView engineTitle = info.getChildAt(0) instanceof TextView ? (TextView)info.getChildAt(0) : null;
+        LinearLayout metricsRow = info.getChildAt(1) instanceof LinearLayout ? (LinearLayout)info.getChildAt(1) : null;
+        if (metricsRow != null && metricsRow.getChildCount() > 1)
+            metricsRow.getChildAt(1).setVisibility(horizontal ? View.VISIBLE : View.GONE);
+
         if (horizontal) {
-            // The active/double-tap layout is a six-line information block beside a
-            // larger icon. Keep the PV outside that block so it can use the full row.
+            // Expanded/double-tap layout: engine info and clock occupy a stable
+            // left block; the large icon stays beside it and PV keeps the full row.
             if (variation.getParent() == info) info.removeView(variation);
-            if (engineTitle != null)
-                engineTitle.setGravity(android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.LEFT);
+            if (engineTitle != null) engineTitle.setGravity(android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.LEFT);
             LinearLayout contentRow = new LinearLayout(this);
             contentRow.setOrientation(LinearLayout.HORIZONTAL);
             contentRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
             LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(0, -2, 1.0f);
-            // Use the open side area for a larger engine logo in the full-width layout.
             LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(126), dp(148));
             logoParams.gravity = android.view.Gravity.CENTER_VERTICAL;
             if (logoAfterInfo) {
@@ -984,8 +1040,7 @@ public final class TournamentActivity extends Activity {
         } else {
             if (variation.getParent() != info)
                 info.addView(variation, new LinearLayout.LayoutParams(-1, dp(38)));
-            if (engineTitle != null)
-                engineTitle.setGravity(android.view.Gravity.CENTER);
+            if (engineTitle != null) engineTitle.setGravity(android.view.Gravity.CENTER);
             LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(76), dp(66));
             logoParams.gravity = android.view.Gravity.CENTER;
             if (logoAfterInfo) {
@@ -998,21 +1053,43 @@ public final class TournamentActivity extends Activity {
         }
     }
 
+    /** Keep player rows attached to the correctly oriented side of the board. */
+    private void applyExpandedPlayerRowOrder(boolean showRows) {
+        if (expandedRoot == null || expandedBoardFrame == null ||
+                expandedBlackPlayerRow == null || expandedWhitePlayerRow == null) return;
+        if (expandedBlackPlayerRow.getParent() instanceof ViewGroup)
+            ((ViewGroup)expandedBlackPlayerRow.getParent()).removeView(expandedBlackPlayerRow);
+        if (expandedWhitePlayerRow.getParent() instanceof ViewGroup)
+            ((ViewGroup)expandedWhitePlayerRow.getParent()).removeView(expandedWhitePlayerRow);
+        if (!showRows) return;
+        int boardIndex = expandedRoot.indexOfChild(expandedBoardFrame);
+        if (boardIndex < 0) return;
+        View topRow = tournamentUiFlipped ? expandedWhitePlayerRow : expandedBlackPlayerRow;
+        View bottomRow = tournamentUiFlipped ? expandedBlackPlayerRow : expandedWhitePlayerRow;
+        expandedRoot.addView(topRow, boardIndex, fullWidth());
+        int currentBoardIndex = expandedRoot.indexOfChild(expandedBoardFrame);
+        expandedRoot.addView(bottomRow, currentBoardIndex + 1, fullWidth());
+    }
+
+    /** Place each output with its engine side; in double-tap mode one panel is above and one below the board. */
     private void applyExpandedPanelRowOrder() {
-        if (expandedPanelsRow == null || expandedBlackAnalysisPanel == null || expandedWhiteAnalysisPanel == null) return;
-        if (expandedWhitePanelBelowBoard) {
-            if (expandedBlackAnalysisPanel.getParent() != expandedPanelsRow) {
-                ViewGroup parent = (ViewGroup)expandedBlackAnalysisPanel.getParent();
-                if (parent != null) parent.removeView(expandedBlackAnalysisPanel);
-                expandedPanelsRow.addView(expandedBlackAnalysisPanel, fullWidth());
-            }
-            return;
-        }
+        if (expandedRoot == null || expandedPanelsRow == null || expandedBlackAnalysisPanel == null ||
+                expandedWhiteAnalysisPanel == null || expandedBoardFrame == null || expandedMovesContainer == null) return;
         if (expandedBlackAnalysisPanel.getParent() instanceof ViewGroup)
             ((ViewGroup)expandedBlackAnalysisPanel.getParent()).removeView(expandedBlackAnalysisPanel);
         if (expandedWhiteAnalysisPanel.getParent() instanceof ViewGroup)
             ((ViewGroup)expandedWhiteAnalysisPanel.getParent()).removeView(expandedWhiteAnalysisPanel);
         expandedPanelsRow.removeAllViews();
+        if (expandedWhitePanelBelowBoard) {
+            View topPanel = expandedBottomPanelWhite ? expandedBlackAnalysisPanel : expandedWhiteAnalysisPanel;
+            View bottomPanel = expandedBottomPanelWhite ? expandedWhiteAnalysisPanel : expandedBlackAnalysisPanel;
+            expandedPanelsRow.addView(topPanel, fullWidth());
+            int movesIndex = expandedRoot.indexOfChild(expandedMovesContainer);
+            if (movesIndex < 0) movesIndex = expandedRoot.getChildCount();
+            expandedRoot.addView(bottomPanel, movesIndex, new LinearLayout.LayoutParams(-1, -2));
+            expandedRoot.requestLayout();
+            return;
+        }
         View left = expandedPanelsSwapped ? expandedWhiteAnalysisPanel : expandedBlackAnalysisPanel;
         View right = expandedPanelsSwapped ? expandedBlackAnalysisPanel : expandedWhiteAnalysisPanel;
         LinearLayout.LayoutParams leftParams = new LinearLayout.LayoutParams(0, -2, 1.0f);
@@ -1021,6 +1098,13 @@ public final class TournamentActivity extends Activity {
         rightParams.leftMargin = dp(2);
         expandedPanelsRow.addView(left, leftParams);
         expandedPanelsRow.addView(right, rightParams);
+        expandedRoot.requestLayout();
+    }
+
+    private void updateExpandedBoardControls() {
+        if (expandedPlayPauseButton == null) return;
+        boolean running = runner != null && !runner.isFinished() && !runner.isStopped() && !runner.isPaused();
+        expandedPlayPauseButton.setText(running ? "⏸️" : "▶️");
     }
 
     private void copyTournamentEngineOutput(boolean white, String analysis) {
@@ -1116,15 +1200,10 @@ public final class TournamentActivity extends Activity {
     }
 
     private String formatEngineMetrics(String analysis) {
-        if (analysis == null || analysis.trim().isEmpty()) return "Eval: —\nDepth: —\nSelDepth: —\nNPS: —\nNodes: —";
-        String value = analysis.split("\\r?\\n", 2)[0];
-        value = value.replaceAll("(?i)\\s+Time:\\s*[^\\s]+", "");
-        value = value.replaceAll("(?i)\\s+Hash:\\s*[^\\s]+", "");
-        value = value.replaceAll("(?i)\\s*TBHits:\\s*[^\\s]+", "");
-        value = value.replaceAll("(Nodes:\\s*[^\\s]+)\\s+(NPS:\\s*[^\\s]+)", "$2\n$1");
-        value = value.replaceAll("\\s+(?=(?:Depth|SelDepth|Nodes|NPS):)", "\n");
-        value = value.replaceAll("(?i)^\\s*Eval\\s*:", "Eval:");
-        return value.trim();
+        return "Eval: " + analysisField(analysis, "Eval") +
+                "\nDepth: " + combinedDepthDisplay(analysis) +
+                "\nNPS: " + analysisField(analysis, "NPS") +
+                "\nNodes: " + analysisField(analysis, "Nodes");
     }
 
     private void toggleExpandedBoardFocus() {
@@ -1291,16 +1370,31 @@ public final class TournamentActivity extends Activity {
 
     private void updateExpandedClockDisplay() {
         if (expandedMainDialog == null || !expandedMainDialog.isShowing()) return;
-        if (expandedWhiteClock != null && whiteClockText != null) {
-            expandedWhiteClock.setText(whiteClockText.getText());
+        CharSequence whiteClock = whiteClockText == null ? "—" : whiteClockText.getText();
+        CharSequence blackClock = blackClockText == null ? "—" : blackClockText.getText();
+        CharSequence whiteMove = whiteMoveTimeText == null ? "—" : whiteMoveTimeText.getText();
+        CharSequence blackMove = blackMoveTimeText == null ? "—" : blackMoveTimeText.getText();
+        if (expandedWhiteClock != null) {
+            expandedWhiteClock.setText(whiteClock);
             expandedWhiteClock.setTextColor(currentWhiteToMove ? 0xFFFFFFFF : 0xFF9A9A9A);
         }
-        if (expandedBlackClock != null && blackClockText != null) {
-            expandedBlackClock.setText(blackClockText.getText());
+        if (expandedBlackClock != null) {
+            expandedBlackClock.setText(blackClock);
             expandedBlackClock.setTextColor(currentWhiteToMove ? 0xFF9A9A9A : 0xFFFFFFFF);
         }
-        if (expandedWhiteMoveTime != null && whiteMoveTimeText != null) expandedWhiteMoveTime.setText(whiteMoveTimeText.getText());
-        if (expandedBlackMoveTime != null && blackMoveTimeText != null) expandedBlackMoveTime.setText(blackMoveTimeText.getText());
+        if (expandedWhiteMoveTime != null) expandedWhiteMoveTime.setText(whiteMove);
+        if (expandedBlackMoveTime != null) expandedBlackMoveTime.setText(blackMove);
+        if (expandedWhiteOutputClock != null) {
+            expandedWhiteOutputClock.setText(whiteClock);
+            expandedWhiteOutputClock.setTextColor(currentWhiteToMove ? 0xFFFFFFFF : 0xFF9A9A9A);
+        }
+        if (expandedBlackOutputClock != null) {
+            expandedBlackOutputClock.setText(blackClock);
+            expandedBlackOutputClock.setTextColor(currentWhiteToMove ? 0xFF9A9A9A : 0xFFFFFFFF);
+        }
+        if (expandedWhiteOutputMoveTime != null) expandedWhiteOutputMoveTime.setText(whiteMove);
+        if (expandedBlackOutputMoveTime != null) expandedBlackOutputMoveTime.setText(blackMove);
+        updateExpandedBoardControls();
     }
 
     /** Main Board only: a single-line metrics header above a two-line scrollable PV viewport. */
@@ -1695,8 +1789,8 @@ public final class TournamentActivity extends Activity {
         mirrorFocusAnalysisText.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
         mirrorFocusAnalysisText.setIncludeFontPadding(false);
         mirrorFocusAnalysisText.setSingleLine(false);
-        mirrorFocusAnalysisText.setMinLines(5);
-        mirrorFocusAnalysisText.setMaxLines(5);
+        mirrorFocusAnalysisText.setMinLines(4);
+        mirrorFocusAnalysisText.setMaxLines(4);
         attachMirrorFocusOutputLongPress(mirrorFocusAnalysisText);
         mirrorFocusAnalysisPvText = createMirrorVariationText();
         mirrorFocusAnalysisPvText.setTextSize(12);
@@ -1748,8 +1842,8 @@ public final class TournamentActivity extends Activity {
 
         mirrorBlackAnalysisText = text(formatMirrorMetrics(null));
         mirrorBlackAnalysisText.setTextSize(13.5f);
-        mirrorBlackAnalysisText.setMinLines(5);
-        mirrorBlackAnalysisText.setMaxLines(5);
+        mirrorBlackAnalysisText.setMinLines(4);
+        mirrorBlackAnalysisText.setMaxLines(4);
         mirrorBlackAnalysisText.setMinHeight(0);
         mirrorBlackAnalysisText.setIncludeFontPadding(false);
         mirrorBlackAnalysisText.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
@@ -1859,8 +1953,8 @@ public final class TournamentActivity extends Activity {
 
         mirrorWhiteAnalysisText = text(formatMirrorMetrics(null));
         mirrorWhiteAnalysisText.setTextSize(13.5f);
-        mirrorWhiteAnalysisText.setMinLines(5);
-        mirrorWhiteAnalysisText.setMaxLines(5);
+        mirrorWhiteAnalysisText.setMinLines(4);
+        mirrorWhiteAnalysisText.setMaxLines(4);
         mirrorWhiteAnalysisText.setMinHeight(0);
         mirrorWhiteAnalysisText.setIncludeFontPadding(false);
         mirrorWhiteAnalysisText.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
@@ -1886,6 +1980,7 @@ public final class TournamentActivity extends Activity {
         attachMirrorOutputLongPress(mirrorWhiteIcon, true);
         attachMirrorOutputLongPress(mirrorWhiteOutputPanel, true);
 
+        createMirrorPlayerGroups();
         installMirrorPlayerOutputGestures();
         applyMirrorPlayerPanelSizes();
 
@@ -2260,7 +2355,7 @@ public final class TournamentActivity extends Activity {
 
     private void applyMirrorPlayerPanelSizes() {
         // The engine name is already in the player row. Use the panel height only
-        // for the five metrics lines, scrollable PV, evaluation bar, and padding.
+        // for the four metrics lines, scrollable PV, evaluation bar, and padding.
         int analysisHeight = mirrorPlayerPanelsCompact ? dp(74) : dp(102);
         int playerHeight = analysisHeight + dp(16); // 8dp eval bar + 8dp vertical padding
         int titleHeight = mirrorPlayerPanelsCompact ? dp(16) : dp(24);
@@ -2448,19 +2543,19 @@ public final class TournamentActivity extends Activity {
         return scroll;
     }
 
-    /** Mirror Board only: five fixed metric lines and a separately scrollable PV. */
+    /** Mirror Board: four fixed metric lines and a separately scrollable PV. */
     private LinearLayout createMirrorAnalysisRow(TextView metrics, ScrollView variation) {
         return createMirrorAnalysisRow(metrics, variation, null);
     }
 
-    /** Normal output reserves the right-hand blank space for the engine icon. */
+    /** Keep the engine icon inside the metrics/info column, not inside PV width. */
     private LinearLayout createMirrorAnalysisRow(TextView metrics, ScrollView variation, ImageView icon) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(android.view.Gravity.TOP);
         metrics.setSingleLine(false);
-        metrics.setMinLines(5);
-        metrics.setMaxLines(5);
+        metrics.setMinLines(4);
+        metrics.setMaxLines(4);
         metrics.setEllipsize(null);
         metrics.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
         metrics.setIncludeFontPadding(false);
@@ -2469,14 +2564,18 @@ public final class TournamentActivity extends Activity {
             row.addView(metrics, new LinearLayout.LayoutParams(0, -1, 0.92f));
             row.addView(variation, new LinearLayout.LayoutParams(0, -1, 1.08f));
         } else {
-            row.addView(metrics, new LinearLayout.LayoutParams(0, -1, 0.72f));
-            row.addView(variation, new LinearLayout.LayoutParams(0, -1, 1.0f));
+            LinearLayout infoArea = new LinearLayout(this);
+            infoArea.setOrientation(LinearLayout.HORIZONTAL);
+            infoArea.setGravity(android.view.Gravity.TOP | android.view.Gravity.CENTER_VERTICAL);
+            infoArea.addView(metrics, new LinearLayout.LayoutParams(0, -1, 1.0f));
             icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
             LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(
                     dp(mirrorPlayerPanelsCompact ? 28 : 44), -1);
-            iconParams.leftMargin = dp(4);
+            iconParams.leftMargin = dp(3);
             iconParams.gravity = android.view.Gravity.CENTER_VERTICAL;
-            row.addView(icon, iconParams);
+            infoArea.addView(icon, iconParams);
+            row.addView(infoArea, new LinearLayout.LayoutParams(0, -1, 0.92f));
+            row.addView(variation, new LinearLayout.LayoutParams(0, -1, 1.08f));
         }
         return row;
     }
@@ -2496,13 +2595,17 @@ public final class TournamentActivity extends Activity {
             mirrorPage.setGravity(android.view.Gravity.CENTER);
             for (int i = 0; i < mirrorPage.getChildCount(); i++) {
                 View child = mirrorPage.getChildAt(i);
-                child.setVisibility((child == mirrorBoardFrame || child == mirrorBlackRow || child == mirrorWhiteRow ||
-                        child == mirrorFocusBlackIcon || child == mirrorFocusWhiteIcon) ? View.VISIBLE : View.GONE);
+                child.setVisibility((child == mirrorBoardFrame || child == mirrorBlackPlayerGroup ||
+                        child == mirrorWhitePlayerGroup) ? View.VISIBLE : View.GONE);
             }
+            if (mirrorBlackOutputPanel != null) mirrorBlackOutputPanel.setVisibility(View.GONE);
+            if (mirrorWhiteOutputPanel != null) mirrorWhiteOutputPanel.setVisibility(View.GONE);
+            if (mirrorBlackRow != null) mirrorBlackRow.setVisibility(View.VISIBLE);
+            if (mirrorWhiteRow != null) mirrorWhiteRow.setVisibility(View.VISIBLE);
             if (mirrorBlackIcon != null) mirrorBlackIcon.setVisibility(View.GONE);
             if (mirrorWhiteIcon != null) mirrorWhiteIcon.setVisibility(View.GONE);
-            if (mirrorFocusBlackIcon != null) { setMirrorPlayerIcon(mirrorFocusBlackIcon, currentBlackEngineId, currentBlackName); }
-            if (mirrorFocusWhiteIcon != null) { setMirrorPlayerIcon(mirrorFocusWhiteIcon, currentWhiteEngineId, currentWhiteName); }
+            if (mirrorFocusBlackIcon != null) setMirrorPlayerIcon(mirrorFocusBlackIcon, currentBlackEngineId, currentBlackName);
+            if (mirrorFocusWhiteIcon != null) setMirrorPlayerIcon(mirrorFocusWhiteIcon, currentWhiteEngineId, currentWhiteName);
             if (mirrorControlBar != null) mirrorControlBar.setVisibility(View.GONE);
         } else {
             mirrorPage.setGravity(android.view.Gravity.NO_GRAVITY);
@@ -3428,7 +3531,7 @@ public final class TournamentActivity extends Activity {
                 String engineWdl = pv.hasWdl ? "\nEngine WDL: W " + String.format(java.util.Locale.US, "%.1f", pv.wdlWin / 10.0) +
                         "%   D " + String.format(java.util.Locale.US, "%.1f", pv.wdlDraw / 10.0) +
                         "%   L " + String.format(java.util.Locale.US, "%.1f", pv.wdlLoss / 10.0) + "%" : "";
-                String output = "Eval: " + eval + "   Depth: " + pv.depth + "   SelDepth: " + pv.seldepth +
+                String output = "Eval: " + eval + "   Depth: " + pv.depth + "/" + pv.seldepth +
                         "   NPS: " + compactViewerCount(pv.nps) + "   Nodes: " + compactViewerCount(pv.nodes) +
                         engineWdl + (line.length() == 0 ? "" : "\nPV 1  " + line) +
                         (depthLines.isEmpty() ? "" : "\n" + depthLines);
@@ -3716,8 +3819,11 @@ public final class TournamentActivity extends Activity {
         StringBuilder first = new StringBuilder();
         if (bookComment) first.append("Book.");
         if (!eval.isEmpty()) first.append(eval);
-        if (!depth.isEmpty()) appendMirrorValue(first, "d" + depth);
-        if (!selDepth.isEmpty()) appendMirrorValue(first, "sd" + selDepth);
+        if (!depth.isEmpty()) {
+            String depthDisplay = depth;
+            if (depthDisplay.indexOf('/') < 0 && !selDepth.isEmpty()) depthDisplay += "/" + selDepth;
+            appendMirrorValue(first, "d" + depthDisplay);
+        }
         if (!nodes.isEmpty()) appendMirrorValue(first, "n" + nodes);
         if (!nps.isEmpty()) appendMirrorValue(first, nps + "nps");
         if (!used.isEmpty()) appendMirrorValue(first, "t:" + mirrorSecondsForDisplay(used));
@@ -5316,8 +5422,8 @@ public final class TournamentActivity extends Activity {
 
     private void updateMirrorReplayDetails(int ply) {
         String whiteClock = "—", blackClock = "—", whiteTime = "—", blackTime = "—";
-        String whiteAnalysis = "—    Depth: —    SelDepth: —    Nodes: —    NPS: —";
-        String blackAnalysis = "—    Depth: —    SelDepth: —    Nodes: —    NPS: —";
+        String whiteAnalysis = "—    Depth: —    Nodes: —    NPS: —";
+        String blackAnalysis = "—    Depth: —    Nodes: —    NPS: —";
         int safePly = Math.max(0, Math.min(ply, mirrorReplayComments.size()));
         for (int i = 0; i < safePly; i++) {
             String comment = mirrorReplayComments.get(i);
@@ -5653,15 +5759,17 @@ public final class TournamentActivity extends Activity {
     }
 
     private String analysisFromComment(String c) {
-        if (c == null || c.isEmpty()) return "---  Depth: ---  SelDepth: ---  Nodes: ---  NPS: ---";
+        if (c == null || c.isEmpty()) return "---  Depth: ---  Nodes: ---  NPS: ---";
         String eval = findCommentValue(c, "Eval|eval");
         String depth = findCommentValue(c, "Depth|D");
         String selDepth = findCommentValue(c, "SelDepth|SDepth|SD");
         String nodes = findCommentValue(c, "Nodes|N");
         String nps = findCommentValue(c, "NPS|nps");
         String engineTime = findCommentValue(c, "EngineTime");
-        String result = "Eval: " + dash(eval) + "  Depth: " + dash(depth) +
-                "  SelDepth: " + dash(selDepth) + "  NPS: " + dash(nps) +
+        String depthDisplay = dash(depth);
+        if (depthDisplay.indexOf('/') < 0 && selDepth != null && !selDepth.isEmpty())
+            depthDisplay += "/" + dash(selDepth);
+        String result = "Eval: " + dash(eval) + "  Depth: " + depthDisplay + "  NPS: " + dash(nps) +
                 "  Nodes: " + dash(nodes);
         java.util.regex.Matcher w = java.util.regex.Pattern.compile(
                 "(?i)EngineWDL:\\s*W:\\s*([0-9]+(?:\\.[0-9]+)?)%\\s+D:\\s*([0-9]+(?:\\.[0-9]+)?)%\\s+L:\\s*([0-9]+(?:\\.[0-9]+)?)%")
@@ -5710,7 +5818,7 @@ public final class TournamentActivity extends Activity {
         m=java.util.regex.Pattern.compile("(?m)^\\[Black\\s+\"([^\"]*)\"\\]").matcher(pgn); if(m.find())black=m.group(1); return new String[]{white,black};
     }
     private String findAnalysis(int ply, boolean white) {
-        if (ply <= 0) return "---  Depth: ---  SelDepth: ---  Nodes: ---  NPS: ---";
+        if (ply <= 0) return "---  Depth: ---  Nodes: ---  NPS: ---";
         String c = ply - 1 < gameViewerComments.size() ? gameViewerComments.get(ply - 1) : "";
         String eval = findCommentValue(c, "Eval|eval");
         String depth = findCommentValue(c, "D|Depth");
@@ -5722,7 +5830,10 @@ public final class TournamentActivity extends Activity {
                 "(?i)EngineWDL:\\s*W:\\s*([0-9]+(?:\\.[0-9]+)?)%\\s+D:\\s*([0-9]+(?:\\.[0-9]+)?)%\\s+L:\\s*([0-9]+(?:\\.[0-9]+)?)%")
                 .matcher(c);
         if (matcher.find()) wdl = "  Engine WDL: " + matcher.group(1) + "/" + matcher.group(2) + "/" + matcher.group(3);
-        return dash(eval) + "  Depth: " + dash(depth) + "  SelDepth: " + dash(selDepth) +
+        String depthDisplay = dash(depth);
+        if (depthDisplay.indexOf('/') < 0 && selDepth != null && !selDepth.isEmpty())
+            depthDisplay += "/" + dash(selDepth);
+        return dash(eval) + "  Depth: " + depthDisplay +
                 "  Nodes: " + dash(nodes) + "  NPS: " + dash(nps) + wdl;
     }
     private String dash(String v) { return v==null||v.isEmpty()?"---":v; }
@@ -5774,7 +5885,7 @@ public final class TournamentActivity extends Activity {
                 String engineWdl = pv.hasWdl ? "\nEngine WDL: W " + String.format(java.util.Locale.US, "%.1f", pv.wdlWin / 10.0) +
                         "%  D " + String.format(java.util.Locale.US, "%.1f", pv.wdlDraw / 10.0) +
                         "%  L " + String.format(java.util.Locale.US, "%.1f", pv.wdlLoss / 10.0) + "%" : "";
-                String output="Eval: "+eval+"    Depth: "+pv.depth+"    SelDepth: "+pv.seldepth+
+                String output="Eval: "+eval+"    Depth: "+pv.depth+"/"+pv.seldepth+
                         "    NPS: "+compactViewerCount(pv.nps)+"    Nodes: "+compactViewerCount(pv.nodes)+
                         engineWdl+"\n"+variation;
                 runOnUiThread(()->{ if(!gameViewerAnalysisOn)return; gvWhiteAnalysis.setText(formatEngineOutput(output)); gvBlackAnalysis.setText("Black ---  Depth: ---  Nodes: ---  NPS: ---"); gameViewerHints.clear(); gameViewerHints.addAll(hints); gameViewerBoard.setMoveHints(gameViewerHints); });
@@ -7797,9 +7908,9 @@ public final class TournamentActivity extends Activity {
         long w=r.remainingMs(true), b=r.remainingMs(false);
         if(whiteClockText!=null && w>=0) whiteClockText.setText(formatClock(w));
         if(blackClockText!=null && b>=0) blackClockText.setText(formatClock(b));
-        updateExpandedClockDisplay();
         long elapsed=r.activeMoveTimeMs();
         if(elapsed>=0) { boolean white=r.whiteToMove(); TextView t=white?whiteMoveTimeText:blackMoveTimeText; if(t!=null)t.setText(formatClockDuration(elapsed)); }
+        updateExpandedClockDisplay();
         if (mirrorView != null && mirrorView.getParent() != null) syncMirrorFromLive();
     }
 
@@ -8341,45 +8452,95 @@ public final class TournamentActivity extends Activity {
         updateMainOutputTitles();
     }
 
-    /** Keep each Mirror side's output, focus icon, and clock/name/time row together around the board. */
-    private void reorderMirrorPlayerGroups() {
-        if (mirrorPage == null || mirrorBoardFrame == null || mirrorFocusMovesScroll == null ||
-                mirrorBlackOutputPanel == null || mirrorWhiteOutputPanel == null ||
-                mirrorBlackRow == null || mirrorWhiteRow == null ||
+    /** Put the output, focus icon and clock/name/time row in one side-owned container. */
+    private void createMirrorPlayerGroups() {
+        if (mirrorPage == null || mirrorBoardFrame == null || mirrorBlackOutputPanel == null ||
+                mirrorWhiteOutputPanel == null || mirrorBlackRow == null || mirrorWhiteRow == null ||
                 mirrorFocusBlackIcon == null || mirrorFocusWhiteIcon == null) return;
-
-        if (mirrorPage.indexOfChild(mirrorBoardFrame) < 0) return;
-        View[] group = {mirrorBlackOutputPanel, mirrorFocusBlackIcon, mirrorBlackRow,
+        if (mirrorBlackPlayerGroup == null) mirrorBlackPlayerGroup = new LinearLayout(this);
+        if (mirrorWhitePlayerGroup == null) mirrorWhitePlayerGroup = new LinearLayout(this);
+        mirrorBlackPlayerGroup.setOrientation(LinearLayout.VERTICAL);
+        mirrorWhitePlayerGroup.setOrientation(LinearLayout.VERTICAL);
+        ViewGroup.LayoutParams blackOutputParams = mirrorBlackOutputPanel.getLayoutParams();
+        ViewGroup.LayoutParams blackIconParams = mirrorFocusBlackIcon.getLayoutParams();
+        ViewGroup.LayoutParams blackRowParams = mirrorBlackRow.getLayoutParams();
+        ViewGroup.LayoutParams whiteOutputParams = mirrorWhiteOutputPanel.getLayoutParams();
+        ViewGroup.LayoutParams whiteIconParams = mirrorFocusWhiteIcon.getLayoutParams();
+        ViewGroup.LayoutParams whiteRowParams = mirrorWhiteRow.getLayoutParams();
+        View[] children = {mirrorBlackOutputPanel, mirrorFocusBlackIcon, mirrorBlackRow,
                 mirrorWhiteOutputPanel, mirrorFocusWhiteIcon, mirrorWhiteRow};
-        for (View child : group) mirrorPage.removeView(child);
-
-        int boardIndex = mirrorPage.indexOfChild(mirrorBoardFrame);
-        if (boardIndex < 0) return;
-        View topOutput = mirrorUiFlipped ? mirrorWhiteOutputPanel : mirrorBlackOutputPanel;
-        View topIcon = mirrorUiFlipped ? mirrorFocusWhiteIcon : mirrorFocusBlackIcon;
-        View topRow = mirrorUiFlipped ? mirrorWhiteRow : mirrorBlackRow;
-        mirrorPage.addView(topOutput, boardIndex);
-        mirrorPage.addView(topIcon, boardIndex + 1);
-        mirrorPage.addView(topRow, boardIndex + 2);
-
-        int movesIndex = mirrorPage.indexOfChild(mirrorFocusMovesScroll);
-        int bottomIndex = movesIndex >= 0 ? movesIndex + 1 : mirrorPage.getChildCount();
-        View bottomRow = mirrorUiFlipped ? mirrorBlackRow : mirrorWhiteRow;
-        View bottomIcon = mirrorUiFlipped ? mirrorFocusBlackIcon : mirrorFocusWhiteIcon;
-        View bottomOutput = mirrorUiFlipped ? mirrorBlackOutputPanel : mirrorWhiteOutputPanel;
-        mirrorPage.addView(bottomRow, bottomIndex++);
-        mirrorPage.addView(bottomIcon, bottomIndex++);
-        mirrorPage.addView(bottomOutput, bottomIndex);
+        for (View child : children) {
+            if (child.getParent() instanceof ViewGroup) ((ViewGroup)child.getParent()).removeView(child);
+        }
+        mirrorBlackPlayerGroup.removeAllViews();
+        mirrorWhitePlayerGroup.removeAllViews();
+        mirrorBlackPlayerGroup.addView(mirrorBlackOutputPanel, blackOutputParams == null ? new LinearLayout.LayoutParams(-1, dp(90)) : blackOutputParams);
+        mirrorBlackPlayerGroup.addView(mirrorFocusBlackIcon, blackIconParams == null ? new LinearLayout.LayoutParams(dp(64), dp(52)) : blackIconParams);
+        mirrorBlackPlayerGroup.addView(mirrorBlackRow, blackRowParams == null ? fullWidth() : blackRowParams);
+        mirrorWhitePlayerGroup.addView(mirrorWhiteRow, whiteRowParams == null ? fullWidth() : whiteRowParams);
+        mirrorWhitePlayerGroup.addView(mirrorFocusWhiteIcon, whiteIconParams == null ? new LinearLayout.LayoutParams(dp(64), dp(52)) : whiteIconParams);
+        mirrorWhitePlayerGroup.addView(mirrorWhiteOutputPanel, whiteOutputParams == null ? new LinearLayout.LayoutParams(-1, dp(90)) : whiteOutputParams);
+        reorderMirrorPlayerGroups();
     }
 
-    /** Flip player panels together with the board, preserving each side's data. */
+    /** Reorder one side's children for its position above or below the board. */
+    private void configureMirrorPlayerGroup(LinearLayout group, boolean white, boolean aboveBoard) {
+        if (group == null) return;
+        View output = white ? mirrorWhiteOutputPanel : mirrorBlackOutputPanel;
+        View focusIcon = white ? mirrorFocusWhiteIcon : mirrorFocusBlackIcon;
+        View playerRow = white ? mirrorWhiteRow : mirrorBlackRow;
+        ViewGroup.LayoutParams outputParams = output.getLayoutParams();
+        ViewGroup.LayoutParams iconParams = focusIcon.getLayoutParams();
+        ViewGroup.LayoutParams rowParams = playerRow.getLayoutParams();
+        group.removeAllViews();
+        if (aboveBoard) {
+            group.addView(output, outputParams);
+            group.addView(focusIcon, iconParams);
+            group.addView(playerRow, rowParams);
+        } else {
+            group.addView(playerRow, rowParams);
+            group.addView(focusIcon, iconParams);
+            group.addView(output, outputParams);
+        }
+    }
+
+    /** Move two side-owned groups around the board; flip can no longer separate their children. */
+    private void reorderMirrorPlayerGroups() {
+        if (mirrorPage == null || mirrorBoardFrame == null || mirrorFocusMovesScroll == null ||
+                mirrorBlackPlayerGroup == null || mirrorWhitePlayerGroup == null) return;
+        LinearLayout topGroup = mirrorUiFlipped ? mirrorWhitePlayerGroup : mirrorBlackPlayerGroup;
+        LinearLayout bottomGroup = mirrorUiFlipped ? mirrorBlackPlayerGroup : mirrorWhitePlayerGroup;
+        configureMirrorPlayerGroup(topGroup, mirrorUiFlipped, true);
+        configureMirrorPlayerGroup(bottomGroup, !mirrorUiFlipped, false);
+        if (mirrorBlackPlayerGroup.getParent() instanceof ViewGroup)
+            ((ViewGroup)mirrorBlackPlayerGroup.getParent()).removeView(mirrorBlackPlayerGroup);
+        if (mirrorWhitePlayerGroup.getParent() instanceof ViewGroup)
+            ((ViewGroup)mirrorWhitePlayerGroup.getParent()).removeView(mirrorWhitePlayerGroup);
+        int boardIndex = mirrorPage.indexOfChild(mirrorBoardFrame);
+        if (boardIndex < 0) return;
+        mirrorPage.addView(topGroup, boardIndex, fullWidth());
+        int movesIndex = mirrorPage.indexOfChild(mirrorFocusMovesScroll);
+        int bottomIndex = movesIndex >= 0 ? movesIndex + 1 : mirrorPage.getChildCount();
+        mirrorPage.addView(bottomGroup, bottomIndex, fullWidth());
+        mirrorPage.requestLayout();
+    }
+
+    /** Flip each board and keep the matching side-owned analysis groups attached. */
     private void toggleTournamentFlip() {
         if (tournamentBoard != null) tournamentBoard.setFlipped(!tournamentBoard.flipped);
         if (mirrorBoard != null) { mirrorBoard.setFlipped(!mirrorBoard.flipped); mirrorBoard.invalidate(); }
+        if (expandedMainBoard != null) expandedMainBoard.setFlipped(!expandedMainBoard.flipped);
         tournamentUiFlipped = !tournamentUiFlipped;
         mirrorUiFlipped = !mirrorUiFlipped;
+        expandedPanelsSwapped = !expandedPanelsSwapped;
+        expandedBottomPanelWhite = !expandedBottomPanelWhite;
         reorderMirrorPlayerGroups();
+        if (expandedMainDialog != null && expandedMainDialog.isShowing()) {
+            applyExpandedPlayerRowOrder(!expandedWhitePanelBelowBoard);
+            applyExpandedPanelRowOrder();
+        }
         applyMainBoardAnalysisPositions();
+        updateExpandedBoardControls();
     }
 
     private void resumeTournament() {
@@ -8581,27 +8742,52 @@ public final class TournamentActivity extends Activity {
         }
     }
 
-    /** Display-only cleanup for legacy PGN comments; new output uses SelDepth, not TBHits. */
+    /** Display-only cleanup for legacy PGN comments and normalize Depth/SelDepth. */
     private String formatEngineOutput(String value) {
         if (value == null) return "";
-        String formatted = value.replaceAll("(?i)\\s*TBHits:\\s*[^\\s]+", "");
+        String formatted = combineDepthFields(value);
+        formatted = formatted.replaceAll("(?i)\\s*TBHits:\\s*[^\\s]+", "");
         formatted = formatted.replaceAll("(?i)\\s+Time:\\s*[^\\s]+", "");
         formatted = formatted.replaceAll("(?i)\\s+Hash:\\s*[^\\s]+", "");
         formatted = formatted.replaceAll("(Nodes:\\s*[^\\s]+)\\s+(NPS:\\s*[^\\s]+)", "$2    $1");
-        // Keep Main and Mirror outputs compact on one horizontally-scrollable line.
-        // Only the expanded Main Board formats each metric on a separate line.
         formatted = formatted.replaceAll("[\\r\\n]+", " ");
         formatted = formatted.replaceAll("\\s{2,}", " ");
         return formatted.trim();
     }
 
-    /** Read a single UCI statistic from the latest analysis header. */
+    /** Read one UCI statistic from the latest analysis header. */
     private String analysisField(String analysis, String field) {
         if (analysis == null) return "—";
         java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(
                 "(?i)(?:^|\\s)" + java.util.regex.Pattern.quote(field) + "\\s*:\\s*([^\\s]+)")
                 .matcher(analysis);
         return matcher.find() ? matcher.group(1) : "—";
+    }
+
+    /** Depth followed by selective depth, with no separate SelDepth display row. */
+    private String combinedDepthDisplay(String analysis) {
+        String depth = analysisField(analysis, "Depth");
+        String selectiveDepth = analysisField(analysis, "SelDepth");
+        if (depth.equals("—") || depth.indexOf('/') >= 0) return depth;
+        return selectiveDepth.equals("—") || selectiveDepth.equals(depth) ? depth : depth + "/" + selectiveDepth;
+    }
+
+    /** Normalize any engine, replay or PGN string before displaying it. */
+    private String combineDepthFields(String value) {
+        if (value == null || value.isEmpty()) return value == null ? "" : value;
+        String depth = analysisField(value, "Depth");
+        String combined = combinedDepthDisplay(value);
+        if (!depth.equals("—")) {
+            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?i)(\\bDepth\\s*:\\s*)[^\\s]+")
+                    .matcher(value);
+            if (matcher.find()) {
+                StringBuffer result = new StringBuffer();
+                matcher.appendReplacement(result, java.util.regex.Matcher.quoteReplacement(matcher.group(1) + combined));
+                matcher.appendTail(result);
+                value = result.toString();
+            }
+        }
+        return value.replaceAll("(?i)\\s+SelDepth\\s*:\\s*[^\\s]+", "");
     }
 
     /** PV only: never add a visible 'PV' or 'Variation' heading. */
@@ -8624,10 +8810,10 @@ public final class TournamentActivity extends Activity {
         return variation.length() == 0 ? "—" : variation.toString();
     }
 
-    /** New expanded Main Board keeps the full five-stat engine output. */
+    /** Expanded Main Board: Eval, combined Depth, NPS and Nodes. */
     private String formatMainBoardEngineOutput(String analysis) {
         String header = "Eval: " + analysisField(analysis, "Eval") +
-                "    Depth: " + analysisField(analysis, "Depth") +
+                "    Depth: " + combinedDepthDisplay(analysis) +
                 "    Nodes: " + analysisField(analysis, "Nodes") +
                 "    NPS: " + analysisField(analysis, "NPS");
         String variation = extractAnalysisVariation(analysis);
@@ -8635,15 +8821,14 @@ public final class TournamentActivity extends Activity {
     }
 
     private void setMainBoardEngineOutput(TextView metrics, TextView variation, String analysis) {
-        if (metrics != null) metrics.setText(formatMainBoardEngineOutput(analysis).split("\n", 2)[0]);
+        if (metrics != null) metrics.setText(formatMainBoardEngineOutput(analysis).split("\\n", 2)[0]);
         if (variation != null) variation.setText(extractAnalysisVariation(analysis));
     }
 
-    /** Mirror Board metric column: the five requested fields in fixed row order. */
+    /** Mirror Board metric column: four fixed rows with selective depth appended to Depth. */
     private String formatMirrorMetrics(String analysis) {
         return "Eval: " + analysisField(analysis, "Eval") +
-                "\nDepth: " + analysisField(analysis, "Depth") +
-                "\nSelDepth: " + analysisField(analysis, "SelDepth") +
+                "\nDepth: " + combinedDepthDisplay(analysis) +
                 "\nNPS: " + analysisField(analysis, "NPS") +
                 "\nNodes: " + analysisField(analysis, "Nodes");
     }
@@ -9337,6 +9522,7 @@ public final class TournamentActivity extends Activity {
     private void togglePauseResume() {
         if (runner == null) {
             Toast.makeText(this, "No active tournament. Use Resume Saved Tournament.", Toast.LENGTH_SHORT).show();
+            updateExpandedBoardControls();
             return;
         }
         if (runner.isPaused()) {
@@ -9367,6 +9553,7 @@ public final class TournamentActivity extends Activity {
             if (mirrorPauseButton != null) mirrorPauseButton.setText("PLAY");
             moveStatusText.setText("PAUSED · Tap Play to continue");
         }
+        updateExpandedBoardControls();
     }
 
     /** Rewrite the cumulative PGN after every completed game, avoiding duplicate append on resume. */
