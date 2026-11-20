@@ -409,6 +409,9 @@ public final class TournamentActivity extends Activity {
         }
     }
     private long lastClockRefreshNs;
+    private volatile long lastUiHeartbeatNs = System.nanoTime();
+    private volatile long lastUiStallLogNs;
+    private Thread uiStallWatchdog;
     private final Runnable clockRefresh = new Runnable() {
         @Override public void run() {
             long now = System.nanoTime();
@@ -418,6 +421,7 @@ public final class TournamentActivity extends Activity {
                     android.util.Log.w("CET-UiLag", "Clock refresh delayed by " + gapMs + " ms");
             }
             lastClockRefreshNs = now;
+            lastUiHeartbeatNs = now;
             refreshLiveClocks();
             tickAutomaticTimers();
             updateExpandedBoardControls();
@@ -440,6 +444,31 @@ public final class TournamentActivity extends Activity {
         restoreSetup();
         restoreAdvancedTimerSettings();
         uiHandler.post(clockRefresh);
+        startUiStallWatchdog();
+    }
+
+    /** Log the main-thread stack if the UI heartbeat stalls long enough to risk an Android ANR. */
+    private void startUiStallWatchdog() {
+        if (uiStallWatchdog != null) return;
+        uiStallWatchdog = new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try { Thread.sleep(1000L); }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); break; }
+                long now = System.nanoTime();
+                long heartbeat = lastUiHeartbeatNs;
+                long stalledMs = (now - heartbeat) / 1_000_000L;
+                if (stalledMs < 2500L || now - lastUiStallLogNs < 10_000_000_000L) continue;
+                lastUiStallLogNs = now;
+                Thread mainThread = Looper.getMainLooper().getThread();
+                StringBuilder stack = new StringBuilder();
+                for (StackTraceElement element : mainThread.getStackTrace())
+                    stack.append("\n  at ").append(element);
+                android.util.Log.e("CET-ANR", "Main thread heartbeat stalled for " + stalledMs +
+                        " ms; current main-thread stack:" + stack);
+            }
+        }, "CET-UI-Stall-Watchdog");
+        uiStallWatchdog.setDaemon(true);
+        uiStallWatchdog.start();
     }
 
     private Position standardStartPosition() {
@@ -884,6 +913,7 @@ public final class TournamentActivity extends Activity {
         metrics.setTextColor(0xFFFFFFFF);
         metrics.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
         metrics.setMaxLines(4);
+        metrics.setIncludeFontPadding(false);
         metrics.setLineSpacing(dp(1), 1.0f);
         if (white) expandedWhiteAnalysis = metrics; else expandedBlackAnalysis = metrics;
 
@@ -1201,10 +1231,14 @@ public final class TournamentActivity extends Activity {
     }
 
     private String formatEngineMetrics(String analysis) {
-        return "Eval: " + analysisField(analysis, "Eval") +
-                "\nDepth: " + combinedDepthDisplay(analysis) +
-                "\nNPS: " + analysisField(analysis, "NPS") +
-                "\nNodes: " + analysisField(analysis, "Nodes");
+        // Keep each label and its value as one unbreakable unit. In the narrow
+        // side-by-side New Board panels Android could otherwise wrap only the
+        // Depth value onto the next visual line even when the row had room.
+        final String labelValueSpace = "\u00A0";
+        return "Eval:" + labelValueSpace + analysisField(analysis, "Eval") +
+                "\nDepth:" + labelValueSpace + combinedDepthDisplay(analysis) +
+                "\nNPS:" + labelValueSpace + analysisField(analysis, "NPS") +
+                "\nNodes:" + labelValueSpace + analysisField(analysis, "Nodes");
     }
 
     private void toggleExpandedBoardFocus() {
@@ -1408,7 +1442,7 @@ public final class TournamentActivity extends Activity {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(3), dp(2), dp(3), dp(2));
-        metrics.setTextSize(19);
+        metrics.setTextSize(17);
         metrics.setTypeface(null, android.graphics.Typeface.BOLD);
         metrics.setTextColor(0xFFFFFFFF);
         metrics.setSingleLine(true);
@@ -7929,16 +7963,41 @@ public final class TournamentActivity extends Activity {
         }
     }
 
+    private long lastMirrorHeaderRefreshNs;
+
     private void refreshLiveClocks() {
         TournamentRunner r=runner; if(r==null || playView==null) return;
-        if (r.isPaused()) return;
+        if (r.isPaused()) {
+            if (isMirrorShowing() && mirrorPauseButton != null) mirrorPauseButton.setText("PLAY");
+            return;
+        }
+        long now = System.nanoTime();
         long w=r.remainingMs(true), b=r.remainingMs(false);
         if(whiteClockText!=null && w>=0) whiteClockText.setText(formatClock(w));
         if(blackClockText!=null && b>=0) blackClockText.setText(formatClock(b));
         long elapsed=r.activeMoveTimeMs();
-        if(elapsed>=0) { boolean white=r.whiteToMove(); TextView t=white?whiteMoveTimeText:blackMoveTimeText; if(t!=null)t.setText(formatClockDuration(elapsed)); }
+        if(elapsed>=0) {
+            boolean white=r.whiteToMove();
+            String display = formatClockDuration(elapsed);
+            TextView t=white?whiteMoveTimeText:blackMoveTimeText;
+            if(t!=null)t.setText(display);
+            // Mirror is another presentation of these clocks. Avoid synchronizing
+            // its board, icon bitmaps, ranks and navigation ten times per second.
+            if (isMirrorShowing()) {
+                TextView mirrorTime = white ? mirrorWhiteMoveTime : mirrorBlackMoveTime;
+                if (mirrorTime != null) mirrorTime.setText(display);
+            }
+        }
+        if (isMirrorShowing()) {
+            if (mirrorWhiteClock != null && w >= 0) mirrorWhiteClock.setText(formatClock(w));
+            if (mirrorBlackClock != null && b >= 0) mirrorBlackClock.setText(formatClock(b));
+            if (mirrorPauseButton != null) mirrorPauseButton.setText(r.isPaused() ? "PLAY" : "PAUSE");
+            if (mirrorHeaderText != null && now - lastMirrorHeaderRefreshNs >= 1_000_000_000L) {
+                mirrorHeaderText.setText(mirrorHeaderLabel());
+                lastMirrorHeaderRefreshNs = now;
+            }
+        }
         updateExpandedClockDisplay();
-        if (mirrorView != null && mirrorView.getParent() != null) syncMirrorFromLive();
     }
 
     private void startTournament() {
@@ -8712,16 +8771,24 @@ public final class TournamentActivity extends Activity {
                 (drawRulesCheck != null && drawRulesCheck.isChecked());
         new Thread(() -> {
             Exception failure = null;
+            List<TournamentManager.Standing> initialStandings = null;
             try {
                 tournament.prepareOpeningAssignments();
                 // New tournaments with an unassigned BIN book are persisted by
                 // setAnomalyRuleSettingsIfMissing(); PGN/no-book preparation saves
                 // when it initializes assignments. Imported events are already saved.
                 tournament.setAnomalyRuleSettingsIfMissing(anomalyRulesEnabled, configuredRuleStart, configuredMaximumMoves);
+                // A large schedule can make standings() expensive. Prepare it here,
+                // not synchronously on the UI thread immediately before engine start.
+                try { initialStandings = tournament.standings(); }
+                catch (RuntimeException standingsError) {
+                    android.util.Log.w("CET-Tournament", "Initial standings unavailable during launch", standingsError);
+                }
             } catch (Exception error) {
                 failure = error;
             }
             final Exception preparationError = failure;
+            final List<TournamentManager.Standing> preparedStandings = initialStandings;
             runOnUiThread(() -> {
                 tournamentLoadInProgress = false;
                 if (isFinishing()) return;
@@ -8734,7 +8801,7 @@ public final class TournamentActivity extends Activity {
                 }
                 if (!tournament.externalSaveError().isEmpty())
                     Toast.makeText(this, tournament.externalSaveError(), Toast.LENGTH_LONG).show();
-                launchPreparedTournament(tournament);
+                launchPreparedTournament(tournament, preparedStandings);
             });
         }, "tournament-opening-preparation").start();
     }
@@ -8909,16 +8976,36 @@ public final class TournamentActivity extends Activity {
 
     /** Expanded Main Board: Eval, combined Depth, NPS and Nodes. */
     private String formatMainBoardEngineOutput(String analysis) {
+        // One separator between fields leaves more room for the final NPS value.
         String header = "Eval: " + analysisField(analysis, "Eval") +
-                "    Depth: " + combinedDepthDisplay(analysis) +
-                "    Nodes: " + analysisField(analysis, "Nodes") +
-                "    NPS: " + analysisField(analysis, "NPS");
+                " Depth: " + combinedDepthDisplay(analysis) +
+                " Nodes: " + analysisField(analysis, "Nodes") +
+                " NPS: " + analysisField(analysis, "NPS");
         String variation = extractAnalysisVariation(analysis);
         return variation.equals("—") ? header : header + "\n" + variation;
     }
 
+    private void fitMainBoardMetricsToViewport(TextView metrics) {
+        if (metrics == null) return;
+        float baseSizeSp = 17.0f;
+        float minSizeSp = 14.5f;
+        metrics.setTextSize(baseSizeSp);
+        int availablePx = 0;
+        android.view.ViewParent parent = metrics.getParent();
+        if (parent instanceof View) availablePx = ((View)parent).getWidth();
+        if (availablePx <= 0) availablePx = getResources().getDisplayMetrics().widthPixels - dp(12);
+        float textWidthPx = metrics.getPaint().measureText(metrics.getText().toString());
+        if (textWidthPx > availablePx && availablePx > 0) {
+            float fittedSize = Math.max(minSizeSp, baseSizeSp * availablePx / textWidthPx);
+            metrics.setTextSize(fittedSize);
+        }
+    }
+
     private void setMainBoardEngineOutput(TextView metrics, TextView variation, String analysis) {
-        if (metrics != null) metrics.setText(formatMainBoardEngineOutput(analysis).split("\\n", 2)[0]);
+        if (metrics != null) {
+            metrics.setText(formatMainBoardEngineOutput(analysis).split("\\n", 2)[0]);
+            fitMainBoardMetricsToViewport(metrics);
+        }
         if (variation != null) variation.setText(extractAnalysisVariation(analysis));
     }
 
@@ -9034,10 +9121,10 @@ public final class TournamentActivity extends Activity {
         updateExpandedMoveHints();
     }
 
-    private void launchPreparedTournament(final TournamentManager tournament) {
-        // A resumed tournament has already had standings calculated on the
-        // background review-preparation thread. Reuse those ranks instead of
-        // repeating the full schedule scan on the UI thread.
+    private void launchPreparedTournament(final TournamentManager tournament,
+                                          List<TournamentManager.Standing> preparedStandings) {
+        // Standings were prepared on the background tournament-preparation thread.
+        // Do not repeat a full schedule scan on the UI thread at launch.
         boolean standingsAlreadyPrepared = activeTournamentManager == tournament && !mirrorRanks.isEmpty();
         savedTournamentReviewMode = false;
         stopMirrorAutoPlay();
@@ -9052,7 +9139,8 @@ public final class TournamentActivity extends Activity {
         activeTournamentManager = tournament;
         if (playPauseButton != null) playPauseButton.setEnabled(true);
         if (mirrorPauseButton != null) mirrorPauseButton.setEnabled(true);
-        if (!standingsAlreadyPrepared) refreshMirrorRanks();
+        if (!standingsAlreadyPrepared)
+            refreshMirrorRanks(preparedStandings == null ? Collections.emptyList() : preparedStandings);
         tournamentElapsedAccumulatedMs = tournament.tournamentElapsedMs();
         tournamentElapsedStartNs = System.nanoTime();
         lastTournamentElapsedSaveNs = tournamentElapsedStartNs;
@@ -9857,6 +9945,10 @@ public final class TournamentActivity extends Activity {
             expandedMovesRefreshRunnable = null;
         }
         uiHandler.removeCallbacks(clockRefresh);
+        if (uiStallWatchdog != null) {
+            uiStallWatchdog.interrupt();
+            uiStallWatchdog = null;
+        }
         if (runner != null) {
             runner.pause();
             freezeTournamentElapsedClock();
