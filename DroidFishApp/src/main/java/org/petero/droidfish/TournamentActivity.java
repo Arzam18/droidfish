@@ -214,6 +214,10 @@ public final class TournamentActivity extends Activity {
     private boolean mirrorUiFlipped = false;
     private int mirrorSelectedTab = 0; // 0 = Moves, 1 = Standings, 2 = Schedule, 3 = Info
     private boolean mirrorReplayMode = false, mirrorReplayLiveSnapshot = false, mirrorAutoPlay = false;
+    private volatile int mirrorNavigationCommentLoadGeneration;
+    private volatile boolean mirrorNavigationCommentsLoading;
+    private String mirrorNavigationWhiteName = "White", mirrorNavigationBlackName = "Black";
+    private String mirrorNavigationWhiteEngineId = "", mirrorNavigationBlackEngineId = "";
     private int mirrorReplayPairingIndex = -1;
     private String mirrorReplayWhiteEngineId = "", mirrorReplayBlackEngineId = "";
     private final ArrayList<Position> mirrorReplayPositions = new ArrayList<>();
@@ -2481,14 +2485,15 @@ public final class TournamentActivity extends Activity {
     }
 
     private void applyMirrorEngineOutputVisibility() {
-        int playerVisibility = mirrorEngineOutputHidden ? View.GONE : View.VISIBLE;
+        int playerVisibility = (mirrorEngineOutputHidden || mirrorNavigationMode) ? View.GONE : View.VISIBLE;
         if (mirrorBoardShortcuts != null) mirrorBoardShortcuts.setVisibility(playerVisibility);
         if (mirrorBlackOutputPanel != null) mirrorBlackOutputPanel.setVisibility(playerVisibility);
         // Player rows are physically anchored to the chessboard: keep both clock/name/logo/time rows visible.
         if (mirrorBlackRow != null) mirrorBlackRow.setVisibility(View.VISIBLE);
         if (mirrorWhiteRow != null) mirrorWhiteRow.setVisibility(View.VISIBLE);
         if (mirrorWhiteOutputPanel != null) mirrorWhiteOutputPanel.setVisibility(playerVisibility);
-        if (mirrorFocusAnalysisContainer != null) mirrorFocusAnalysisContainer.setVisibility(mirrorEngineOutputHidden ? View.VISIBLE : View.GONE);
+        if (mirrorFocusAnalysisContainer != null) mirrorFocusAnalysisContainer.setVisibility(
+                (mirrorEngineOutputHidden || mirrorNavigationMode) ? View.VISIBLE : View.GONE);
         if (mirrorFocusMovesScroll != null) mirrorFocusMovesScroll.setVisibility(mirrorEngineOutputHidden ? View.VISIBLE : View.GONE);
     }
 
@@ -2505,36 +2510,70 @@ public final class TournamentActivity extends Activity {
         ArrayList<Position> positions = currentMirrorPositions();
         int selected = positions.isEmpty() ? 0 : Math.max(0, Math.min(mirrorDisplayedPly(), positions.size() - 1));
         boolean whiteToMove = positions.isEmpty() || positions.get(selected).whiteMove;
-        mirrorFocusAnalysisWhite = whiteToMove;
-        String side = whiteToMove ? "WHITE" : "BLACK";
+        boolean outputWhite = mirrorNavigationMode && selected > 0
+                ? positions.get(selected - 1).whiteMove : whiteToMove;
+        mirrorFocusAnalysisWhite = outputWhite;
         String engineName;
         String analysis;
-        boolean externalAnalysisActive = mirrorAnalysisOn && mirrorAnalysisEngineActive &&
-                !mirrorAnalysisEngineId.isEmpty() && mirrorLatestAnalysisOutput != null &&
-                !mirrorLatestAnalysisOutput.startsWith("Select an engine");
-        boolean useExternalAnalysis = mirrorBranchMode || externalAnalysisActive;
-        if (useExternalAnalysis) {
-            engineName = mirrorAnalysisEngineNameForId(mirrorAnalysisEngineId);
-            analysis = mirrorLatestAnalysisOutput;
-        } else if (mirrorReplayMode) {
-            engineName = whiteToMove ? mirrorReplayWhiteName : mirrorReplayBlackName;
-            analysis = whiteToMove ? lastWhiteAnalysis : lastBlackAnalysis;
+        String focusEngineId;
+        boolean useExternalAnalysis = false;
+        if (mirrorNavigationMode) {
+            engineName = outputWhite ? mirrorNavigationWhiteName : mirrorNavigationBlackName;
+            focusEngineId = outputWhite ? mirrorNavigationWhiteEngineId : mirrorNavigationBlackEngineId;
+            ArrayList<String> savedComments = mirrorReplayMode ? mirrorReplayComments : mirrorLiveComments;
+            String savedComment = selected > 0 && selected - 1 < savedComments.size()
+                    ? savedComments.get(selected - 1) : "";
+            analysis = mirrorNavigationCommentsLoading ? "" : analysisFromComment(savedComment);
+            if (mirrorNavigationCommentsLoading || savedComment == null || savedComment.trim().isEmpty() ||
+                    (!savedComment.equalsIgnoreCase("Book.") && !hasSavedAnalysisFields(savedComment)))
+                analysis = "";
+            String whiteClock = "—", blackClock = "—", whiteMoveTime = "—", blackMoveTime = "—";
+            for (int i = 0; i < selected && i < savedComments.size() && i < positions.size(); i++) {
+                String moveComment = savedComments.get(i);
+                boolean moverIsWhite = positions.get(i).whiteMove;
+                String moveClock = findCommentValue(moveComment, "Clock|clk");
+                String moveTime = findCommentValue(moveComment, "MoveTime|Time|TimeUsed|t");
+                if (moverIsWhite) {
+                    if (!moveClock.isEmpty()) whiteClock = moveClock;
+                    if (!moveTime.isEmpty()) whiteMoveTime = moveTime;
+                } else {
+                    if (!moveClock.isEmpty()) blackClock = moveClock;
+                    if (!moveTime.isEmpty()) blackMoveTime = moveTime;
+                }
+            }
+            if (mirrorWhiteClock != null) mirrorWhiteClock.setText(whiteClock);
+            if (mirrorBlackClock != null) mirrorBlackClock.setText(blackClock);
+            if (mirrorWhiteMoveTime != null) mirrorWhiteMoveTime.setText(whiteMoveTime);
+            if (mirrorBlackMoveTime != null) mirrorBlackMoveTime.setText(blackMoveTime);
         } else {
-            engineName = whiteToMove ? currentWhiteName : currentBlackName;
-            analysis = whiteToMove ? lastWhiteAnalysis : lastBlackAnalysis;
+            boolean externalAnalysisActive = mirrorAnalysisOn && mirrorAnalysisEngineActive &&
+                    !mirrorAnalysisEngineId.isEmpty() && mirrorLatestAnalysisOutput != null &&
+                    !mirrorLatestAnalysisOutput.startsWith("Select an engine");
+            useExternalAnalysis = mirrorBranchMode || externalAnalysisActive;
+            if (useExternalAnalysis) {
+                engineName = mirrorAnalysisEngineNameForId(mirrorAnalysisEngineId);
+                analysis = mirrorLatestAnalysisOutput;
+                focusEngineId = mirrorAnalysisEngineId;
+            } else if (mirrorReplayMode) {
+                engineName = whiteToMove ? mirrorReplayWhiteName : mirrorReplayBlackName;
+                analysis = whiteToMove ? lastWhiteAnalysis : lastBlackAnalysis;
+                focusEngineId = whiteToMove ? mirrorReplayWhiteEngineId : mirrorReplayBlackEngineId;
+            } else {
+                engineName = whiteToMove ? currentWhiteName : currentBlackName;
+                analysis = whiteToMove ? lastWhiteAnalysis : lastBlackAnalysis;
+                focusEngineId = whiteToMove ? currentWhiteEngineId : currentBlackEngineId;
+            }
         }
+        String iconLookupName = engineName;
         engineName = splitMirrorEngineNameVersion(engineName)[0];
-        if (analysis == null || analysis.trim().isEmpty()) analysis = "Analysis unavailable";
-        String focusTitle = useExternalAnalysis ? "Analysis: " + engineName : (whiteToMove ? "White: " : "Black: ") + engineName;
+        if (analysis == null) analysis = "";
+        String focusTitle = useExternalAnalysis ? "Analysis: " + engineName : (outputWhite ? "White: " : "Black: ") + engineName;
         if (mirrorFocusEngineTitle != null) mirrorFocusEngineTitle.setText(focusTitle);
-        String focusEngineId = useExternalAnalysis ? mirrorAnalysisEngineId :
-                mirrorReplayMode ? (whiteToMove ? mirrorReplayWhiteEngineId : mirrorReplayBlackEngineId) :
-                        (whiteToMove ? currentWhiteEngineId : currentBlackEngineId);
-        if (mirrorFocusEngineIcon != null) setMirrorPlayerIcon(mirrorFocusEngineIcon, focusEngineId, engineName);
-        if (mirrorFocusEvaluationBar != null) mirrorFocusEvaluationBar.setEngineAnalysis(analysis, whiteToMove);
-        mirrorFocusAnalysisText.setText(formatMirrorMetrics(analysis));
+        if (mirrorFocusEngineIcon != null) setMirrorPlayerIcon(mirrorFocusEngineIcon, focusEngineId, iconLookupName);
+        if (mirrorFocusEvaluationBar != null) mirrorFocusEvaluationBar.setEngineAnalysis(analysis, outputWhite);
+        mirrorFocusAnalysisText.setText(analysis.isEmpty() ? "" : formatMirrorMetrics(analysis));
         if (mirrorFocusAnalysisPvText != null)
-            mirrorFocusAnalysisPvText.setText(extractMirrorMoveVariation(analysis));
+            mirrorFocusAnalysisPvText.setText(analysis.isEmpty() ? "" : extractMirrorMoveVariation(analysis));
 
         ArrayList<String> sans = currentMirrorSanMoves(null);
         ArrayList<Position> history = currentMirrorPositions();
@@ -2550,6 +2589,13 @@ public final class TournamentActivity extends Activity {
             moves.append(sans.get(i));
         }
         mirrorFocusMovesText.setText(moves.length() == 0 ? "No moves yet." : moves.toString());
+    }
+
+    private boolean hasSavedAnalysisFields(String comment) {
+        return comment != null && (!findCommentValue(comment, "Eval|eval").isEmpty() ||
+                !findCommentValue(comment, "Depth|D").isEmpty() ||
+                !findCommentValue(comment, "Nodes|N").isEmpty() ||
+                !findCommentValue(comment, "NPS|nps").isEmpty());
     }
 
     private TextView createMirrorVariationText() {
@@ -2835,12 +2881,80 @@ public final class TournamentActivity extends Activity {
         if (mirrorNavigationMode) {
             stopMirrorAutoPlay();
             if (runner != null && !runner.isPaused() && !runner.isFinished()) togglePauseResume();
+            loadMirrorNavigationComments();
+        } else {
+            mirrorNavigationCommentLoadGeneration++;
+            mirrorNavigationCommentsLoading = false;
         }
         if (mirrorPrimaryControls != null)
             mirrorPrimaryControls.setVisibility(mirrorNavigationMode ? View.GONE : View.VISIBLE);
         if (mirrorNavigationControls != null)
             mirrorNavigationControls.setVisibility(mirrorNavigationMode ? View.VISIBLE : View.GONE);
+        applyMirrorEngineOutputVisibility();
+        if (mirrorNavigationMode) updateMirrorFocusPanels();
         updateMirrorNavigationButtons();
+    }
+
+    /** Re-read the actual PGN move comments when review navigation is entered. */
+    private void loadMirrorNavigationComments() {
+        final int generation = ++mirrorNavigationCommentLoadGeneration;
+        mirrorNavigationCommentsLoading = true;
+        final boolean replay = mirrorReplayMode;
+        mirrorNavigationWhiteName = replay ? mirrorReplayWhiteName : currentWhiteName;
+        mirrorNavigationBlackName = replay ? mirrorReplayBlackName : currentBlackName;
+        final String replayPgn = mirrorReplayPgn;
+        final String fallbackPgn = currentPgnMoves;
+        final TournamentRunner liveRunner = runner;
+        final String whiteId = replay ? mirrorReplayWhiteEngineId : currentWhiteEngineId;
+        final String blackId = replay ? mirrorReplayBlackEngineId : currentBlackEngineId;
+        Thread loader = new Thread(() -> {
+            String pgn = replay ? replayPgn : fallbackPgn;
+            if (!replay && liveRunner != null) {
+                try {
+                    String latest = liveRunner.currentPgn();
+                    if (latest != null && !latest.trim().isEmpty()) pgn = latest;
+                } catch (RuntimeException ignored) { }
+            }
+            ArrayList<String> comments = new ArrayList<>();
+            ArrayList<String> moves = parseMirrorMoves(pgn, comments);
+            String[] names = extractPgnNames(pgn == null ? "" : pgn);
+            final String loadedPgn = pgn == null ? "" : pgn;
+            runOnUiThread(() -> {
+                if (!mirrorNavigationMode || generation != mirrorNavigationCommentLoadGeneration) return;
+                mirrorNavigationCommentsLoading = false;
+                if (replay) {
+                    if (moves.size() + 1 == mirrorReplayPositions.size()) {
+                        mirrorReplayMoves.clear();
+                        mirrorReplayMoves.addAll(moves);
+                        mirrorReplayComments.clear();
+                        mirrorReplayComments.addAll(comments);
+                    } else {
+                        android.util.Log.w("MirrorReview", "PGN reread did not match replay positions; retained parsed review data");
+                    }
+                    mirrorNavigationWhiteName = names[0].equals("White") ? mirrorReplayWhiteName : names[0];
+                    mirrorNavigationBlackName = names[1].equals("Black") ? mirrorReplayBlackName : names[1];
+                } else {
+                    if (moves.size() + 1 == mirrorPositions.size()) {
+                        mirrorLiveSanMoves.clear();
+                        mirrorLiveSanMoves.addAll(moves);
+                        mirrorLiveComments.clear();
+                        mirrorLiveComments.addAll(comments);
+                        currentPgnMoves = loadedPgn;
+                    } else {
+                        mirrorLiveComments.clear();
+                        android.util.Log.w("MirrorReview", "PGN reread did not match live positions; review analysis left blank rather than using transient output");
+                    }
+                    mirrorNavigationWhiteName = names[0].equals("White") ? currentWhiteName : names[0];
+                    mirrorNavigationBlackName = names[1].equals("Black") ? currentBlackName : names[1];
+                }
+                mirrorNavigationWhiteEngineId = whiteId;
+                mirrorNavigationBlackEngineId = blackId;
+                updateMirrorFocusPanels();
+                updateMirrorNavigationButtons();
+            });
+        }, "mirror-pgn-comment-loader");
+        loader.setDaemon(true);
+        loader.start();
     }
 
     private void updateMirrorNavigationButtons() {
@@ -3107,7 +3221,7 @@ public final class TournamentActivity extends Activity {
         if (view == mirrorFocusEngineIcon) {
             // The shared analysis icon belongs to the double-tap engine-output
             // panel, not to the separate board-only focus icons.
-            view.setVisibility(mirrorEngineOutputHidden ? View.VISIBLE : View.GONE);
+            view.setVisibility((mirrorEngineOutputHidden || mirrorNavigationMode) ? View.VISIBLE : View.GONE);
         } else {
             boolean focusIcon = view == mirrorFocusBlackIcon || view == mirrorFocusWhiteIcon;
             view.setVisibility(focusIcon == mirrorBoardOnlyMode ? View.VISIBLE : View.GONE);
@@ -4000,7 +4114,7 @@ public final class TournamentActivity extends Activity {
                     String comment = i < sourceComments.size() ? sourceComments.get(i) : "";
                     // Preserve saved PGN analysis for the original part of the
                     // line; temporary branch moves intentionally have no PGN comments.
-                    if ((comment == null || comment.trim().isEmpty()) && !mirrorReplayMode &&
+                    if ((comment == null || comment.trim().isEmpty()) && !mirrorReplayMode && !mirrorNavigationMode &&
                             i + 1 < mirrorLiveAnalysisByPly.size())
                         comment = mirrorLiveAnalysisByPly.get(i + 1);
                     commentsOut.add(comment == null ? "" : comment);
@@ -4019,7 +4133,8 @@ public final class TournamentActivity extends Activity {
                 for (int i = 0; i < mirrorLiveSanMoves.size(); i++) {
                     String comment = i < mirrorLiveComments.size() ? mirrorLiveComments.get(i) : "";
                     // Live analysis snapshots are keyed by resulting-position ply.
-                    if ((comment == null || comment.trim().isEmpty()) && i + 1 < mirrorLiveAnalysisByPly.size())
+                    if ((comment == null || comment.trim().isEmpty()) && !mirrorNavigationMode &&
+                            i + 1 < mirrorLiveAnalysisByPly.size())
                         comment = mirrorLiveAnalysisByPly.get(i + 1);
                     commentsOut.add(comment == null ? "" : comment);
                 }
@@ -4033,7 +4148,8 @@ public final class TournamentActivity extends Activity {
                 commentsOut.clear();
                 for (int i = 0; i < parsed.size(); i++) {
                     String comment = i < parsedComments.size() ? parsedComments.get(i) : "";
-                    if ((comment == null || comment.trim().isEmpty()) && i + 1 < mirrorLiveAnalysisByPly.size())
+                    if ((comment == null || comment.trim().isEmpty()) && !mirrorNavigationMode &&
+                            i + 1 < mirrorLiveAnalysisByPly.size())
                         comment = mirrorLiveAnalysisByPly.get(i + 1);
                     commentsOut.add(comment == null ? "" : comment);
                 }
@@ -4140,6 +4256,7 @@ public final class TournamentActivity extends Activity {
                 (mirrorPly < 0 ? "Following live game" : "Live review · ply " + target + "/" + (positions.size() - 1)));
         if (mirrorReplayMode) updateMirrorReplayDetails(target);
         else updateMirrorRankedNames();
+        if (mirrorNavigationMode) updateMirrorFocusPanels();
         updateMirrorNavigationButtons();
         if (mirrorSelectedTab == 0) {
             invalidateMirrorMovesSubCache(0);
@@ -4511,7 +4628,12 @@ public final class TournamentActivity extends Activity {
             return engineWdl.find() ? "ENGINE|" + engineWdl.group(1) + "|" + engineWdl.group(3) : "";
         }
         String value = findCommentValue(comment, mirrorGraphMetricKey(metric));
-        if (!value.isEmpty()) return value;
+        if (!value.isEmpty()) {
+            // Compact comments store both depth values together; keep the graph's
+            // Depth and SelDepth traces independent as they were in legacy comments.
+            if (metric == 1 && value.indexOf('/') >= 0) return value.substring(0, value.indexOf('/'));
+            return value;
+        }
         String field;
         switch (metric) {
             case 1: field = "Depth"; break;
@@ -5507,6 +5629,7 @@ public final class TournamentActivity extends Activity {
         updateMirrorEngineOutputDisplays(whiteAnalysis, blackAnalysis);
         updateMirrorEvaluationBars(whiteAnalysis, blackAnalysis);
         updateMirrorRankedNames();
+        if (mirrorNavigationMode) updateMirrorFocusPanels();
         if (mirrorStatusText != null) mirrorStatusText.setText((mirrorReplayLiveSnapshot ? "Live snapshot" : "Saved PGN") +
                 " · ply " + safePly + "/" + mirrorReplayMoves.size());
     }
@@ -5820,25 +5943,73 @@ public final class TournamentActivity extends Activity {
     }
 
     private String analysisFromComment(String c) {
-        if (c == null || c.isEmpty()) return "---  Depth: ---  Nodes: ---  NPS: ---";
+        if (c == null || c.trim().isEmpty() || c.trim().equalsIgnoreCase("Book.")) return "";
         String eval = findCommentValue(c, "Eval|eval");
         String depth = findCommentValue(c, "Depth|D");
         String selDepth = findCommentValue(c, "SelDepth|SDepth|SD");
+        if (depth.indexOf('/') >= 0) {
+            String[] parts = depth.split("/", 2);
+            depth = parts[0];
+            if (selDepth.isEmpty()) selDepth = parts[1];
+        }
         String nodes = findCommentValue(c, "Nodes|N");
         String nps = findCommentValue(c, "NPS|nps");
+        if (nps.toLowerCase(java.util.Locale.US).endsWith("knps"))
+            nps = nps.substring(0, nps.length() - 4) + "K";
+        else if (nps.toLowerCase(java.util.Locale.US).endsWith("mnps"))
+            nps = nps.substring(0, nps.length() - 4) + "M";
         String engineTime = findCommentValue(c, "EngineTime");
+        String moveTime = findCommentValue(c, "MoveTime|Time|TimeUsed");
+        String clock = findCommentValue(c, "Clock|clk");
         String depthDisplay = dash(depth);
-        if (depthDisplay.indexOf('/') < 0 && selDepth != null && !selDepth.isEmpty())
-            depthDisplay += "/" + dash(selDepth);
-        String result = "Eval: " + dash(eval) + "  Depth: " + depthDisplay + "  NPS: " + dash(nps) +
-                "  Nodes: " + dash(nodes);
+        if (depthDisplay.indexOf('/') < 0 && !selDepth.isEmpty()) depthDisplay += "/" + selDepth;
+        StringBuilder result = new StringBuilder();
+        result.append("Eval: ").append(dash(eval)).append("\nDepth: ").append(depthDisplay)
+                .append("\nNPS: ").append(dash(nps)).append("\nNodes: ").append(dash(nodes));
+        if (!clock.isEmpty()) result.append("\nClock: ").append(clock);
+        if (!moveTime.isEmpty() || !engineTime.isEmpty())
+            result.append("\nTime: ").append(dash(!moveTime.isEmpty() ? moveTime : engineTime));
         java.util.regex.Matcher w = java.util.regex.Pattern.compile(
                 "(?i)EngineWDL:\\s*W:\\s*([0-9]+(?:\\.[0-9]+)?)%\\s+D:\\s*([0-9]+(?:\\.[0-9]+)?)%\\s+L:\\s*([0-9]+(?:\\.[0-9]+)?)%")
                 .matcher(c);
-        if (w.find()) result += "\nEngine WDL: W " + w.group(1) + "%  D " + w.group(2) + "%  L " + w.group(3) + "%";
-        java.util.regex.Matcher pv = java.util.regex.Pattern.compile("(?i)\\bPV:\\s*(.*?)(?=\\s+(?:EngineWDL|WhiteWDL):|$)").matcher(c);
-        if (pv.find() && !pv.group(1).trim().isEmpty()) result += "\n" + pv.group(1).trim();
-        return result;
+        if (w.find()) result.append("\nEngine WDL: W ").append(w.group(1)).append("%  D ")
+                .append(w.group(2)).append("%  L ").append(w.group(3)).append('%');
+        String pv = extractSavedCommentPv(c);
+        if (!pv.isEmpty()) result.append("\nPV: ").append(pv);
+        return result.toString();
+    }
+
+    private String extractSavedCommentPv(String comment) {
+        if (comment == null || comment.trim().isEmpty()) return "";
+        java.util.regex.Matcher old = java.util.regex.Pattern.compile(
+                "(?i)\\bPV:\\s*(.*?)(?=\\s+(?:EngineWDL|WhiteWDL):|$)").matcher(comment);
+        if (old.find()) return firstTwoSanPlies(old.group(1));
+        java.util.regex.Matcher compact = java.util.regex.Pattern.compile(
+                "(?i)\\bt\\S+\\s+(.+?)(?=\\s+(?:EngineWDL|WhiteWDL):|$)").matcher(comment);
+        return compact.find() ? firstTwoSanPlies(compact.group(1)) : "";
+    }
+
+    private String firstTwoSanPlies(String value) {
+        if (value == null) return "";
+        value = value.trim().replaceFirst("(?i)^eval\\s+[+-]?(?:M\\d+|\\d+(?:\\.\\d+)?)\\s*", "");
+        StringBuilder out = new StringBuilder();
+        int count = 0;
+        String pendingMoveNumber = "";
+        for (String token : value.split("\\s+")) {
+            if (token.isEmpty()) continue;
+            if (token.matches("\\d+\\.{1,3}")) { pendingMoveNumber = token; continue; }
+            if (token.matches("(?i)(EngineWDL|WhiteWDL):.*")) break;
+            java.util.regex.Matcher numbered = java.util.regex.Pattern.compile("^(\\d+\\.{1,3})(.+)$").matcher(token);
+            String number = pendingMoveNumber;
+            String san = token;
+            pendingMoveNumber = "";
+            if (numbered.matches()) { number = numbered.group(1); san = numbered.group(2); }
+            if (out.length() > 0) out.append(' ');
+            if (!number.isEmpty()) out.append(number);
+            out.append(san);
+            if (++count == 2) break;
+        }
+        return out.toString();
     }
     private String extractPgnResult(String pgn) {
         if (pgn == null) return "*";
@@ -5899,8 +6070,47 @@ public final class TournamentActivity extends Activity {
     }
     private String dash(String v) { return v==null||v.isEmpty()?"---":v; }
     private String findCommentValue(String comment,String keys) {
-        if(comment==null) return ""; String[] ks=keys.split("\\|");
-        for(String k:ks) { java.util.regex.Matcher m=java.util.regex.Pattern.compile("(?i)(?:^|[\\s,;])"+java.util.regex.Pattern.quote(k)+"\\s*[:=]\\s*([^\\s,;]+)").matcher(comment); if(m.find()) return m.group(1); }
+        if (comment == null) return "";
+        String lowerKeys = keys.toLowerCase(java.util.Locale.US);
+        String[] aliases = keys.split("\\|");
+        // Prefer explicit legacy labels (Depth:, SelDepth:) before compact tokens.
+        // The one-letter D alias is intentionally skipped for depth because it also
+        // occurs in the EngineWDL draw field (D:xx%).
+        for (String key : aliases) {
+            if (key.equalsIgnoreCase("D") && lowerKeys.contains("depth")) continue;
+            java.util.regex.Matcher labelled = java.util.regex.Pattern.compile(
+                    "(?i)(?:^|[\\s,;])" + java.util.regex.Pattern.quote(key) + "\\s*[:=]\\s*([^\\s,;]+)").matcher(comment);
+            if (labelled.find()) return labelled.group(1);
+        }
+        java.util.regex.Matcher m;
+        if (lowerKeys.contains("depth") && !lowerKeys.contains("seldepth")) {
+            m = java.util.regex.Pattern.compile("(?i)(?:^|\\s)d(\\d+(?:/\\d+)?)(?=\\s+n[0-9])").matcher(comment);
+            if (m.find()) return m.group(1);
+        }
+        if (lowerKeys.contains("seldepth")) {
+            m = java.util.regex.Pattern.compile("(?i)(?:^|\\s)d\\d+/(\\d+)(?=\\s+n[0-9])").matcher(comment);
+            if (m.find()) return m.group(1);
+        }
+        if (lowerKeys.contains("eval")) {
+            m = java.util.regex.Pattern.compile("(?i)(?:^|\\s)([+-]?(?:M\\d+|\\d+(?:\\.\\d+)?))(?=\\s|$)").matcher(comment);
+            if (m.find()) return m.group(1);
+        }
+        if (lowerKeys.contains("nodes")) {
+            m = java.util.regex.Pattern.compile("(?i)(?:^|\\s)n([0-9]+(?:\\.[0-9]+)?[kmb]?)").matcher(comment);
+            if (m.find()) return m.group(1);
+        }
+        if (lowerKeys.contains("nps")) {
+            m = java.util.regex.Pattern.compile("(?i)(?:^|\\s)([0-9]+(?:\\.[0-9]+)?(?:k|m)?nps)").matcher(comment);
+            if (m.find()) return m.group(1);
+        }
+        if (lowerKeys.contains("clock") || lowerKeys.contains("clk")) {
+            m = java.util.regex.Pattern.compile("(?i)(?:^|\\s)clk([^\\s]+)").matcher(comment);
+            if (m.find()) return m.group(1);
+        }
+        if (lowerKeys.contains("time") || lowerKeys.contains("timeused")) {
+            m = java.util.regex.Pattern.compile("(?i)(?:^|\\s)t([0-9]+(?::[0-9]{2})?(?:\\.[0-9]+)?)").matcher(comment);
+            if (m.find()) return m.group(1);
+        }
         return "";
     }
     private void selectGameViewerAnalysisEngine() {
@@ -8939,8 +9149,12 @@ public final class TournamentActivity extends Activity {
     private String combinedDepthDisplay(String analysis) {
         String depth = analysisField(analysis, "Depth");
         String selectiveDepth = analysisField(analysis, "SelDepth");
-        if (depth.equals("—") || depth.indexOf('/') >= 0) return depth;
-        return selectiveDepth.equals("—") || selectiveDepth.equals(depth) ? depth : depth + "/" + selectiveDepth;
+        String combined;
+        if (depth.equals("—") || depth.indexOf('/') >= 0) combined = depth;
+        else combined = selectiveDepth.equals("—") || selectiveDepth.equals(depth)
+                ? depth : depth + "/" + selectiveDepth;
+        // Keep the two depth numbers together when a clock is adjacent in a narrow row.
+        return combined.replace("/", "\u2060/\u2060");
     }
 
     /** Normalize any engine, replay or PGN string before displaying it. */
