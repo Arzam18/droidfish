@@ -8407,12 +8407,19 @@ public final class TournamentActivity extends Activity {
                 : new String[]{"Resume tournament", "View tournament", "Delete tournament"};
         new AlertDialog.Builder(this).setTitle(saved.title()).setItems(actions, (dialog, which) -> {
             if (which == 0) {
-                if (saved.isComplete()) showSavedTournamentReview(saved);
-                else {
+                if (saved.isComplete()) {
+                    showSavedTournamentReview(saved);
+                } else {
+                    // Resume is a continuation, not a request to open the review UI.
+                    // The review screen builds the complete Schedule tab and calculates
+                    // move counts by parsing completed PGNs on the UI thread. For large
+                    // tournaments that unnecessary work can trigger Android's ANR
+                    // before the engines even start. Restore has already completed on
+                    // the loader thread, so load only the saved settings and continue
+                    // directly with the background opening/standings preparation.
                     loadTournamentSetup(saved);
-                    // The review is prepared off the UI thread; only after its
-                    // standings/rank data is ready do we begin opening preparation.
-                    showSavedTournamentReview(saved, () -> launchTournament(saved));
+                    savedTournamentReviewMode = false;
+                    launchTournament(saved);
                 }
             } else if (which == 1) {
                 if (saved.isComplete()) {
@@ -8976,11 +8983,11 @@ public final class TournamentActivity extends Activity {
 
     /** Expanded Main Board: Eval, combined Depth, NPS and Nodes. */
     private String formatMainBoardEngineOutput(String analysis) {
-        // One separator between fields leaves more room for the final NPS value.
+        // Two spaces separate the compact metric fields, matching the requested Main Board format.
         String header = "Eval: " + analysisField(analysis, "Eval") +
-                " Depth: " + combinedDepthDisplay(analysis) +
-                " Nodes: " + analysisField(analysis, "Nodes") +
-                " NPS: " + analysisField(analysis, "NPS");
+                "  Depth: " + combinedDepthDisplay(analysis) +
+                "  Nodes: " + analysisField(analysis, "Nodes") +
+                "  NPS: " + analysisField(analysis, "NPS");
         String variation = extractAnalysisVariation(analysis);
         return variation.equals("—") ? header : header + "\n" + variation;
     }
