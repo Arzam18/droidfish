@@ -868,25 +868,67 @@ public final class TournamentRunner {
                 String[] lines = analysisAtBestMove.split("\\r?\\n");
                 for (int i = lines.length - 1; i >= 0; i--) {
                     String candidate = lines[i].trim();
-                    if (!candidate.isEmpty() && !candidate.regionMatches(true, 0, "Engine WDL:", 0, 11)) {
-                        pv = candidate.replaceFirst("^\\d+\\.{1,3}\\s*", "");
+                    if (!candidate.isEmpty() && !candidate.regionMatches(true, 0, "Engine WDL:", 0, 11) &&
+                            !candidate.regionMatches(true, 0, "Eval:", 0, 5) &&
+                            !candidate.regionMatches(true, 0, "WhiteWDL:", 0, 9)) {
+                        pv = candidate.replaceFirst("(?i)^PV\\s*:\\s*", "");
                         break;
                     }
                 }
             }
             if (usesClock() && remaining >= 0L)
                 node.setRemainingTimeMs((int)Math.min(Integer.MAX_VALUE, remaining));
-            // Keep the raw depth components separately in PGN metadata so the
-            // tournament graph can still plot Depth and SelDepth independently.
-            // All user-facing analysis formatters render these as Depth: depth/seldepth.
-            String comment = "Eval: " + eval + " Depth: " + depth + " SelDepth: " + selDepth +
-                    " Nodes: " + nodes + " NPS: " + nps + " EngineTime: " + engineTime +
-                    " Hash: " + hash +
-                    " MoveTime: " + moveTimeText(moveMs) + (pv.isEmpty() ? "" : " PV: " + pv) + engineWdl + whiteWdl;
+            // Compact, replayable per-move analysis record. Keep depth and seldepth
+            // together, and retain the graph's explicit WDL fields for compatibility.
+            String compactDepth = "n/a".equals(depth) ? "?" : depth;
+            if (!"n/a".equals(selDepth)) compactDepth += "/" + selDepth;
+            String compactNodes = "n/a".equals(nodes) ? "?" : nodes.toLowerCase(java.util.Locale.US);
+            String compactNps = "n/a".equals(nps) ? "?" : nps.toLowerCase(java.util.Locale.US);
+            compactNps = compactNps.replaceAll("(?i)\\s*nodes?/s$", "");
+            if (compactNps.endsWith("k")) compactNps = compactNps.substring(0, compactNps.length() - 1) + "knps";
+            else if (compactNps.endsWith("m")) compactNps = compactNps.substring(0, compactNps.length() - 1) + "mnps";
+            else if (!compactNps.endsWith("nps") && !"?".equals(compactNps)) compactNps += "nps";
+            String compactClock = remaining < 0L ? "?" : clockText(remaining);
+            String compactPv = firstTwoPvPlies(pv);
+            String comment = ("n/a".equals(eval) ? "?" : eval) +
+                    " d" + compactDepth + " n" + compactNodes + " " + compactNps +
+                    " clk" + compactClock + " t" + moveTimeText(moveMs) +
+                    (compactPv.isEmpty() ? "" : " " + compactPv) + engineWdl + whiteWdl;
             // The engine-provided WDL remains in the engine's own perspective. No
             // probability is estimated when UCI_ShowWDL is unsupported.
             node.setPostComment(comment);
         } catch (RuntimeException ignored) { }
+    }
+
+    private String firstTwoPvPlies(String pv) {
+        if (pv == null || pv.trim().isEmpty()) return "";
+        String value = pv.trim().replaceFirst("(?i)^PV\\s*:\\s*", "")
+                .replaceFirst("(?i)^eval\\s+[+-]?(?:M\\d+|\\d+(?:\\.\\d+)?)\\s*", "");
+        String[] tokens = value.split("\\s+");
+        StringBuilder out = new StringBuilder();
+        int plies = 0;
+        String pendingMoveNumber = "";
+        for (String token : tokens) {
+            if (token.isEmpty()) continue;
+            if (token.matches("\\d+\\.{1,3}")) {
+                pendingMoveNumber = token;
+                continue;
+            }
+            if (token.matches("(?i)(EngineWDL|WhiteWDL):.*")) break;
+            java.util.regex.Matcher numbered = java.util.regex.Pattern.compile("^(\\d+\\.{1,3})(.+)$").matcher(token);
+            String san = token;
+            String number = pendingMoveNumber;
+            pendingMoveNumber = "";
+            if (numbered.matches()) {
+                number = numbered.group(1);
+                san = numbered.group(2);
+            }
+            if (out.length() > 0) out.append(' ');
+            if (!number.isEmpty()) out.append(number);
+            out.append(san);
+            if (++plies >= 2) break;
+        }
+        return out.toString();
     }
 
     private void notifyPosition() { notifyPosition(true); }
