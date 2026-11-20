@@ -840,6 +840,11 @@ public final class TournamentRunner {
                 eval = commentField(flat, "Eval");
                 depth = commentField(flat, "Depth");
                 selDepth = commentField(flat, "SelDepth");
+                if (depth.contains("/")) {
+                    String[] depthParts = depth.split("/", 2);
+                    depth = depthParts[0];
+                    if ("n/a".equals(selDepth) && depthParts.length > 1) selDepth = depthParts[1];
+                }
                 nodes = commentField(flat, "Nodes");
                 nps = commentField(flat, "NPS");
                 engineTime = commentField(flat, "Time");
@@ -871,6 +876,9 @@ public final class TournamentRunner {
             }
             if (usesClock() && remaining >= 0L)
                 node.setRemainingTimeMs((int)Math.min(Integer.MAX_VALUE, remaining));
+            // Keep the raw depth components separately in PGN metadata so the
+            // tournament graph can still plot Depth and SelDepth independently.
+            // All user-facing analysis formatters render these as Depth: depth/seldepth.
             String comment = "Eval: " + eval + " Depth: " + depth + " SelDepth: " + selDepth +
                     " Nodes: " + nodes + " NPS: " + nps + " EngineTime: " + engineTime +
                     " Hash: " + hash +
@@ -1070,7 +1078,7 @@ public final class TournamentRunner {
         }
 
         String snapshotForMove() {
-            if (!hasCurrentSearchInfo) return "Eval: n/a Depth: n/a SelDepth: n/a Nodes: n/a NPS: n/a";
+            if (!hasCurrentSearchInfo) return "Eval: n/a Depth: n/a Nodes: n/a NPS: n/a";
             // Flush the most recent depth/PV/stats before writing the PGN comment.
             publishAnalysis(true);
             return white ? latestWhiteAnalysis : latestBlackAnalysis;
@@ -1237,7 +1245,7 @@ public final class TournamentRunner {
             String nps = compactCount(lastNps);
             String variation = pvLine == null ? "" : pvLine.trim();
             String header = "Eval: " + score + "    Depth: " + lastDepth +
-                    "    SelDepth: " + lastSelDepth + "    Nodes: " + nodes +
+                    (lastSelDepth > 0 ? "/" + lastSelDepth : "") + "    Nodes: " + nodes +
                     "    NPS: " + nps + "    Time: " + String.format(java.util.Locale.US, "%.2fs", Math.max(0, lastTimeMs) / 1000.0) +
                     (lastHashFull > 0 ? "    Hash: " + String.format(java.util.Locale.US, "%.1f%%", lastHashFull / 10.0) : "");
             String engineWdlLine = hasNativeWdl ? "\nEngine WDL: W: " + String.format(java.util.Locale.US, "%.1f%%", lastWdlWin / 10.0) +
