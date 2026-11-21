@@ -91,7 +91,9 @@ public final class TournamentActivity extends Activity {
     private TournamentChessBoard expandedMainBoard;
     private TextView expandedWhiteName, expandedBlackName, expandedWhiteAnalysis, expandedBlackAnalysis,
             expandedWhiteClock, expandedBlackClock, expandedWhiteMoveTime, expandedBlackMoveTime,
-            expandedWhiteEngineTitle, expandedBlackEngineTitle, expandedWhiteTiming, expandedBlackTiming;
+            expandedWhiteEngineTitle, expandedBlackEngineTitle, expandedWhiteTiming, expandedBlackTiming,
+            expandedWhiteTimingMove, expandedBlackTimingMove;
+    private LinearLayout expandedWhiteTimingGroup, expandedBlackTimingGroup;
     private Button expandedFlipBoardButton, expandedPlayPauseButton;
     private HorizontalScrollView expandedWhitePv, expandedBlackPv;
     private ScrollView expandedMainScroll;
@@ -162,7 +164,7 @@ public final class TournamentActivity extends Activity {
     private String mirrorAnalysisCoreOutput = "";
     private String mirrorAnalysisDepthOutput = "";
     private boolean mirrorAnalysisDepthsVisible = true;
-    private int mirrorAnalysisVariationCount = 1;
+    private volatile int mirrorAnalysisVariationCount = 1;
     private DroidComputerPlayer mirrorAnalysisEngine;
     private String mirrorAnalysisEngineId = "";
     private boolean mirrorAnalysisOn, mirrorAnalysisEngineActive = true;
@@ -938,6 +940,8 @@ public final class TournamentActivity extends Activity {
             expandedWhitePv = expandedBlackPv = null;
             expandedWhiteClock = expandedBlackClock = expandedWhiteMoveTime = expandedBlackMoveTime = null;
             expandedWhiteTiming = expandedBlackTiming = null;
+            expandedWhiteTimingMove = expandedBlackTimingMove = null;
+            expandedWhiteTimingGroup = expandedBlackTimingGroup = null;
             expandedFlipBoardButton = expandedPlayPauseButton = null;
             expandedBlackLogo = expandedWhiteLogo = null;
             expandedBlackAnalysisPanel = expandedWhiteAnalysisPanel = expandedMovesContainer = null;
@@ -973,13 +977,38 @@ public final class TournamentActivity extends Activity {
         label.setGravity(android.view.Gravity.CENTER);
         if (white) expandedWhiteEngineTitle = label; else expandedBlackEngineTitle = label;
 
-        TextView timing = text("Clock: —    Time: —");
-        timing.setTextSize(14);
-        timing.setTextColor(0xFFE0E5E8);
-        timing.setIncludeFontPadding(false);
-        timing.setSingleLine(true);
-        timing.setVisibility(View.GONE);
-        if (white) expandedWhiteTiming = timing; else expandedBlackTiming = timing;
+        // In stacked/double-tap mode, put the game clock and last move time in
+        // a right-aligned column beside the engine metrics, matching the
+        // Onslaught-vs-Lizard reference. The normal player rows remain unchanged.
+        LinearLayout timingGroup = new LinearLayout(this);
+        timingGroup.setOrientation(LinearLayout.VERTICAL);
+        timingGroup.setGravity(android.view.Gravity.RIGHT | android.view.Gravity.CENTER_VERTICAL);
+        timingGroup.setPadding(dp(4), 0, dp(2), 0);
+        timingGroup.setVisibility(View.GONE);
+        TextView timingClock = text("—");
+        timingClock.setTextSize(21);
+        timingClock.setTypeface(null, android.graphics.Typeface.BOLD);
+        timingClock.setTextColor(0xFFE0E5E8);
+        timingClock.setGravity(android.view.Gravity.RIGHT | android.view.Gravity.CENTER_VERTICAL);
+        timingClock.setIncludeFontPadding(false);
+        timingClock.setSingleLine(true);
+        TextView timingMove = text("—");
+        timingMove.setTextSize(15);
+        timingMove.setTextColor(0xFFC4C9CD);
+        timingMove.setGravity(android.view.Gravity.RIGHT | android.view.Gravity.CENTER_VERTICAL);
+        timingMove.setIncludeFontPadding(false);
+        timingMove.setSingleLine(true);
+        timingGroup.addView(timingClock, new LinearLayout.LayoutParams(-2, -2));
+        timingGroup.addView(timingMove, new LinearLayout.LayoutParams(-2, -2));
+        if (white) {
+            expandedWhiteTiming = timingClock;
+            expandedWhiteTimingMove = timingMove;
+            expandedWhiteTimingGroup = timingGroup;
+        } else {
+            expandedBlackTiming = timingClock;
+            expandedBlackTimingMove = timingMove;
+            expandedBlackTimingGroup = timingGroup;
+        }
 
         TextView metrics = text(formatEngineMetrics(white ? lastWhiteAnalysis : lastBlackAnalysis));
         metrics.setTextSize(18);
@@ -990,12 +1019,11 @@ public final class TournamentActivity extends Activity {
         metrics.setLineSpacing(dp(1), 1.0f);
         if (white) expandedWhiteAnalysis = metrics; else expandedBlackAnalysis = metrics;
 
-        // Clock and move time belong to the player rows attached to the board.
-        // Keep them out of the engine-output panel so Depth/SelDepth has the full width.
         LinearLayout metricsRow = new LinearLayout(this);
         metricsRow.setOrientation(LinearLayout.HORIZONTAL);
         metricsRow.setGravity(android.view.Gravity.TOP | android.view.Gravity.CENTER_VERTICAL);
-        metricsRow.addView(metrics, new LinearLayout.LayoutParams(-1, -2));
+        metricsRow.addView(metrics, new LinearLayout.LayoutParams(0, -2, 1.0f));
+        metricsRow.addView(timingGroup, new LinearLayout.LayoutParams(-2, -2));
 
         HorizontalScrollView pv = createSingleLinePv(white ? lastWhiteAnalysis : lastBlackAnalysis);
         pv.setBackgroundColor(white ? 0xFF40382F : 0xFF354450);
@@ -1004,7 +1032,6 @@ public final class TournamentActivity extends Activity {
         LinearLayout info = new LinearLayout(this);
         info.setOrientation(LinearLayout.VERTICAL);
         info.addView(label, fullWidth());
-        info.addView(timing, fullWidth());
         info.addView(metricsRow, fullWidth());
         info.addView(pv, new LinearLayout.LayoutParams(-1, dp(38)));
         if (white) expandedWhiteInfo = info; else expandedBlackInfo = info;
@@ -1081,8 +1108,8 @@ public final class TournamentActivity extends Activity {
         // Normal layout keeps the player rows attached to the board. The
         // stacked double-tap layout moves their clock/time into the engine cards.
         boolean stackedDoubleTapMode = expandedWhitePanelBelowBoard;
-        if (expandedWhiteTiming != null) expandedWhiteTiming.setVisibility(stackedDoubleTapMode ? View.VISIBLE : View.GONE);
-        if (expandedBlackTiming != null) expandedBlackTiming.setVisibility(stackedDoubleTapMode ? View.VISIBLE : View.GONE);
+        if (expandedWhiteTimingGroup != null) expandedWhiteTimingGroup.setVisibility(stackedDoubleTapMode ? View.VISIBLE : View.GONE);
+        if (expandedBlackTimingGroup != null) expandedBlackTimingGroup.setVisibility(stackedDoubleTapMode ? View.VISIBLE : View.GONE);
         applyExpandedPlayerRowOrder(!stackedDoubleTapMode);
         applyExpandedPanelRowOrder();
         expandedRoot.requestLayout();
@@ -1482,8 +1509,12 @@ public final class TournamentActivity extends Activity {
         }
         if (expandedWhiteMoveTime != null) expandedWhiteMoveTime.setText(whiteMove);
         if (expandedBlackMoveTime != null) expandedBlackMoveTime.setText(blackMove);
-        if (expandedWhiteTiming != null) expandedWhiteTiming.setText("Clock: " + whiteClock + "    Time: " + whiteMove);
-        if (expandedBlackTiming != null) expandedBlackTiming.setText("Clock: " + blackClock + "    Time: " + blackMove);
+        if (expandedWhiteTiming != null) expandedWhiteTiming.setText(whiteClock);
+        if (expandedBlackTiming != null) expandedBlackTiming.setText(blackClock);
+        if (expandedWhiteTimingMove != null) expandedWhiteTimingMove.setText(whiteMove);
+        if (expandedBlackTimingMove != null) expandedBlackTimingMove.setText(blackMove);
+        if (expandedWhiteTiming != null) expandedWhiteTiming.setTextColor(currentWhiteToMove ? 0xFFFFFFFF : 0xFF9A9A9A);
+        if (expandedBlackTiming != null) expandedBlackTiming.setTextColor(currentWhiteToMove ? 0xFF9A9A9A : 0xFFFFFFFF);
         updateExpandedBoardControls();
     }
 
@@ -2632,7 +2663,10 @@ public final class TournamentActivity extends Activity {
             useExternalAnalysis = mirrorBranchMode || externalAnalysisActive;
             if (useExternalAnalysis) {
                 engineName = mirrorAnalysisEngineNameForId(mirrorAnalysisEngineId);
-                analysis = mirrorLatestAnalysisOutput;
+                // The board-side panel follows only the newest main (PV 1)
+                // analysis. The Moves analysis tab keeps its separate depth
+                // history and MultiPV list in mirrorLatestAnalysisOutput.
+                analysis = mirrorAnalysisCoreOutput;
                 focusEngineId = mirrorAnalysisEngineId;
             } else if (mirrorReplayMode) {
                 engineName = whiteToMove ? mirrorReplayWhiteName : mirrorReplayBlackName;
@@ -2652,8 +2686,11 @@ public final class TournamentActivity extends Activity {
         if (mirrorFocusEngineIcon != null) setMirrorPlayerIcon(mirrorFocusEngineIcon, focusEngineId, iconLookupName);
         if (mirrorFocusEvaluationBar != null) mirrorFocusEvaluationBar.setEngineAnalysis(analysis, outputWhite);
         mirrorFocusAnalysisText.setText(analysis.isEmpty() ? "" : formatMirrorMetrics(analysis));
-        if (mirrorFocusAnalysisPvText != null)
-            mirrorFocusAnalysisPvText.setText(analysis.isEmpty() ? "" : extractMirrorMoveVariation(analysis));
+        if (mirrorFocusAnalysisPvText != null) {
+            String boardVariation = analysis.isEmpty() ? "" :
+                    (useExternalAnalysis ? extractLatestMainMirrorVariation(analysis) : extractMirrorMoveVariation(analysis));
+            mirrorFocusAnalysisPvText.setText(boardVariation);
+        }
 
         ArrayList<String> sans = currentMirrorSanMoves(null);
         ArrayList<Position> history = currentMirrorPositions();
@@ -2669,6 +2706,21 @@ public final class TournamentActivity extends Activity {
             moves.append(sans.get(i));
         }
         mirrorFocusMovesText.setText(moves.length() == 0 ? "No moves yet." : moves.toString());
+    }
+
+    /** Return only the current principal (PV 1) line for the board-side display. */
+    private String extractLatestMainMirrorVariation(String analysis) {
+        if (analysis == null || analysis.trim().isEmpty()) return "—";
+        java.util.regex.Matcher mainPv = java.util.regex.Pattern.compile(
+                "(?im)^\\s*PV\\s*1\\s+(.*)$").matcher(analysis);
+        if (mainPv.find()) {
+            String variation = mainPv.group(1).trim();
+            return variation.isEmpty() ? "—" : variation;
+        }
+        // Never fall back to the complete output here: it may contain the
+        // optional depth-history section used only by the Moves analysis tab.
+        // If there is no current PV 1 line, leave the board variation blank.
+        return "—";
     }
 
     private boolean hasSavedAnalysisFields(String comment) {
@@ -3849,7 +3901,12 @@ public final class TournamentActivity extends Activity {
                         String.format(java.util.Locale.US, "%+.2f", whitePerspectiveScore / 100.0);
                 ArrayList<Move> hints = new ArrayList<>();
                 StringBuilder variationLines = new StringBuilder();
-                int requestedVariations = requestedVariationCount;
+                // This listener is reused by later analysis requests. Read the
+                // currently selected count here instead of capturing the count
+                // from the first request, so the Variation menu updates PV rows
+                // and the corresponding board arrows on the same engine.
+                int requestedVariations = Math.max(1,
+                        Math.min(ColorTheme.MAX_ARROWS, mirrorAnalysisVariationCount));
                 int variationIndex = 0;
                 for (PvInfo variationPv : infos) {
                     if (variationPv == null || variationPv.pv == null || variationPv.pv.isEmpty() ||
@@ -3878,9 +3935,10 @@ public final class TournamentActivity extends Activity {
                     }
                     depthLines = depthText.toString();
                 }
+                final String mainVariation = mirrorPvVariation(pos, pv);
                 final String compactOutput = "[" + pv.depth + "] " + eval + " " + compactMirrorShortcutCount(pv.nps) +
                         " " + compactMirrorShortcutCount(pv.nodes) +
-                        (variationLines.length() == 0 ? "" : "  " + variationLines.toString().replace('\n', ' '));
+                        (mainVariation.isEmpty() ? "" : "  " + mainVariation);
                 String engineWdl = pv.hasWdl ? "\nEngine WDL: W " + String.format(java.util.Locale.US, "%.1f", pv.wdlWin / 10.0) +
                         "%   D " + String.format(java.util.Locale.US, "%.1f", pv.wdlDraw / 10.0) +
                         "%   L " + String.format(java.util.Locale.US, "%.1f", pv.wdlLoss / 10.0) + "%" : "";
