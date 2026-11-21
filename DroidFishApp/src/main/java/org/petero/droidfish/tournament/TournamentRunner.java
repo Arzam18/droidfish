@@ -42,6 +42,8 @@ public final class TournamentRunner {
         }
         /** Persistent per-engine analysis text; each side retains its last line after moving. */
         void onEngineAnalysis(boolean white, String analysis);
+        /** First move of each current tournament PV, used only for optional board arrows. */
+        default void onEngineVariationHints(boolean white, long positionHash, ArrayList<Move> hints) { }
         void onReviewPosition(Position position, int ply, int totalPlies, String whiteAnalysis, String blackAnalysis, long moveTimeMs);
         void onMoveTime(boolean whiteMoved, long moveTimeMs, String openingName);
         void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn);
@@ -66,6 +68,8 @@ public final class TournamentRunner {
     private final boolean repeatOpening;
     private final double autoWinThreshold;
     private final boolean fastWinEnabled;
+    /** MultiPV count used for tournament engine arrows; 1 preserves legacy behaviour. */
+    private volatile int tournamentArrowCount = 1;
     private volatile double latestWhiteEvalPawns = Double.NaN;
     private volatile double latestBlackEvalPawns = Double.NaN;
     private final DroidComputerPlayer whitePlayer, blackPlayer;
@@ -125,6 +129,11 @@ public final class TournamentRunner {
         if (game != null || pairing != null) throw new IllegalStateException("Draw rules must be configured before starting the tournament");
         evalDrawScore = Double.isFinite(scorePawns) && scorePawns >= 0 ? Math.min(100.0, scorePawns) : 0.12;
         evalDrawCondition = Math.max(1, Math.min(10000, conditionFullMoves));
+    }
+
+    /** Change the number of tournament PVs requested for subsequent engine turns. */
+    public void setTournamentArrowCount(int count) {
+        tournamentArrowCount = Math.max(1, Math.min(8, count));
     }
 
     public synchronized void configureDrawRules(boolean enabled, int moveRule, int repetitionCount, int maximumFullMoves, int startFullMove) {
@@ -691,6 +700,9 @@ public final class TournamentRunner {
                     new Position(game.currPos()), game.haveDrawOffer(), wTime, bTime, inc, inc,
                     whiteToMove ? whiteEngine.executableId : blackEngine.executableId);
         }
+        // Request multiple UCI MultiPV lines from the same tournament engine.
+        // The UI renders only their first moves as arrows; no extra engine is started.
+        request.setNumPV(Math.max(1, Math.min(8, tournamentArrowCount)));
         switch (tournament.timeMode()) {
             case MOVE_TIME: request.tournamentGoCommand = "go movetime " + Math.max(1, tournament.limitValue()); break;
             case DEPTH: request.tournamentGoCommand = "go depth " + Math.max(1, tournament.limitValue()); break;
@@ -1193,6 +1205,8 @@ public final class TournamentRunner {
         // PV callbacks can arrive much faster than a human can read them.
         private Position pendingPvPosition;
         private SearchListener.PvInfo pendingPvInfo;
+        private ArrayList<SearchListener.PvInfo> pendingPvInfos = new ArrayList<>();
+        private boolean pendingVariationHintsNeedsPublish;
         private boolean pendingPvNeedsFormatting;
         private long lastPublishNs;
         private static final long ANALYSIS_PUBLISH_INTERVAL_NS = 250_000_000L;
@@ -1210,6 +1224,8 @@ public final class TournamentRunner {
             hasCurrentSearchOutput = false;
             pendingPvPosition = null;
             pendingPvInfo = null;
+            pendingPvInfos.clear();
+            pendingVariationHintsNeedsPublish = false;
             pendingPvNeedsFormatting = false;
             lastPublishNs = 0;
             hasCurrentSearchInfo = false;
@@ -1267,6 +1283,8 @@ public final class TournamentRunner {
                 // The final best-move snapshot is formatted synchronously below.
                 pendingPvPosition = pos;
                 pendingPvInfo = pv;
+                pendingPvInfos = new ArrayList<>(pvInfo);
+                pendingVariationHintsNeedsPublish = true;
                 pendingPvNeedsFormatting = true;
                 hasCurrentSearchInfo = true;
                 publishAnalysis(false);
@@ -1366,6 +1384,20 @@ public final class TournamentRunner {
                     " D: " + String.format(java.util.Locale.US, "%.1f%%", lastWdlDraw / 10.0) +
                     " L: " + String.format(java.util.Locale.US, "%.1f%%", lastWdlLoss / 10.0) : "";
             String text = header + engineWdlLine + (variation.length() == 0 ? "" : "\n" + variation);
+            if (pendingVariationHintsNeedsPublish && pendingPvPosition != null) {
+                ArrayList<Move> hints = new ArrayList<>();
+                int requested = Math.max(1, Math.min(8, tournamentArrowCount));
+                // Preserve MultiPV numbering: if PV 2 is absent, never relabel PV 3
+                // as the second arrow. Only a contiguous prefix beginning at PV 1
+                // represents the ranked variations requested by the user.
+                for (int pvIndex = 0; pvIndex < pendingPvInfos.size() && pvIndex < requested; pvIndex++) {
+                    SearchListener.PvInfo variationPv = pendingPvInfos.get(pvIndex);
+                    if (variationPv == null || variationPv.pv == null || variationPv.pv.isEmpty()) break;
+                    hints.add(variationPv.pv.get(0));
+                }
+                listener.onEngineVariationHints(white, pendingPvPosition.zobristHash(), hints);
+                pendingVariationHintsNeedsPublish = false;
+            }
             if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
             if (!positionHistory.isEmpty() && reviewPly < 0) {
                 int last = positionHistory.size() - 1;
