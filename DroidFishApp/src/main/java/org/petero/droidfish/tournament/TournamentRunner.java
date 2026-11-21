@@ -108,6 +108,15 @@ public final class TournamentRunner {
     private int evalDrawConsecutive = 0;
     private int evalDrawLastFullMove = -1;
 
+    // Both engines have agreed, but the side currently on move must first make
+    // one confirming move. The opponent's first fresh evaluation of the resulting
+    // position then decides whether the threshold still holds.
+    private String fastWinPendingResult;
+    private boolean fastWinConfirmingMoverWhite;
+    private boolean fastWinAwaitingPostMoveEval;
+    private boolean fastWinPostMoveEvalEngineWhite;
+    private long fastWinPostMovePositionHash;
+
     /** Configure tournament-only automatic draw adjudication before start(). */
     public synchronized void configureDrawRules(boolean enabled, int moveRule, int repetitionCount, int maximumFullMoves) {
         configureDrawRules(enabled, moveRule, repetitionCount, maximumFullMoves, 1);
@@ -457,6 +466,7 @@ public final class TournamentRunner {
         pairing = tournament.current();
         latestWhiteEvalPawns = Double.NaN;
         latestBlackEvalPawns = Double.NaN;
+        clearFastWinPending();
         evalDrawConsecutive = 0; evalDrawLastFullMove = -1;
         if (pairing == null) {
             finished = true;
@@ -759,6 +769,15 @@ public final class TournamentRunner {
         lastMoveTimeMs = usesClock() ? clock.lastTurnElapsedMs() : Math.max(0, (System.nanoTime() - currentTurnStartedNs) / 1_000_000L);
         addMoveAnalysisComment(whiteEngineSide, lastMoveTimeMs, analysisAtBestMove);
         recordPosition(lastMoveTimeMs);
+        if (fastWinPendingResult != null && !fastWinAwaitingPostMoveEval &&
+                whiteEngineSide == fastWinConfirmingMoverWhite) {
+            // The threshold-agreeing side has now completed its required move.
+            // The now-to-move opponent is the only engine that can publish a fresh
+            // evaluation of this exact resulting position without an extra search.
+            fastWinAwaitingPostMoveEval = true;
+            fastWinPostMoveEvalEngineWhite = !whiteEngineSide;
+            fastWinPostMovePositionHash = game.currPos().zobristHash();
+        }
         listener.onMoveTime(!game.currPos().whiteMove, lastMoveTimeMs, currentOpeningName);
         // The live UI already has the initial PGN and receives this exact move.
         // Avoid exporting the entire growing PGN on every ply while the next engine
@@ -989,6 +1008,7 @@ public final class TournamentRunner {
 
     private synchronized void finishCurrentGame(TournamentManager.Outcome outcome, String explicitReason) {
         if (stopped || finished || pairing == null || finalizingGame || outcome == TournamentManager.Outcome.UNFINISHED) return;
+        clearFastWinPending();
         finalizingGame = true;
         turnGeneration++;
         if (clock != null) clock.pause();
@@ -1079,6 +1099,82 @@ public final class TournamentRunner {
         startNextGame();
     }
 
+    private synchronized void clearFastWinPending() {
+        fastWinPendingResult = null;
+        fastWinConfirmingMoverWhite = false;
+        fastWinAwaitingPostMoveEval = false;
+        fastWinPostMoveEvalEngineWhite = false;
+        fastWinPostMovePositionHash = 0L;
+    }
+
+    private boolean agreesWithFastWinResult(String result, double eval) {
+        if (!Double.isFinite(eval) || result == null) return false;
+        return "1-0".equals(result) ? eval >= autoWinThreshold : eval <= -autoWinThreshold;
+    }
+
+    private void checkFastWinRule(boolean reportingWhiteEngine, long reportingPositionHash) {
+        synchronized (TournamentRunner.this) {
+            if (!fastWinEnabled || stopped || finished || paused || finalizingGame || game == null || pairing == null) return;
+            // Only a fresh PV for the exact live position and its side-to-move can
+            // trigger or confirm the rule. Late callbacks from a previous search
+            // must never adjudicate a newer board position.
+            if (reportingPositionHash == 0L || reportingPositionHash != game.currPos().zobristHash() ||
+                    reportingWhiteEngine != game.currPos().whiteMove) return;
+            if (game.currPos().fullMoveCounter < ruleStartFullMove) {
+                clearFastWinPending();
+                return;
+            }
+            double whiteEval = latestWhiteEvalPawns;
+            double blackEval = latestBlackEvalPawns;
+
+            if (fastWinPendingResult != null && fastWinAwaitingPostMoveEval) {
+                // Only accept a fresh PV from the opponent's search on the exact
+                // post-confirmation position. A stale pre-move score cannot win.
+                if (reportingWhiteEngine != fastWinPostMoveEvalEngineWhite ||
+                        game.currPos().zobristHash() != fastWinPostMovePositionHash) return;
+                double freshEval = reportingWhiteEngine ? whiteEval : blackEval;
+                String confirmedResult = fastWinPendingResult;
+                if (!agreesWithFastWinResult(confirmedResult, freshEval)) {
+                    clearFastWinPending();
+                    return;
+                }
+                double reasonEval = freshEval;
+                clearFastWinPending();
+                turnGeneration++;
+                if (clock != null) clock.pause();
+                whitePlayer.stopSearch();
+                blackPlayer.stopSearch();
+                humanAdjudication = false;
+                game.adjudicateTournament(confirmedResult);
+                TournamentManager.Outcome outcome = "1-0".equals(confirmedResult)
+                        ? TournamentManager.Outcome.WHITE_WIN : TournamentManager.Outcome.BLACK_WIN;
+                finishCurrentGame(outcome, String.format(java.util.Locale.US,
+                        "both engines agreed; post-move evaluation remained %+.2f (threshold %+.2f)",
+                        reasonEval, "1-0".equals(confirmedResult) ? autoWinThreshold : -autoWinThreshold));
+                return;
+            }
+
+            if (fastWinPendingResult != null) {
+                // Both engines already agreed at the trigger position. Do not
+                // adjudicate (or cancel on a transient in-search update) until
+                // the side that is currently moving has completed its move.
+                return;
+            }
+
+            if (!Double.isFinite(whiteEval) || !Double.isFinite(blackEval)) return;
+            String agreedResult = null;
+            if (whiteEval >= autoWinThreshold && blackEval >= autoWinThreshold) agreedResult = "1-0";
+            else if (whiteEval <= -autoWinThreshold && blackEval <= -autoWinThreshold) agreedResult = "0-1";
+            if (agreedResult == null) return;
+
+            // Do not adjudicate at the instant the two scores cross the threshold.
+            // The engine currently on move must be allowed to make its move first.
+            fastWinPendingResult = agreedResult;
+            fastWinConfirmingMoverWhite = game.currPos().whiteMove;
+            fastWinAwaitingPostMoveEval = false;
+        }
+    }
+
     private final class EngineListener implements SearchListener {
         private final boolean white;
         EngineListener(boolean white) { this.white = white; }
@@ -1092,6 +1188,7 @@ public final class TournamentRunner {
         private volatile int lastWdlWin, lastWdlDraw, lastWdlLoss;
         private volatile String lastPv = "";
         private volatile boolean hasCurrentSearchInfo;
+        private volatile boolean hasCurrentSearchOutput;
         // Keep the newest raw PV and format it only when the UI snapshot is due.
         // PV callbacks can arrive much faster than a human can read them.
         private Position pendingPvPosition;
@@ -1110,17 +1207,18 @@ public final class TournamentRunner {
             hasNativeWdl = false;
             lastWdlWin = lastWdlDraw = lastWdlLoss = 0;
             lastPv = "";
+            hasCurrentSearchOutput = false;
             pendingPvPosition = null;
             pendingPvInfo = null;
             pendingPvNeedsFormatting = false;
             lastPublishNs = 0;
             hasCurrentSearchInfo = false;
-            if (white) latestWhiteAnalysis = "WHITE analysis pending…";
-            else latestBlackAnalysis = "BLACK analysis pending…";
+            // Retain the last completed output until this engine publishes a fresh PV.
+            // This flag is per listener, so White and Black outputs remain independent.
         }
 
         String snapshotForMove() {
-            if (!hasCurrentSearchInfo) return "Eval: n/a Depth: n/a Nodes: n/a NPS: n/a";
+            if (!hasCurrentSearchOutput) return "Eval: n/a Depth: n/a Nodes: n/a NPS: n/a";
             // Flush the most recent depth/PV/stats before writing the PGN comment.
             publishAnalysis(true);
             return white ? latestWhiteAnalysis : latestBlackAnalysis;
@@ -1141,16 +1239,16 @@ public final class TournamentRunner {
             if (pvInfo != null && !pvInfo.isEmpty()) {
                 PvInfo pv = pvInfo.get(0);
                 if (pv == null) return;
+                hasCurrentSearchOutput = true;
 
                 // Retain every newest engine measurement and evaluation for rules
                 // and the final PGN snapshot, but defer expensive SAN formatting.
                 int whitePerspectiveScore = (pos != null && pos.whiteMove) ? pv.score : -pv.score;
-                if (!pv.isMate) {
-                    double evalPawns = whitePerspectiveScore / 100.0;
-                    if (white) latestWhiteEvalPawns = evalPawns; else latestBlackEvalPawns = evalPawns;
-                    checkFastWinRule();
-                    checkEvaluationDrawRule();
-                }
+                double evalPawns = pv.isMate ? (whitePerspectiveScore >= 0 ? 1000.0 : -1000.0)
+                        : whitePerspectiveScore / 100.0;
+                if (white) latestWhiteEvalPawns = evalPawns; else latestBlackEvalPawns = evalPawns;
+                TournamentRunner.this.checkFastWinRule(white, pos == null ? 0L : pos.zobristHash());
+                if (!pv.isMate) checkEvaluationDrawRule();
                 lastDepth = pv.depth;
                 lastNodes = pv.nodes;
                 lastNps = pv.nps;
@@ -1183,6 +1281,7 @@ public final class TournamentRunner {
         @Override public void notifyBookInfo(int id, String bookInfo, ArrayList<Move> moveList, String eco, int distToEcoTree) {
             if (!isCurrentSearch(id)) return;
             if (bookInfo != null && !bookInfo.isEmpty()) {
+                hasCurrentSearchOutput = true;
                 lastPv = "Book: " + bookInfo;
                 pendingPvNeedsFormatting = false;
                 hasCurrentSearchInfo = true;
@@ -1210,40 +1309,13 @@ public final class TournamentRunner {
             }
         }
 
-        private void checkFastWinRule() {
-            if (!fastWinEnabled || stopped || finished || paused || game == null || pairing == null) return;
-            if (game.currPos().fullMoveCounter < ruleStartFullMove) return;
-            double whiteEval = latestWhiteEvalPawns;
-            double blackEval = latestBlackEvalPawns;
-            if (Double.isNaN(whiteEval) || Double.isNaN(blackEval)) return;
-            String result = null;
-            // The evaluations are converted to White's perspective above. Both engines
-            // must independently reach the configured threshold or exceed it (>= N).
-            if (whiteEval >= autoWinThreshold && blackEval >= autoWinThreshold) result = "1-0";
-            else if (whiteEval <= -autoWinThreshold && blackEval <= -autoWinThreshold) result = "0-1";
-            if (result == null) return;
-            synchronized (TournamentRunner.this) {
-                if (stopped || finished || paused || game == null || pairing == null) return;
-                turnGeneration++;
-                if (clock != null) clock.pause();
-                whitePlayer.stopSearch();
-                blackPlayer.stopSearch();
-                humanAdjudication = false;
-                game.adjudicateTournament(result);
-                TournamentManager.Outcome outcome = "1-0".equals(result) ? TournamentManager.Outcome.WHITE_WIN : TournamentManager.Outcome.BLACK_WIN;
-                finishCurrentGame(outcome, String.format(java.util.Locale.US,
-                        "both engines agree at %+.2f or better (threshold %+.2f)",
-                        "1-0".equals(result) ? Math.min(whiteEval, blackEval) : Math.max(whiteEval, blackEval),
-                        "1-0".equals(result) ? autoWinThreshold : -autoWinThreshold));
-            }
-        }
         private String compactCount(long value) {
             if (value >= 1_000_000) return String.format(java.util.Locale.US, "%.1fM", value / 1_000_000.0);
             if (value >= 1_000) return String.format(java.util.Locale.US, "%.0fK", value / 1_000.0);
             return Long.toString(value);
         }
         private void publishAnalysis(boolean force) {
-            if (stopped || finished) return;
+            if (stopped || finished || !hasCurrentSearchOutput) return;
             long nowNs = System.nanoTime();
             if (!force && lastPublishNs != 0 && nowNs - lastPublishNs < ANALYSIS_PUBLISH_INTERVAL_NS) return;
             lastPublishNs = nowNs;
