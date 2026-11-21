@@ -2333,14 +2333,22 @@ public final class TournamentActivity extends Activity {
             engineId = white ? currentWhiteEngineId : currentBlackEngineId;
             analysis = white ? lastWhiteAnalysis : lastBlackAnalysis;
         }
-        new AlertDialog.Builder(this).setTitle(engineName == null ? "Engine output" : engineName)
+        // Capture immutable snapshots for the dialog callback. The source values are
+        // assembled from several mode branches above and must not be captured directly.
+        final boolean selectedWhite = white;
+        final boolean selectedAnalysisEngine = analysisEngine;
+        final String selectedEngineId = engineId;
+        final String selectedEngineName = engineName;
+        final String selectedAnalysis = analysis;
+        new AlertDialog.Builder(this).setTitle(selectedEngineName == null ? "Engine output" : selectedEngineName)
                 .setItems(new String[]{"Engine option", "Copy engine output", "Switch Engine Output / Moves positions",
                         "Swap icon / engine info position", "Swap icon + engine / variation"}, (dialog, which) -> {
-                    if (which == 0) openEngineOptions(engineId, analysisEngine, analysisEngine ? null : white);
-                    else if (which == 1) copyNamedTournamentEngineOutput(white, engineName, analysis);
+                    if (which == 0) openEngineOptions(selectedEngineId, selectedAnalysisEngine,
+                            selectedAnalysisEngine ? null : selectedWhite);
+                    else if (which == 1) copyNamedTournamentEngineOutput(selectedWhite, selectedEngineName, selectedAnalysis);
                     else if (which == 2) toggleMirrorFocusOutputMovesPositions();
-                    else if (which == 3) toggleMirrorPanelIconInfo(white, true);
-                    else if (which == 4) toggleMirrorPanelInfoVariation(white, true);
+                    else if (which == 3) toggleMirrorPanelIconInfo(selectedWhite, true);
+                    else if (which == 4) toggleMirrorPanelInfoVariation(selectedWhite, true);
                 }).show();
     }
 
