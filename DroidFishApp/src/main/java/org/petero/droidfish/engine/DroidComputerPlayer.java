@@ -118,6 +118,11 @@ public class DroidComputerPlayer {
         int elo;                // Engine UCI_Elo setting, or Integer.MAX_VALUE for full strength
         int numPV;              // Number of PV lines to compute
 
+        /** Set requested MultiPV lines for this search; the engine may cap the count. */
+        public void setNumPV(int count) {
+            numPV = Math.max(1, Math.min(8, count));
+        }
+
         boolean ponderEnabled;  // True if pondering enabled, for engine time management
         Move ponderMove;        // Ponder move, or null if not a ponder search
 
