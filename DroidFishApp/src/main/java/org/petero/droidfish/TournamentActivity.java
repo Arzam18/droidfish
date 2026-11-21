@@ -84,16 +84,14 @@ public final class TournamentActivity extends Activity {
     private static final String ENGINE_DIR = "DroidFish/uci";
     private final ArrayList<EngineChoice> availableEngines = new ArrayList<>();
     private final ArrayList<EngineChoice> selectedEngines = new ArrayList<>();
-    private TextView selectedText, statusText, standingsText, clockText, tournamentTitleText;
+    private TextView selectedText, selectedCountText, gameEstimateText, statusText, standingsText, clockText, tournamentTitleText;
     private TextView whiteClockText, blackClockText, whiteNameText, blackNameText, moveStatusText;
     private LinearLayout playPage, blackClockRow, whiteClockRow;
     private Dialog expandedMainDialog;
     private TournamentChessBoard expandedMainBoard;
     private TextView expandedWhiteName, expandedBlackName, expandedWhiteAnalysis, expandedBlackAnalysis,
             expandedWhiteClock, expandedBlackClock, expandedWhiteMoveTime, expandedBlackMoveTime,
-            expandedWhiteEngineTitle, expandedBlackEngineTitle,
-            expandedWhiteOutputClock, expandedBlackOutputClock,
-            expandedWhiteOutputMoveTime, expandedBlackOutputMoveTime;
+            expandedWhiteEngineTitle, expandedBlackEngineTitle;
     private Button expandedFlipBoardButton, expandedPlayPauseButton;
     private HorizontalScrollView expandedWhitePv, expandedBlackPv;
     private ScrollView expandedMainScroll;
@@ -143,6 +141,8 @@ public final class TournamentActivity extends Activity {
     private boolean mirrorBoardOnlyMode, mirrorNavigationMode, mirrorNavigationShowLastMove;
     private boolean mirrorEngineOutputHidden, mirrorPlayerPanelsCompact = true;
     private boolean mirrorFocusAnalysisWhite = true;
+    private boolean mirrorBlackIconAfterInfo, mirrorWhiteIconAfterInfo, mirrorFocusIconAfterInfo;
+    private boolean mirrorBlackInfoAfterVariation, mirrorWhiteInfoAfterVariation, mirrorFocusInfoAfterVariation;
     private boolean mirrorBranchMode;
     private int mirrorBranchBasePly, mirrorBranchOriginalPly;
     private ArrayList<Position> mirrorBranchBasePositions = new ArrayList<>();
@@ -362,6 +362,8 @@ public final class TournamentActivity extends Activity {
         private final Paint barPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private float whiteShare = 0.5f;
         private String scoreLabel = "—";
+        private android.animation.ValueAnimator shareAnimator;
+        private static final float MAX_BAR_PAWNS = 8.0f;
 
         MirrorEvaluationBar(android.content.Context context) {
             super(context);
@@ -370,26 +372,57 @@ public final class TournamentActivity extends Activity {
 
         void setEngineAnalysis(String analysis, boolean whiteEngine) {
             java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(
-                    "(?i)\\bEval\\s*:\\s*([+-]?\\d+(?:\\.\\d+)?)").matcher(analysis == null ? "" : analysis);
+                    "(?i)\\bEval\\s*:\\s*([+-]?(?:M\\d+|\\d+(?:\\.\\d+)?))")
+                    .matcher(analysis == null ? "" : analysis);
             if (!matcher.find()) {
-                scoreLabel = "—";
-                whiteShare = 0.5f;
+                // A real new-game/book state returns the bar to center. A transient
+                // missing field must not make a retained evaluation jump to zero.
+                if (analysis != null && (analysis.trim().equalsIgnoreCase("Book.") ||
+                        analysis.startsWith("WHITE analysis waiting") || analysis.startsWith("BLACK analysis waiting"))) {
+                    scoreLabel = "—";
+                    animateShareTo(0.5f);
+                }
+                setContentDescription((whiteEngine ? "White" : "Black") + " engine evaluation " + scoreLabel);
+                return;
+            }
+            String token = matcher.group(1).toUpperCase(java.util.Locale.US);
+            float target;
+            if (token.indexOf('M') >= 0) {
+                // Mate distance does not change the bar: any winning mate is the
+                // full positive endpoint and any losing mate is the full negative endpoint.
+                target = token.startsWith("-") ? 0.0f : 1.0f;
             } else {
                 try {
-                    // TournamentRunner already normalizes both engines' PV scores
-                    // to White's board perspective before producing the Eval field.
-                    // Keep both independent bars on that same scale.
-                    double score = Double.parseDouble(matcher.group(1));
-                    whiteShare = (float)(0.5 + 0.45 * Math.tanh(score / 3.0));
-                    whiteShare = Math.max(0.04f, Math.min(0.96f, whiteShare));
-                    scoreLabel = matcher.group(1);
+                    double score = Double.parseDouble(token);
+                    score = Math.max(-MAX_BAR_PAWNS, Math.min(MAX_BAR_PAWNS, score));
+                    // Two pawns move the split by one of the board's eight files.
+                    // Thus ±8 reaches an endpoint and 0.00 stays exactly centered.
+                    target = (float)(0.5 + score / (2.0 * MAX_BAR_PAWNS));
                 } catch (NumberFormatException ignored) {
-                    scoreLabel = "—";
-                    whiteShare = 0.5f;
+                    return;
                 }
             }
+            scoreLabel = token;
             setContentDescription((whiteEngine ? "White" : "Black") + " engine evaluation " + scoreLabel);
-            invalidate();
+            animateShareTo(target);
+        }
+
+        private void animateShareTo(float target) {
+            target = Math.max(0.0f, Math.min(1.0f, target));
+            if (Math.abs(target - whiteShare) < 0.002f) {
+                whiteShare = target;
+                invalidate();
+                return;
+            }
+            if (shareAnimator != null) shareAnimator.cancel();
+            shareAnimator = android.animation.ValueAnimator.ofFloat(whiteShare, target);
+            shareAnimator.setDuration(260L);
+            shareAnimator.setInterpolator(new android.view.animation.DecelerateInterpolator());
+            shareAnimator.addUpdateListener(animation -> {
+                whiteShare = (Float)animation.getAnimatedValue();
+                invalidate();
+            });
+            shareAnimator.start();
         }
 
         @Override protected void onDraw(Canvas canvas) {
@@ -500,6 +533,9 @@ public final class TournamentActivity extends Activity {
         Button choose = new Button(this);
         choose.setText("Select tournament engines");
         root.addView(choose, fullWidth());
+        selectedCountText = text("0 engines selected");
+        selectedCountText.setTextColor(0xFFBFCBD2);
+        root.addView(selectedCountText, fullWidth());
         selectedText = text("No engines selected"); root.addView(selectedText, fullWidth());
         choose.setOnClickListener(v -> chooseEngines());
 
@@ -542,8 +578,21 @@ public final class TournamentActivity extends Activity {
 
         titleInput = field("Tournament name", "My Tournament"); root.addView(titleInput, fullWidth());
         gamesInput = field("Games per pairing", "2"); root.addView(gamesInput, fullWidth());
+        gameEstimateText = text("Estimated games: Select at least two engines");
+        gameEstimateText.setTextColor(0xFFBFCBD2);
+        root.addView(gameEstimateText, fullWidth());
+        gamesInput.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { updateEstimatedGames(); }
+            @Override public void afterTextChanged(Editable e) { }
+        });
         swissRoundsInput = field("Swiss rounds (blank = automatic)", "");
         swissRoundsInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        swissRoundsInput.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { updateEstimatedGames(); }
+            @Override public void afterTextChanged(Editable e) { }
+        });
         swissRoundsInput.setVisibility(View.GONE);
         root.addView(swissRoundsInput, fullWidth());
         root.addView(text("Swiss initial seeding"), fullWidth());
@@ -658,6 +707,7 @@ public final class TournamentActivity extends Activity {
         formatSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 applyTournamentFormatUi(position);
+                updateEstimatedGames();
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
         });
@@ -876,8 +926,6 @@ public final class TournamentActivity extends Activity {
             expandedWhiteEngineTitle = expandedBlackEngineTitle = null;
             expandedWhitePv = expandedBlackPv = null;
             expandedWhiteClock = expandedBlackClock = expandedWhiteMoveTime = expandedBlackMoveTime = null;
-            expandedWhiteOutputClock = expandedBlackOutputClock = null;
-            expandedWhiteOutputMoveTime = expandedBlackOutputMoveTime = null;
             expandedFlipBoardButton = expandedPlayPauseButton = null;
             expandedBlackLogo = expandedWhiteLogo = null;
             expandedBlackAnalysisPanel = expandedWhiteAnalysisPanel = expandedMovesContainer = null;
@@ -921,32 +969,12 @@ public final class TournamentActivity extends Activity {
         metrics.setLineSpacing(dp(1), 1.0f);
         if (white) expandedWhiteAnalysis = metrics; else expandedBlackAnalysis = metrics;
 
-        TextView outputClock = text("—");
-        outputClock.setTextSize(21);
-        outputClock.setTypeface(null, android.graphics.Typeface.BOLD);
-        outputClock.setGravity(android.view.Gravity.RIGHT | android.view.Gravity.CENTER_VERTICAL);
-        TextView outputMoveTime = text("—");
-        outputMoveTime.setTextSize(15);
-        outputMoveTime.setGravity(android.view.Gravity.RIGHT | android.view.Gravity.CENTER_VERTICAL);
-        if (white) {
-            expandedWhiteOutputClock = outputClock;
-            expandedWhiteOutputMoveTime = outputMoveTime;
-        } else {
-            expandedBlackOutputClock = outputClock;
-            expandedBlackOutputMoveTime = outputMoveTime;
-        }
-        LinearLayout timingColumn = new LinearLayout(this);
-        timingColumn.setOrientation(LinearLayout.VERTICAL);
-        timingColumn.setGravity(android.view.Gravity.RIGHT | android.view.Gravity.TOP);
-        timingColumn.addView(outputClock, new LinearLayout.LayoutParams(-1, -2));
-        timingColumn.addView(outputMoveTime, new LinearLayout.LayoutParams(-1, -2));
+        // Clock and move time belong to the player rows attached to the board.
+        // Keep them out of the engine-output panel so Depth/SelDepth has the full width.
         LinearLayout metricsRow = new LinearLayout(this);
         metricsRow.setOrientation(LinearLayout.HORIZONTAL);
         metricsRow.setGravity(android.view.Gravity.TOP | android.view.Gravity.CENTER_VERTICAL);
-        metricsRow.addView(metrics, new LinearLayout.LayoutParams(0, -2, 1.0f));
-        LinearLayout.LayoutParams timingParams = new LinearLayout.LayoutParams(dp(90), -2);
-        timingParams.leftMargin = dp(14);
-        metricsRow.addView(timingColumn, timingParams);
+        metricsRow.addView(metrics, new LinearLayout.LayoutParams(-1, -2));
 
         HorizontalScrollView pv = createSingleLinePv(white ? lastWhiteAnalysis : lastBlackAnalysis);
         pv.setBackgroundColor(white ? 0xFF40382F : 0xFF354450);
@@ -1028,7 +1056,9 @@ public final class TournamentActivity extends Activity {
                 expandedBlackInfo, expandedBlackPv, expandedWhitePanelBelowBoard, expandedBlackLogoAfterInfo);
         configureExpandedAnalysisPanel((LinearLayout)expandedWhiteAnalysisPanel, expandedWhiteLogo,
                 expandedWhiteInfo, expandedWhitePv, expandedWhitePanelBelowBoard, expandedWhiteLogoAfterInfo);
-        applyExpandedPlayerRowOrder(!expandedWhitePanelBelowBoard);
+        // Keep the clock/name/move-time rows physically attached to the board
+        // in every panel arrangement; timing is no longer duplicated in outputs.
+        applyExpandedPlayerRowOrder(true);
         applyExpandedPanelRowOrder();
         expandedRoot.requestLayout();
     }
@@ -1047,9 +1077,6 @@ public final class TournamentActivity extends Activity {
 
         TextView engineTitle = info.getChildAt(0) instanceof TextView ? (TextView)info.getChildAt(0) : null;
         LinearLayout metricsRow = info.getChildAt(1) instanceof LinearLayout ? (LinearLayout)info.getChildAt(1) : null;
-        if (metricsRow != null && metricsRow.getChildCount() > 1)
-            metricsRow.getChildAt(1).setVisibility(horizontal ? View.VISIBLE : View.GONE);
-
         if (horizontal) {
             // Expanded/double-tap layout: engine info and clock occupy a stable
             // left block; the large icon stays beside it and PV keeps the full row.
@@ -1252,11 +1279,10 @@ public final class TournamentActivity extends Activity {
         expandedBlackAnalysisPanel.setVisibility(visibility);
         expandedWhiteAnalysisPanel.setVisibility(visibility);
         expandedMovesContainer.setVisibility(visibility);
-        // In the double-tap composition the clock/name/move-time rows are hidden.
-        // Focus mode restores those rows around the board; leaving focus returns
-        // to the exact row visibility dictated by the current panel arrangement.
+        // Clock/name/move-time rows stay anchored around the board in both
+        // the expanded and focus compositions; they are not duplicated in outputs.
         if (enteringFocus) applyExpandedPlayerRowOrder(true);
-        else applyExpandedPlayerRowOrder(!expandedWhitePanelBelowBoard);
+        else applyExpandedPlayerRowOrder(true);
         Toast.makeText(this, enteringFocus ? "Board focus · long-press to restore engine panels" : "Engine panels restored", Toast.LENGTH_SHORT).show();
     }
 
@@ -1428,16 +1454,6 @@ public final class TournamentActivity extends Activity {
         }
         if (expandedWhiteMoveTime != null) expandedWhiteMoveTime.setText(whiteMove);
         if (expandedBlackMoveTime != null) expandedBlackMoveTime.setText(blackMove);
-        if (expandedWhiteOutputClock != null) {
-            expandedWhiteOutputClock.setText(whiteClock);
-            expandedWhiteOutputClock.setTextColor(currentWhiteToMove ? 0xFFFFFFFF : 0xFF9A9A9A);
-        }
-        if (expandedBlackOutputClock != null) {
-            expandedBlackOutputClock.setText(blackClock);
-            expandedBlackOutputClock.setTextColor(currentWhiteToMove ? 0xFF9A9A9A : 0xFFFFFFFF);
-        }
-        if (expandedWhiteOutputMoveTime != null) expandedWhiteOutputMoveTime.setText(whiteMove);
-        if (expandedBlackOutputMoveTime != null) expandedBlackOutputMoveTime.setText(blackMove);
         updateExpandedBoardControls();
     }
 
@@ -2294,24 +2310,45 @@ public final class TournamentActivity extends Activity {
         boolean white = mirrorFocusAnalysisWhite;
         String engineName;
         String analysis;
+        String engineId;
+        boolean analysisEngine = false;
         boolean externalAnalysisActive = mirrorAnalysisOn && mirrorAnalysisEngineActive &&
                 !mirrorAnalysisEngineId.isEmpty() && mirrorLatestAnalysisOutput != null &&
                 !mirrorLatestAnalysisOutput.startsWith("Select an engine");
-        if (mirrorBranchMode || externalAnalysisActive) {
+        if (!mirrorNavigationMode && (mirrorBranchMode || externalAnalysisActive)) {
             engineName = mirrorAnalysisEngineNameForId(mirrorAnalysisEngineId);
             analysis = mirrorLatestAnalysisOutput;
+            engineId = mirrorAnalysisEngineId;
+            analysisEngine = true;
+        } else if (mirrorNavigationMode) {
+            engineName = white ? mirrorNavigationWhiteName : mirrorNavigationBlackName;
+            engineId = white ? mirrorNavigationWhiteEngineId : mirrorNavigationBlackEngineId;
+            analysis = analysisFromComment(selectedMirrorMoveComment());
         } else if (mirrorReplayMode) {
             engineName = white ? mirrorReplayWhiteName : mirrorReplayBlackName;
+            engineId = white ? mirrorReplayWhiteEngineId : mirrorReplayBlackEngineId;
             analysis = white ? lastWhiteAnalysis : lastBlackAnalysis;
         } else {
             engineName = white ? currentWhiteName : currentBlackName;
+            engineId = white ? currentWhiteEngineId : currentBlackEngineId;
             analysis = white ? lastWhiteAnalysis : lastBlackAnalysis;
         }
         new AlertDialog.Builder(this).setTitle(engineName == null ? "Engine output" : engineName)
-                .setItems(new String[]{"Copy engine output", "Switch Engine Output / Moves positions"}, (dialog, which) -> {
-                    if (which == 0) copyNamedTournamentEngineOutput(white, engineName, analysis);
-                    else toggleMirrorFocusOutputMovesPositions();
+                .setItems(new String[]{"Engine option", "Copy engine output", "Switch Engine Output / Moves positions",
+                        "Swap icon / engine info position", "Swap icon + engine / variation"}, (dialog, which) -> {
+                    if (which == 0) openEngineOptions(engineId, analysisEngine, analysisEngine ? null : white);
+                    else if (which == 1) copyNamedTournamentEngineOutput(white, engineName, analysis);
+                    else if (which == 2) toggleMirrorFocusOutputMovesPositions();
+                    else if (which == 3) toggleMirrorPanelIconInfo(white, true);
+                    else if (which == 4) toggleMirrorPanelInfoVariation(white, true);
                 }).show();
+    }
+
+    private String selectedMirrorMoveComment() {
+        ArrayList<Position> positions = currentMirrorPositions();
+        int selected = positions.isEmpty() ? 0 : Math.max(0, Math.min(mirrorDisplayedPly(), positions.size() - 1));
+        ArrayList<String> comments = mirrorReplayMode ? mirrorReplayComments : mirrorLiveComments;
+        return selected > 0 && selected - 1 < comments.size() ? comments.get(selected - 1) : "";
     }
 
     private void attachMirrorOutputLongPress(View target, boolean white) {
@@ -2326,10 +2363,15 @@ public final class TournamentActivity extends Activity {
     private void showMirrorPlayerOutputLongPressMenu(boolean white) {
         String engineName = white ? currentWhiteName : currentBlackName;
         String analysis = white ? lastWhiteAnalysis : lastBlackAnalysis;
+        String engineId = white ? currentWhiteEngineId : currentBlackEngineId;
         new AlertDialog.Builder(this).setTitle((white ? "White: " : "Black: ") + engineName)
-                .setItems(new String[]{"Copy engine output", "Switch Engine Output / Moves positions"}, (dialog, which) -> {
-                    if (which == 0) copyTournamentEngineOutput(white, analysis);
-                    else toggleMirrorFocusOutputMovesPositions();
+                .setItems(new String[]{"Engine option", "Copy engine output", "Switch Engine Output / Moves positions",
+                        "Swap icon / engine info position", "Swap icon + engine / variation"}, (dialog, which) -> {
+                    if (which == 0) openEngineOptions(engineId, false, white);
+                    else if (which == 1) copyTournamentEngineOutput(white, analysis);
+                    else if (which == 2) toggleMirrorFocusOutputMovesPositions();
+                    else if (which == 3) toggleMirrorPanelIconInfo(white, false);
+                    else if (which == 4) toggleMirrorPanelInfoVariation(white, false);
                 }).show();
     }
 
@@ -2645,6 +2687,23 @@ public final class TournamentActivity extends Activity {
     /** Keep the engine icon inside the metrics/info column, not inside PV width. */
     private LinearLayout createMirrorAnalysisRow(TextView metrics, ScrollView variation, ImageView icon) {
         LinearLayout row = new LinearLayout(this);
+        configureMirrorAnalysisRow(row, metrics, variation, icon, true, false);
+        return row;
+    }
+
+    private void removeViewFromParent(View view) {
+        if (view != null && view.getParent() instanceof ViewGroup)
+            ((ViewGroup)view.getParent()).removeView(view);
+    }
+
+    /** Rebuild only the arrangement of a panel; analysis data and child instances are retained. */
+    private void configureMirrorAnalysisRow(LinearLayout row, TextView metrics, ScrollView variation,
+                                            ImageView icon, boolean iconAfterInfo, boolean infoAfterVariation) {
+        if (row == null || metrics == null || variation == null) return;
+        removeViewFromParent(metrics);
+        removeViewFromParent(variation);
+        removeViewFromParent(icon);
+        row.removeAllViews();
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(android.view.Gravity.TOP);
         metrics.setSingleLine(false);
@@ -2654,28 +2713,78 @@ public final class TournamentActivity extends Activity {
         metrics.setGravity(android.view.Gravity.TOP | android.view.Gravity.LEFT);
         metrics.setIncludeFontPadding(false);
         metrics.setLineSpacing(0, 1.0f);
-        if (icon == null) {
-            row.addView(metrics, new LinearLayout.LayoutParams(0, -1, 0.92f));
-            row.addView(variation, new LinearLayout.LayoutParams(0, -1, 1.08f));
-        } else {
-            LinearLayout infoArea = new LinearLayout(this);
-            infoArea.setOrientation(LinearLayout.HORIZONTAL);
-            infoArea.setGravity(android.view.Gravity.TOP | android.view.Gravity.CENTER_VERTICAL);
-            infoArea.addView(metrics, new LinearLayout.LayoutParams(0, -1, 1.0f));
+
+        LinearLayout infoArea = new LinearLayout(this);
+        infoArea.setOrientation(LinearLayout.HORIZONTAL);
+        infoArea.setGravity(android.view.Gravity.TOP | android.view.Gravity.CENTER_VERTICAL);
+        if (icon != null) {
             icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
             LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(
                     dp(mirrorPlayerPanelsCompact ? 64 : 80), -1);
-            iconParams.leftMargin = dp(3);
             iconParams.gravity = android.view.Gravity.CENTER_VERTICAL;
-            infoArea.addView(icon, iconParams);
-            // Give the info column a little more width in enlarged mode so the
-            // four metric labels still fit beside the larger square engine icon.
-            float infoWeight = mirrorPlayerPanelsCompact ? 0.92f : 1.08f;
-            float variationWeight = mirrorPlayerPanelsCompact ? 1.08f : 0.92f;
-            row.addView(infoArea, new LinearLayout.LayoutParams(0, -1, infoWeight));
-            row.addView(variation, new LinearLayout.LayoutParams(0, -1, variationWeight));
+            if (iconAfterInfo) {
+                iconParams.leftMargin = dp(3);
+                infoArea.addView(metrics, new LinearLayout.LayoutParams(0, -1, 1.0f));
+                infoArea.addView(icon, iconParams);
+            } else {
+                iconParams.rightMargin = dp(3);
+                infoArea.addView(icon, iconParams);
+                infoArea.addView(metrics, new LinearLayout.LayoutParams(0, -1, 1.0f));
+            }
+        } else {
+            infoArea.addView(metrics, new LinearLayout.LayoutParams(-1, -1));
         }
-        return row;
+
+        // Give the info column a little more width in enlarged mode so the four
+        // metric labels still fit next to the configured icon.
+        float infoWeight = mirrorPlayerPanelsCompact ? 0.92f : 1.08f;
+        float variationWeight = mirrorPlayerPanelsCompact ? 1.08f : 0.92f;
+        View first = infoAfterVariation ? (View)variation : infoArea;
+        View second = infoAfterVariation ? (View)infoArea : variation;
+        float firstWeight = infoAfterVariation ? variationWeight : infoWeight;
+        float secondWeight = infoAfterVariation ? infoWeight : variationWeight;
+        row.addView(first, new LinearLayout.LayoutParams(0, -1, firstWeight));
+        row.addView(second, new LinearLayout.LayoutParams(0, -1, secondWeight));
+    }
+
+    private void toggleMirrorPanelIconInfo(boolean white, boolean focused) {
+        if (focused) {
+            mirrorFocusIconAfterInfo = !mirrorFocusIconAfterInfo;
+            configureMirrorAnalysisRow(mirrorFocusAnalysisRow, mirrorFocusAnalysisText,
+                    mirrorFocusAnalysisPvScroll, mirrorFocusEngineIcon,
+                    mirrorFocusIconAfterInfo, mirrorFocusInfoAfterVariation);
+        } else if (white) {
+            mirrorWhiteIconAfterInfo = !mirrorWhiteIconAfterInfo;
+            configureMirrorAnalysisRow(mirrorWhiteAnalysisScroll, mirrorWhiteAnalysisText,
+                    mirrorWhitePvScroll, mirrorWhiteIcon,
+                    mirrorWhiteIconAfterInfo, mirrorWhiteInfoAfterVariation);
+        } else {
+            mirrorBlackIconAfterInfo = !mirrorBlackIconAfterInfo;
+            configureMirrorAnalysisRow(mirrorBlackAnalysisScroll, mirrorBlackAnalysisText,
+                    mirrorBlackPvScroll, mirrorBlackIcon,
+                    mirrorBlackIconAfterInfo, mirrorBlackInfoAfterVariation);
+        }
+        applyMirrorPlayerPanelSizes();
+    }
+
+    private void toggleMirrorPanelInfoVariation(boolean white, boolean focused) {
+        if (focused) {
+            mirrorFocusInfoAfterVariation = !mirrorFocusInfoAfterVariation;
+            configureMirrorAnalysisRow(mirrorFocusAnalysisRow, mirrorFocusAnalysisText,
+                    mirrorFocusAnalysisPvScroll, mirrorFocusEngineIcon,
+                    mirrorFocusIconAfterInfo, mirrorFocusInfoAfterVariation);
+        } else if (white) {
+            mirrorWhiteInfoAfterVariation = !mirrorWhiteInfoAfterVariation;
+            configureMirrorAnalysisRow(mirrorWhiteAnalysisScroll, mirrorWhiteAnalysisText,
+                    mirrorWhitePvScroll, mirrorWhiteIcon,
+                    mirrorWhiteIconAfterInfo, mirrorWhiteInfoAfterVariation);
+        } else {
+            mirrorBlackInfoAfterVariation = !mirrorBlackInfoAfterVariation;
+            configureMirrorAnalysisRow(mirrorBlackAnalysisScroll, mirrorBlackAnalysisText,
+                    mirrorBlackPvScroll, mirrorBlackIcon,
+                    mirrorBlackIconAfterInfo, mirrorBlackInfoAfterVariation);
+        }
+        applyMirrorPlayerPanelSizes();
     }
 
     private void updateMirrorEvaluationBars(String whiteAnalysis, String blackAnalysis) {
@@ -3793,8 +3902,8 @@ public final class TournamentActivity extends Activity {
 
     private String mirrorAnalysisEngineNameForId(String engineId) {
         if (engineId == null || engineId.isEmpty()) return "Engine";
-        String reported = mirrorReportedEngineNames.get(engineId);
-        if (reported != null && !reported.trim().isEmpty()) return reported;
+        // The UI selection's display name is authoritative for panels and menus.
+        // UCI id/name values are fallbacks only and must not replace the selected label.
         if (activeTournamentManager != null) {
             for (TournamentManager.Engine engine : activeTournamentManager.engines())
                 if (engineId.equals(engine.id) && engine.displayName != null && !engine.displayName.trim().isEmpty())
@@ -3802,6 +3911,8 @@ public final class TournamentActivity extends Activity {
         }
         for (EngineChoice choice : availableEngines)
             if (engineId.equals(choice.id) && choice.name != null && !choice.name.trim().isEmpty()) return choice.name;
+        String reported = mirrorReportedEngineNames.get(engineId);
+        if (reported != null && !reported.trim().isEmpty()) return reported;
         return new File(engineId).getName();
     }
 
@@ -7729,53 +7840,163 @@ public final class TournamentActivity extends Activity {
 
     private void chooseEngines() {
         if (availableEngines.isEmpty()) { Toast.makeText(this, "No engines found", Toast.LENGTH_LONG).show(); return; }
+        final ArrayList<EngineChoice> dialogSelection = new ArrayList<>(selectedEngines);
         CharSequence[] labels = new CharSequence[availableEngines.size()];
-        boolean[] checked = new boolean[availableEngines.size()];
         for (int i = 0; i < availableEngines.size(); i++) {
             EngineChoice choice = availableEngines.get(i);
             labels[i] = engineLabelWithIcon(choice.id, choice.name, choice.name, 24);
-            for (EngineChoice selected : selectedEngines) if (selected.id.equals(choice.id)) checked[i] = true;
         }
-        final ArrayList<EngineChoice> dialogSelection = new ArrayList<>(selectedEngines);
         int selectedFormat = formatSpinner.getSelectedItemPosition();
         String selectionTitle = selectedFormat == TournamentManager.Format.SWISS.ordinal()
                 ? "Choose engines for Swiss"
                 : (selectedFormat == TournamentManager.Format.CUP.ordinal()
                     ? "Choose Cup entrants (default bracket size is 32)"
-                    : "Choose engines; selection order sets the gauntlet engine");
-        new AlertDialog.Builder(this).setTitle(selectionTitle)
-                .setMultiChoiceItems(labels, checked, (dialog, which, isChecked) -> {
-                    EngineChoice choice = availableEngines.get(which);
-                    if (isChecked) {
-                        boolean present = false;
-                        for (EngineChoice e : dialogSelection) if (e.id.equals(choice.id)) present = true;
-                        if (!present) dialogSelection.add(choice);
-                    } else {
+                    : (selectedFormat == TournamentManager.Format.GAUNTLET.ordinal()
+                        ? "Choose engines; selection order sets the gauntlet engine"
+                        : "Choose tournament engines"));
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(8), dp(4), dp(8), dp(4));
+        TextView count = text(dialogSelection.size() + " engines selected");
+        count.setTextSize(14);
+        count.setTypeface(null, android.graphics.Typeface.BOLD);
+        content.addView(count, fullWidth());
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        Button selectAll = new Button(this); selectAll.setText("Select all"); selectAll.setAllCaps(false);
+        Button deselectAll = new Button(this); deselectAll.setText("Deselect all"); deselectAll.setAllCaps(false);
+        Button viewSelected = new Button(this); viewSelected.setText("View selected"); viewSelected.setAllCaps(false);
+        actions.addView(selectAll, new LinearLayout.LayoutParams(0, -2, 1));
+        actions.addView(deselectAll, new LinearLayout.LayoutParams(0, -2, 1));
+        actions.addView(viewSelected, new LinearLayout.LayoutParams(0, -2, 1));
+        content.addView(actions, fullWidth());
+        ListView list = new ListView(this);
+        list.setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
+        ArrayAdapter<CharSequence> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_list_item_multiple_choice, labels);
+        list.setAdapter(adapter);
+        for (int i = 0; i < availableEngines.size(); i++) {
+            EngineChoice candidate = availableEngines.get(i);
+            for (EngineChoice selected : dialogSelection) {
+                if (selected.id.equals(candidate.id)) { list.setItemChecked(i, true); break; }
+            }
+        }
+        content.addView(list, new LinearLayout.LayoutParams(-1, dp(400)));
+
+        Runnable refreshCount = () -> count.setText(dialogSelection.size() + " engines selected");
+        selectAll.setOnClickListener(v -> {
+            dialogSelection.clear();
+            dialogSelection.addAll(availableEngines);
+            for (int i = 0; i < availableEngines.size(); i++) list.setItemChecked(i, true);
+            refreshCount.run();
+        });
+        deselectAll.setOnClickListener(v -> {
+            dialogSelection.clear();
+            for (int i = 0; i < availableEngines.size(); i++) list.setItemChecked(i, false);
+            refreshCount.run();
+        });
+        list.setOnItemClickListener((parent, view, position, id) -> {
+            EngineChoice choice = availableEngines.get(position);
+            if (list.isItemChecked(position)) {
+                boolean present = false;
+                for (EngineChoice selected : dialogSelection) if (selected.id.equals(choice.id)) { present = true; break; }
+                if (!present) dialogSelection.add(choice);
+            } else {
+                for (int i = dialogSelection.size() - 1; i >= 0; i--)
+                    if (dialogSelection.get(i).id.equals(choice.id)) dialogSelection.remove(i);
+            }
+            refreshCount.run();
+        });
+        viewSelected.setOnClickListener(v -> {
+            ArrayList<EngineChoice> sorted = new ArrayList<>(dialogSelection);
+            Collections.sort(sorted, (a, b) -> a.name.compareToIgnoreCase(b.name));
+            if (sorted.isEmpty()) {
+                Toast.makeText(this, "No engines selected", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            CharSequence[] selectedLabels = new CharSequence[sorted.size()];
+            boolean[] removeChecked = new boolean[sorted.size()];
+            for (int i = 0; i < sorted.size(); i++) selectedLabels[i] = sorted.get(i).name;
+            new AlertDialog.Builder(this).setTitle("Selected engines — alphabetical order")
+                    .setMultiChoiceItems(selectedLabels, removeChecked, (dialog, which, checked) -> removeChecked[which] = checked)
+                    .setPositiveButton("Remove selected", (dialog, which) -> {
+                        Set<String> removeIds = new HashSet<>();
+                        for (int i = 0; i < sorted.size(); i++) if (removeChecked[i]) removeIds.add(sorted.get(i).id);
                         for (int i = dialogSelection.size() - 1; i >= 0; i--)
-                            if (dialogSelection.get(i).id.equals(choice.id)) dialogSelection.remove(i);
-                    }
-                })
-                .setPositiveButton("Apply", (dialog, which) -> {
-                    Set<String> previousIds = new HashSet<>();
-                    for (EngineChoice e : selectedEngines) previousIds.add(e.id);
-                    Set<String> updatedIds = new HashSet<>();
-                    for (EngineChoice e : dialogSelection) updatedIds.add(e.id);
-                    if (!previousIds.equals(updatedIds)) { swissRankOrderConfirmed = false; cupRankOrderConfirmed = false; }
-                    syncRatingInitialValues();
-                    selectedEngines.clear(); selectedEngines.addAll(dialogSelection);
-                    for (EngineChoice engine : selectedEngines)
-                        if (!ratingSetupValues.containsKey(engine.id)) ratingSetupValues.put(engine.id, "3000");
-                    syncSwissRankedEngines(); syncCupRankedEngines();
-                    updateSelectedText();
-                    saveSetup();
-                }).setNegativeButton(android.R.string.cancel, null).show();
+                            if (removeIds.contains(dialogSelection.get(i).id)) dialogSelection.remove(i);
+                        for (int i = 0; i < availableEngines.size(); i++) {
+                            String idAtRow = availableEngines.get(i).id;
+                            boolean checked = false;
+                            for (EngineChoice selected : dialogSelection) if (selected.id.equals(idAtRow)) { checked = true; break; }
+                            list.setItemChecked(i, checked);
+                        }
+                        refreshCount.run();
+                    }).setNegativeButton("Close", null).show();
+        });
+
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(selectionTitle).setView(content)
+                .setPositiveButton("Apply", null).setNegativeButton(android.R.string.cancel, null).create();
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            Set<String> previousIds = new HashSet<>();
+            for (EngineChoice e : selectedEngines) previousIds.add(e.id);
+            Set<String> updatedIds = new HashSet<>();
+            for (EngineChoice e : dialogSelection) updatedIds.add(e.id);
+            if (!previousIds.equals(updatedIds)) { swissRankOrderConfirmed = false; cupRankOrderConfirmed = false; }
+            syncRatingInitialValues();
+            selectedEngines.clear(); selectedEngines.addAll(dialogSelection);
+            for (EngineChoice engine : selectedEngines)
+                if (!ratingSetupValues.containsKey(engine.id)) ratingSetupValues.put(engine.id, "3000");
+            syncSwissRankedEngines(); syncCupRankedEngines();
+            updateSelectedText();
+            saveSetup();
+            dialog.dismiss();
+        }));
+        dialog.show();
     }
 
     private void updateSelectedText() {
         StringBuilder b = new StringBuilder();
         for (EngineChoice e : selectedEngines) { if (b.length() > 0) b.append(", "); b.append(e.name); }
+        if (selectedCountText != null) selectedCountText.setText(selectedEngines.size() + " engines selected");
         selectedText.setText(b.length() == 0 ? "No engines selected" : b.toString());
+        updateEstimatedGames();
         rebuildRatingInitialRows();
+    }
+
+    private void updateEstimatedGames() {
+        if (gameEstimateText == null || selectedEngines == null || formatSpinner == null) return;
+        int n = selectedEngines.size();
+        if (n < 2) {
+            gameEstimateText.setText("Estimated games: Select at least two engines");
+            return;
+        }
+        int format = formatSpinner.getSelectedItemPosition();
+        int gamesPerPair = 2;
+        try { if (gamesInput != null) gamesPerPair = Math.max(1, Integer.parseInt(gamesInput.getText().toString().trim())); }
+        catch (RuntimeException ignored) { }
+        long total;
+        if (format == TournamentManager.Format.ROUND_ROBIN.ordinal()) {
+            total = ((long)n * (n - 1) / 2L) * gamesPerPair;
+            String formula = gamesPerPair == 2 ? (n + " × " + (n - 1))
+                    : (n + " × " + (n - 1) + " ÷ 2 × " + gamesPerPair);
+            gameEstimateText.setText("Estimated games: " + total + " (" + formula + ", " + gamesPerPair + " games per pairing)");
+        } else if (format == TournamentManager.Format.MATCH.ordinal()) {
+            if (n != 2) gameEstimateText.setText("Estimated games: Match format requires exactly 2 engines");
+            else gameEstimateText.setText("Estimated games: " + gamesPerPair);
+        } else if (format == TournamentManager.Format.GAUNTLET.ordinal()) {
+            total = (long)(n - 1) * gamesPerPair;
+            gameEstimateText.setText("Estimated games: " + total + " (" + (n - 1) + " opponents × " + gamesPerPair + ")");
+        } else if (format == TournamentManager.Format.SWISS.ordinal()) {
+            int rounds;
+            try { rounds = Integer.parseInt(swissRoundsInput.getText().toString().trim()); }
+            catch (RuntimeException ignored) { rounds = TournamentManager.recommendedSwissRounds(n); }
+            rounds = Math.max(1, rounds);
+            total = (long)rounds * (n / 2) * 2L;
+            gameEstimateText.setText("Estimated games: " + total + " (" + rounds + " rounds × " + (n / 2) + " pairings × 2 games)");
+        } else {
+            gameEstimateText.setText("Estimated games: Bracket-dependent (calculated after Cup seeding)");
+        }
     }
 
     private void syncRatingInitialValues() {
@@ -7964,6 +8185,7 @@ public final class TournamentActivity extends Activity {
         ratingSetupValues.clear();
         // Initial Elo values belong to one tournament only; every fresh setup starts at 3000.
         for (EngineChoice engine : selectedEngines) ratingSetupValues.put(engine.id, "3000");
+        updateSelectedText();
         swissRankedEngines.clear();
         String savedSwissRankIds = p.getString("setupSwissRankIds", "");
         if (!savedSwissRankIds.isEmpty()) for (String id : savedSwissRankIds.split("\n"))
@@ -8892,9 +9114,10 @@ public final class TournamentActivity extends Activity {
         int boardIndex = mirrorPage.indexOfChild(mirrorBoardFrame);
         if (boardIndex < 0) return;
         mirrorPage.addView(topGroup, boardIndex, fullWidth());
-        int movesIndex = mirrorPage.indexOfChild(mirrorFocusMovesScroll);
-        int bottomIndex = movesIndex >= 0 ? movesIndex + 1 : mirrorPage.getChildCount();
-        mirrorPage.addView(bottomGroup, bottomIndex, fullWidth());
+        // The side-owned clock/name/move-time row must stay adjacent to the board.
+        // Insert the bottom group immediately after the board, before move navigation.
+        int currentBoardIndex = mirrorPage.indexOfChild(mirrorBoardFrame);
+        mirrorPage.addView(bottomGroup, currentBoardIndex + 1, fullWidth());
         mirrorPage.requestLayout();
     }
 
@@ -8909,7 +9132,7 @@ public final class TournamentActivity extends Activity {
         expandedBottomPanelWhite = !expandedBottomPanelWhite;
         reorderMirrorPlayerGroups();
         if (expandedMainDialog != null && expandedMainDialog.isShowing()) {
-            applyExpandedPlayerRowOrder(!expandedWhitePanelBelowBoard);
+            applyExpandedPlayerRowOrder(true);
             applyExpandedPanelRowOrder();
         }
         applyMainBoardAnalysisPositions();
@@ -9243,6 +9466,9 @@ public final class TournamentActivity extends Activity {
         // TournamentRunner prefixes its formatted SAN line with "eval +x.xx".
         // Mirror Board's PV area is for moves only, so remove that display prefix.
         variation = variation.replaceFirst("(?i)^eval\\s+[+-]?(?:M\\d+|\\d+(?:\\.\\d+)?)\\s*", "").trim();
+        // External analysis feeds can include a bare initial move index ("1 ")
+        // before the SAN PV. It is metadata, not part of the variation display.
+        variation = variation.replaceFirst("^1\\s+(?=[a-hKQRBN0-9])", "").trim();
         return variation.isEmpty() ? "—" : variation;
     }
 
