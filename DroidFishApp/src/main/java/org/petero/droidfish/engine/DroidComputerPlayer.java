@@ -36,6 +36,7 @@ import org.petero.droidfish.gamelogic.Position;
 import org.petero.droidfish.gamelogic.SearchListener;
 import org.petero.droidfish.gamelogic.TextIO;
 import org.petero.droidfish.gamelogic.UndoInfo;
+import org.petero.droidfish.tournament.TournamentDiagnostics;
 import org.petero.droidfish.gamelogic.SearchListener.PvInfo;
 import org.petero.droidfish.tb.Probe;
 
@@ -113,6 +114,8 @@ public class DroidComputerPlayer {
         int movesToGo;          // Number of moves to next time control
         boolean cetTimeManagement; // CET sends wtime/btime/winc/binc without movestogo
         public String tournamentGoCommand; // Fixed tournament limit, if selected
+        /** Non-empty only for tournament engine requests; used by the durable freeze log. */
+        public String diagnosticContext = "";
 
         String engine;          // Engine name (identifier)
         int elo;                // Engine UCI_Elo setting, or Integer.MAX_VALUE for full strength
@@ -445,9 +448,17 @@ public class DroidComputerPlayer {
     /** Start an engine, if not already started.
      * Will shut down old engine first, if needed. */
     public final synchronized void queueStartEngine(int id, String engine) {
+        queueStartEngine(id, engine, "");
+    }
+
+    /** Queue a tournament engine start with a stable diagnostic label. */
+    public final synchronized void queueStartEngine(int id, String engine, String diagnosticContext) {
         killOldEngine(engine);
         stopSearch();
         searchRequest = SearchRequest.startRequest(id, engine);
+        searchRequest.diagnosticContext = diagnosticContext == null ? "" : diagnosticContext;
+        if (!searchRequest.diagnosticContext.isEmpty())
+            TournamentDiagnostics.record("ENGINE", "start_queued", searchRequest.diagnosticContext + " engine=" + engine);
         handleQueue();
     }
 
@@ -624,6 +635,7 @@ public class DroidComputerPlayer {
         if (newGame) {
             uciEngine.writeLineToEngine("ucinewgame");
             uciEngine.writeLineToEngine("isready");
+            if (!sr.diagnosticContext.isEmpty()) TournamentDiagnostics.record("ENGINE", "isready_send", sr.diagnosticContext + " reason=newgame");
             engineState.setState(MainState.WAIT_READY);
             newGame = false;
             return;
@@ -632,6 +644,7 @@ public class DroidComputerPlayer {
         // Apply pending UCI option changes
         if (applyPendingOptions()) {
             uciEngine.writeLineToEngine("isready");
+            if (!sr.diagnosticContext.isEmpty()) TournamentDiagnostics.record("ENGINE", "isready_send", sr.diagnosticContext + " reason=options");
             engineState.setState(MainState.WAIT_READY);
             return;
         }
@@ -702,6 +715,8 @@ public class DroidComputerPlayer {
             }
             uciEngine.setOption("Ponder", sr.ponderEnabled);
             uciEngine.setOption("UCI_AnalyseMode", false);
+            if (!sr.diagnosticContext.isEmpty())
+                TournamentDiagnostics.record("ENGINE", "position_send", sr.diagnosticContext + " moves=" + nMoves + " fen=" + baseFen);
             uciEngine.writeLineToEngine(posStr.toString());
             if (sr.wTime < 1) sr.wTime = 1;
             if (sr.bTime < 1) sr.bTime = 1;
@@ -724,6 +739,8 @@ public class DroidComputerPlayer {
                 }
             }
             long goDispatchStartNs = System.nanoTime();
+            if (!sr.diagnosticContext.isEmpty())
+                TournamentDiagnostics.record("ENGINE", "go_send", sr.diagnosticContext + " command=" + goStr);
             uciEngine.writeLineToEngine(goStr.toString());
             long goDispatchDurationMs = Math.max(0L, (System.nanoTime() - goDispatchStartNs) / 1_000_000L);
             if (sr.cetTimeManagement && (engineStartDelayMs >= 50 ||
@@ -746,6 +763,8 @@ public class DroidComputerPlayer {
                     posStr.append(TextIO.moveToUCIString(sr.mList.get(i)));
                 }
             }
+            if (!sr.diagnosticContext.isEmpty())
+                TournamentDiagnostics.record("ENGINE", "analysis_position_send", sr.diagnosticContext + " moves=" + nMoves);
             uciEngine.writeLineToEngine(posStr.toString());
             uciEngine.setOption("UCI_AnalyseMode", true);
             StringBuilder goStr = new StringBuilder(96);
@@ -757,6 +776,8 @@ public class DroidComputerPlayer {
                     goStr.append(TextIO.moveToUCIString(m));
                 }
             }
+            if (!sr.diagnosticContext.isEmpty())
+                TournamentDiagnostics.record("ENGINE", "analysis_go_send", sr.diagnosticContext + " command=" + goStr);
             uciEngine.writeLineToEngine(goStr.toString());
             engineState.setState(MainState.ANALYZE);
         }
@@ -769,14 +790,24 @@ public class DroidComputerPlayer {
         myAssert(searchRequest != null);
 
         engineName = "Computer";
-        uciEngine = UCIEngineBase.getEngine(searchRequest.engine,
-                                            engineOptions,
-                errMsg -> {
-                    if (errMsg == null)
-                        errMsg = "";
-                    listener.reportEngineError(errMsg);
-                });
-        uciEngine.initialize();
+        if (searchRequest != null && searchRequest.diagnosticContext != null && !searchRequest.diagnosticContext.isEmpty())
+            TournamentDiagnostics.record("ENGINE", "process_start_begin", searchRequest.diagnosticContext + " engine=" + searchRequest.engine);
+        try {
+            uciEngine = UCIEngineBase.getEngine(searchRequest.engine,
+                                                engineOptions,
+                    errMsg -> {
+                        if (errMsg == null)
+                            errMsg = "";
+                        listener.reportEngineError(errMsg);
+                    });
+            uciEngine.initialize();
+        } catch (RuntimeException engineStartError) {
+            if (searchRequest != null && searchRequest.diagnosticContext != null && !searchRequest.diagnosticContext.isEmpty())
+                TournamentDiagnostics.recordError("ENGINE", "process_start_exception " + searchRequest.diagnosticContext, engineStartError);
+            throw engineStartError;
+        }
+        if (searchRequest != null && searchRequest.diagnosticContext != null && !searchRequest.diagnosticContext.isEmpty())
+            TournamentDiagnostics.record("ENGINE", "process_start_returned", searchRequest.diagnosticContext);
 
         final UCIEngine uci = uciEngine;
         engineMonitor = new Thread(() -> monitorLoop(uci));
@@ -844,6 +875,8 @@ public class DroidComputerPlayer {
                 uci.setOption("UCI_ShowWDL", true);
                 uci.writeLineToEngine("ucinewgame");
                 uci.writeLineToEngine("isready");
+                if (searchRequest != null && searchRequest.diagnosticContext != null && !searchRequest.diagnosticContext.isEmpty())
+                    TournamentDiagnostics.record("ENGINE", "isready_send", searchRequest.diagnosticContext + " reason=uci_init");
                 engineState.setState(MainState.WAIT_READY);
                 listener.notifyEngineInitialized();
             }
@@ -851,6 +884,9 @@ public class DroidComputerPlayer {
         }
         case WAIT_READY: {
             if ("readyok".equals(s)) {
+                if (searchRequest != null && searchRequest.diagnosticContext != null && !searchRequest.diagnosticContext.isEmpty())
+                    TournamentDiagnostics.record("ENGINE", "uci_readyok", searchRequest.diagnosticContext + " searchId=" + engineState.searchId);
+                listener.notifyEngineReady();
                 engineState.setState(MainState.IDLE);
                 handleIdleState();
             }
@@ -885,6 +921,8 @@ public class DroidComputerPlayer {
             String[] tokens = tokenize(s);
             if (tokens[0].equals("bestmove")) {
                 uci.writeLineToEngine("isready");
+                if (searchRequest != null && searchRequest.diagnosticContext != null && !searchRequest.diagnosticContext.isEmpty())
+                    TournamentDiagnostics.record("ENGINE", "isready_send", searchRequest.diagnosticContext + " reason=stop_search");
                 engineState.setState(MainState.WAIT_READY);
             }
             break;
@@ -896,8 +934,11 @@ public class DroidComputerPlayer {
     /** Handle reading of UCI options. Return true when finished. */
     private boolean readUCIOption(UCIEngine uci, String s) {
         String[] tokens = tokenize(s);
-        if (tokens[0].equals("uciok"))
+        if (tokens[0].equals("uciok")) {
+            if (searchRequest != null && searchRequest.diagnosticContext != null && !searchRequest.diagnosticContext.isEmpty())
+                TournamentDiagnostics.record("ENGINE", "uci_uciok", searchRequest.diagnosticContext);
             return true;
+        }
 
         if (tokens[0].equals("id")) {
             if (tokens[1].equals("name")) {
