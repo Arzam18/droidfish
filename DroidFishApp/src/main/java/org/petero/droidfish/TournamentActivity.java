@@ -55,6 +55,7 @@ import org.petero.droidfish.ChessBoardPlay;
 import org.petero.droidfish.tournament.TournamentManager;
 import org.petero.droidfish.tournament.CupTournamentManager;
 import org.petero.droidfish.tournament.TournamentRunner;
+import org.petero.droidfish.tournament.TournamentDiagnostics;
 import org.json.JSONException;
 import org.petero.droidfish.engine.DroidComputerPlayer;
 import org.petero.droidfish.engine.UCIOptions;
@@ -121,7 +122,10 @@ public final class TournamentActivity extends Activity {
     private int currentTournamentScreen = 0; // 0 = live board, 1 = mirror board
     private int expandedMainReturnScreen = 0;
     private boolean boardSelectionActive;
+    private boolean activityLeaving;
     private int tournamentArrowCount = 1;
+    /** Number of consecutive main-PV plies to show as external-analysis arrows. */
+    private int mirrorAnalysisArrowPlyCount = 1;
     private TournamentChessBoard mirrorBoard;
     private TextView mirrorBlackAnalysisText, mirrorWhiteAnalysisText, mirrorBlackPvText, mirrorWhitePvText,
             mirrorWhiteClock, mirrorBlackClock, mirrorWhiteName, mirrorBlackName,
@@ -485,11 +489,16 @@ public final class TournamentActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        TournamentDiagnostics.initialize(this);
+        TournamentDiagnostics.record("ACTIVITY", "tournament_activity_on_create", "savedInstanceState=" + (state != null));
         setTitle(R.string.option_tournament);
         latestPosition = standardStartPosition();
         SharedPreferences boardPrefs = getPreferences(MODE_PRIVATE);
+        tournamentUiFlipped = boardPrefs.getBoolean("tournamentUiFlipped", false);
+        mirrorUiFlipped = tournamentUiFlipped;
         tournamentArrowCount = clampArrowCount(boardPrefs.getInt("tournamentArrowCount", 1));
         mirrorAnalysisVariationCount = clampArrowCount(boardPrefs.getInt("mirrorAnalysisVariationCount", 1));
+        mirrorAnalysisArrowPlyCount = clampArrowCount(boardPrefs.getInt("mirrorAnalysisArrowPlyCount", 1));
         loadEngineChoices();
         buildUi();
         restoreSetup();
@@ -508,7 +517,19 @@ public final class TournamentActivity extends Activity {
         editor.putInt("tournamentLastBoardSelection", safeBoard)
                 .putBoolean("tournamentNewBoardDoubleTap", expandedWhitePanelBelowBoard);
         if (safeBoard == 2) editor.putInt("tournamentNewBoardReturnScreen", expandedMainReturnScreen);
-        editor.apply();
+        // This is a small preference record; commit synchronously so a force-close
+        // immediately after leaving the board cannot lose the selected board/mode.
+        editor.commit();
+    }
+
+    private void saveExpandedPanelLayoutPreferences() {
+        getPreferences(MODE_PRIVATE).edit()
+                .putBoolean("tournamentExpandedBlackLogoAfterInfo", expandedBlackLogoAfterInfo)
+                .putBoolean("tournamentExpandedWhiteLogoAfterInfo", expandedWhiteLogoAfterInfo)
+                .putBoolean("tournamentExpandedPanelsSwapped", expandedPanelsSwapped)
+                .putBoolean("tournamentExpandedBottomPanelWhite", expandedBottomPanelWhite)
+                .putBoolean("tournamentUiFlipped", tournamentUiFlipped)
+                .commit();
     }
 
     /** Restore the last selected tournament board when returning from another Activity. */
@@ -533,15 +554,22 @@ public final class TournamentActivity extends Activity {
     private void startUiStallWatchdog() {
         if (uiStallWatchdog != null) return;
         uiStallWatchdog = new Thread(() -> {
+            long lastHeartbeatCheckpointNs = 0L;
             while (!Thread.currentThread().isInterrupted()) {
                 try { Thread.sleep(1000L); }
                 catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); break; }
                 long now = System.nanoTime();
+                if (now - lastHeartbeatCheckpointNs >= 10_000_000_000L) {
+                    lastHeartbeatCheckpointNs = now;
+                    TournamentDiagnostics.record("WATCHDOG", "heartbeat_checkpoint", "mainHeartbeatAgeMs=" +
+                            ((now - lastUiHeartbeatNs) / 1_000_000L) + " phase=" + TournamentDiagnostics.currentPhase());
+                }
                 long heartbeat = lastUiHeartbeatNs;
                 long stalledMs = (now - heartbeat) / 1_000_000L;
                 if (stalledMs < 2500L || now - lastUiStallLogNs < 10_000_000_000L) continue;
                 lastUiStallLogNs = now;
                 Thread mainThread = Looper.getMainLooper().getThread();
+                TournamentDiagnostics.recordUiStall(stalledMs, mainThread);
                 StringBuilder stack = new StringBuilder();
                 for (StackTraceElement element : mainThread.getStackTrace())
                     stack.append("\n  at ").append(element);
@@ -551,6 +579,29 @@ public final class TournamentActivity extends Activity {
         }, "CET-UI-Stall-Watchdog");
         uiStallWatchdog.setDaemon(true);
         uiStallWatchdog.start();
+    }
+
+    private void showTournamentDiagnostics() {
+        final String log = TournamentDiagnostics.readLog(this);
+        TextView contents = new TextView(this);
+        contents.setText(log);
+        contents.setTextIsSelectable(true);
+        contents.setTextSize(11);
+        contents.setTypeface(android.graphics.Typeface.MONOSPACE);
+        contents.setPadding(dp(12), dp(10), dp(12), dp(10));
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(contents, new ScrollView.LayoutParams(-1, -2));
+        new AlertDialog.Builder(this)
+                .setTitle("Tournament freeze diagnostics")
+                .setMessage("Log path: " + TournamentDiagnostics.getLogPath(this) +
+                        "\nThe log is stored in app-private storage and survives process termination. Copy it after reopening the app.")
+                .setView(scroll)
+                .setPositiveButton("Copy log", (dialog, which) -> {
+                    ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+                    if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Tournament diagnostics", log));
+                    Toast.makeText(this, "Diagnostic log copied", Toast.LENGTH_LONG).show();
+                })
+                .setNegativeButton("Close", null).show();
     }
 
     private Position standardStartPosition() {
@@ -776,7 +827,7 @@ public final class TournamentActivity extends Activity {
         showTournamentArrowsCheck.setText("Show engine thinking arrows on board");
         showTournamentArrowsCheck.setChecked(getPreferences(MODE_PRIVATE).getBoolean("tournamentThinkingArrows", true));
         showTournamentArrowsCheck.setOnCheckedChangeListener((button, checked) -> {
-            getPreferences(MODE_PRIVATE).edit().putBoolean("tournamentThinkingArrows", checked).apply();
+            getPreferences(MODE_PRIVATE).edit().putBoolean("tournamentThinkingArrows", checked).commit();
             applyTournamentVariationHints();
         });
         root.addView(showTournamentArrowsCheck, fullWidth());
@@ -784,7 +835,7 @@ public final class TournamentActivity extends Activity {
         disableScreenTimeoutCheck.setText("Disable Screen Timeout during tournament");
         disableScreenTimeoutCheck.setChecked(getPreferences(MODE_PRIVATE).getBoolean("tournamentDisableScreenTimeout", false));
         disableScreenTimeoutCheck.setOnCheckedChangeListener((button, checked) -> {
-            getPreferences(MODE_PRIVATE).edit().putBoolean("tournamentDisableScreenTimeout", checked).apply();
+            getPreferences(MODE_PRIVATE).edit().putBoolean("tournamentDisableScreenTimeout", checked).commit();
             applyTournamentKeepScreenOn();
         });
         root.addView(disableScreenTimeoutCheck, fullWidth());
@@ -818,6 +869,10 @@ public final class TournamentActivity extends Activity {
         root.addView(importTournamentButton, fullWidth());
         importTournamentButton.setOnClickListener(v -> chooseTournamentJson());
         stopButton = new Button(this); stopButton.setText("Stop and Save Tournament"); stopButton.setEnabled(false); root.addView(stopButton, fullWidth());
+        Button diagnosticsButton = new Button(this);
+        diagnosticsButton.setText("Show / Copy Freeze Diagnostic Log");
+        root.addView(diagnosticsButton, fullWidth());
+        diagnosticsButton.setOnClickListener(v -> showTournamentDiagnostics());
         Button goToTournamentBoardButton = new Button(this);
         goToTournamentBoardButton.setText("Go to Tournament Board");
         goToTournamentBoardButton.setEnabled(true);
@@ -856,10 +911,13 @@ public final class TournamentActivity extends Activity {
         if (expandedMainDialog != null && expandedMainDialog.isShowing()) return;
         // Retain the user's normal/double-tap New Board layout across Activity pauses.
         expandedMainReturnScreen = currentTournamentScreen;
-        expandedWhitePanelBelowBoard = getPreferences(MODE_PRIVATE).getBoolean("tournamentNewBoardDoubleTap", false);
-        expandedPanelsSwapped = false;
-        expandedBottomPanelWhite = !tournamentUiFlipped;
-        expandedBlackLogoAfterInfo = expandedWhiteLogoAfterInfo = false;
+        SharedPreferences boardPrefs = getPreferences(MODE_PRIVATE);
+        expandedWhitePanelBelowBoard = boardPrefs.getBoolean("tournamentNewBoardDoubleTap", false);
+        tournamentUiFlipped = boardPrefs.getBoolean("tournamentUiFlipped", tournamentUiFlipped);
+        expandedPanelsSwapped = boardPrefs.getBoolean("tournamentExpandedPanelsSwapped", false);
+        expandedBottomPanelWhite = boardPrefs.getBoolean("tournamentExpandedBottomPanelWhite", !tournamentUiFlipped);
+        expandedBlackLogoAfterInfo = boardPrefs.getBoolean("tournamentExpandedBlackLogoAfterInfo", expandedWhitePanelBelowBoard);
+        expandedWhiteLogoAfterInfo = boardPrefs.getBoolean("tournamentExpandedWhiteLogoAfterInfo", expandedWhitePanelBelowBoard);
         Dialog dialog = new Dialog(this);
         expandedMainDialog = dialog;
 
@@ -991,10 +1049,15 @@ public final class TournamentActivity extends Activity {
             expandedBlackAnalysisPanel = expandedWhiteAnalysisPanel = expandedMovesContainer = null;
             expandedRoot = expandedPanelsRow = expandedBlackInfo = expandedWhiteInfo = null;
             expandedBoardFrame = null;
-            expandedPanelsSwapped = false;
-            saveBoardSelectionState(expandedMainReturnScreen);
-            expandedBottomPanelWhite = !tournamentUiFlipped;
-            expandedBlackLogoAfterInfo = expandedWhiteLogoAfterInfo = false;
+            // Preserve panel swap and bottom-side selection. Resetting them here made
+            // the restored New Board silently change layout after visiting Main Board.
+            // Android may dismiss a Dialog while the Activity is pausing or being
+            // destroyed. onPause has already saved selection=New Board in that case;
+            // do not overwrite it with the dialog's return screen. A user dismissal
+            // while the Activity remains active should return to the parent board.
+            if (!activityLeaving && !isFinishing())
+                saveBoardSelectionState(expandedMainReturnScreen);
+            saveExpandedPanelLayoutPreferences();
             expandedMovesRows = null; expandedMovesSignature = "";
         });
         dialog.show();
@@ -1126,9 +1189,11 @@ public final class TournamentActivity extends Activity {
                     else if (which == 1) {
                         if (white) expandedWhiteLogoAfterInfo = !expandedWhiteLogoAfterInfo;
                         else expandedBlackLogoAfterInfo = !expandedBlackLogoAfterInfo;
+                        saveExpandedPanelLayoutPreferences();
                         applyExpandedAnalysisPanelLayouts();
                     } else if (which == 2 && !expandedWhitePanelBelowBoard) {
                         expandedPanelsSwapped = !expandedPanelsSwapped;
+                        saveExpandedPanelLayoutPreferences();
                         applyExpandedPanelRowOrder();
                     }
                 }).show();
@@ -1138,11 +1203,11 @@ public final class TournamentActivity extends Activity {
         if (expandedRoot == null || expandedPanelsRow == null || expandedMovesContainer == null ||
                 expandedBoardFrame == null) return;
         expandedWhitePanelBelowBoard = !expandedWhitePanelBelowBoard;
-        getPreferences(MODE_PRIVATE).edit().putBoolean("tournamentNewBoardDoubleTap", expandedWhitePanelBelowBoard).apply();
         saveBoardSelectionState(2);
         if (expandedWhitePanelBelowBoard) expandedBottomPanelWhite = !tournamentUiFlipped;
         expandedWhiteLogoAfterInfo = expandedWhitePanelBelowBoard;
         expandedBlackLogoAfterInfo = expandedWhitePanelBelowBoard;
+        saveExpandedPanelLayoutPreferences();
         applyExpandedAnalysisPanelLayouts();
     }
 
@@ -2227,7 +2292,7 @@ public final class TournamentActivity extends Activity {
         menu.setOnClickListener(v -> {
             if (savedTournamentReviewMode) {
                 new AlertDialog.Builder(TournamentActivity.this).setTitle("Saved tournament review")
-                        .setItems(new String[]{"Tournament list", "See Rating", "Move animation speed", "Flip Board", "External analysis arrows (" + mirrorAnalysisVariationCount + ")"}, (dialog, which) -> {
+                        .setItems(new String[]{"Tournament list", "See Rating", "Move animation speed", "Flip Board", "External PV arrows (" + mirrorAnalysisArrowPlyCount + " plies)"}, (dialog, which) -> {
                             if (which == 0) chooseSavedTournament();
                             else if (which == 1) showRatingsDialog();
                             else if (which == 2) showTournamentMoveAnimationDialog();
@@ -2236,7 +2301,7 @@ public final class TournamentActivity extends Activity {
                         }).show();
             } else {
                 new AlertDialog.Builder(TournamentActivity.this).setTitle("Tournament menu")
-                        .setItems(new String[]{"Adjudicate", "Temporary variation", "Setup", "Flip Board", "Move animation speed", "External analysis arrows (" + mirrorAnalysisVariationCount + ")"}, (dialog, which) -> {
+                        .setItems(new String[]{"Adjudicate", "Temporary variation", "Setup", "Flip Board", "Move animation speed", "External PV arrows (" + mirrorAnalysisArrowPlyCount + " plies)"}, (dialog, which) -> {
                             if (which == 0) showAdjudicationDialog();
                             else if (which == 1) toggleMirrorBranchMode();
                             else if (which == 2) { boardSelectionActive = false; setContentView(setupView); }
@@ -3979,15 +4044,29 @@ public final class TournamentActivity extends Activity {
                 // and the corresponding board arrows on the same engine.
                 int requestedVariations = Math.max(1,
                         Math.min(ColorTheme.MAX_ARROWS, mirrorAnalysisVariationCount));
-                for (int pvIndex = 0; pvIndex < infos.size() && pvIndex < requestedVariations; pvIndex++) {
-                    PvInfo variationPv = infos.get(pvIndex);
-                    // Keep each arrow and PV label tied to the engine's actual MultiPV rank.
-                    if (variationPv == null || variationPv.pv == null || variationPv.pv.isEmpty()) break;
-                    String variation = mirrorPvVariation(pos, variationPv);
-                    if (variation.isEmpty()) break;
-                    hints.add(variationPv.pv.get(0));
-                    if (variationLines.length() > 0) variationLines.append('\n');
-                    variationLines.append("PV ").append(pvIndex + 1).append("  ").append(variation);
+                if (requestedVariations <= 1) {
+                    if (pv.pv != null) {
+                        int plies = Math.min(ColorTheme.MAX_ARROWS, pv.pv.size());
+                        for (int plyIndex = 0; plyIndex < plies; plyIndex++) {
+                            Move move = pv.pv.get(plyIndex);
+                            if (move == null) break;
+                            hints.add(move);
+                        }
+                    }
+                    String variation = mirrorPvVariation(pos, pv);
+                    if (!variation.isEmpty()) variationLines.append(variation);
+                } else {
+                    // Additional engine variations are opt-in through the separate
+                    // Variation menu. Show one first-move arrow for each returned PV.
+                    for (int pvIndex = 0; pvIndex < infos.size() && pvIndex < requestedVariations; pvIndex++) {
+                        PvInfo variationPv = infos.get(pvIndex);
+                        if (variationPv == null || variationPv.pv == null || variationPv.pv.isEmpty()) break;
+                        String variation = mirrorPvVariation(pos, variationPv);
+                        if (variation.isEmpty()) break;
+                        hints.add(variationPv.pv.get(0));
+                        if (variationLines.length() > 0) variationLines.append('\n');
+                        variationLines.append("PV ").append(pvIndex + 1).append("  ").append(variation);
+                    }
                 }
                 String depthLines;
                 synchronized (mirrorAnalysisPvByDepth) {
@@ -4125,7 +4204,7 @@ public final class TournamentActivity extends Activity {
                             int requested = which + 1;
                             if (requested != mirrorAnalysisVariationCount) {
                                 mirrorAnalysisVariationCount = requested;
-                                getPreferences(MODE_PRIVATE).edit().putInt("mirrorAnalysisVariationCount", requested).apply();
+                                getPreferences(MODE_PRIVATE).edit().putInt("mirrorAnalysisVariationCount", requested).commit();
                                 dialog.dismiss();
                                 if (mirrorAnalysisOn && mirrorAnalysisEngineActive) startMirrorAnalysis();
                             } else {
@@ -4138,33 +4217,33 @@ public final class TournamentActivity extends Activity {
     private void showTournamentArrowCountDialog() {
         CharSequence[] choices = new CharSequence[ColorTheme.MAX_ARROWS];
         for (int i = 0; i < choices.length; i++)
-            choices[i] = (i + 1) + (i == 0 ? " arrow · one tournament variation" : " arrows · tournament variations");
+            choices[i] = (i + 1) + (i == 0 ? " arrow · main-PV ply" : " arrows · main-PV plies");
         new AlertDialog.Builder(this).setTitle("Tournament engine variation arrows")
                 .setSingleChoiceItems(choices, tournamentArrowCount - 1, (dialog, which) -> {
                     int requested = clampArrowCount(which + 1);
                     tournamentArrowCount = requested;
-                    getPreferences(MODE_PRIVATE).edit().putInt("tournamentArrowCount", requested).apply();
+                    getPreferences(MODE_PRIVATE).edit().putInt("tournamentArrowCount", requested).commit();
                     if (runner != null) runner.setTournamentArrowCount(requested);
                     applyTournamentVariationHints();
                     dialog.dismiss();
-                    Toast.makeText(this, "Tournament arrows: " + requested +
-                            (runner == null ? "" : " · new MultiPV request applies on the next engine turn"), Toast.LENGTH_SHORT).show();
+                    Toast.makeText(this, "Tournament arrows: " + requested + " consecutive plies of the main variation", Toast.LENGTH_SHORT).show();
                 }).setNegativeButton("Cancel", null).show();
     }
 
     private void showMirrorExternalArrowCountDialog() {
         CharSequence[] choices = new CharSequence[ColorTheme.MAX_ARROWS];
         for (int i = 0; i < choices.length; i++)
-            choices[i] = (i + 1) + (i == 0 ? " arrow · external variation" : " arrows · external variations");
-        new AlertDialog.Builder(this).setTitle("Mirror external-analysis arrows")
-                .setSingleChoiceItems(choices, mirrorAnalysisVariationCount - 1, (dialog, which) -> {
+            choices[i] = (i + 1) + (i == 0 ? " arrow · main-PV ply" : " arrows · main-PV plies");
+        new AlertDialog.Builder(this).setTitle("Mirror external-analysis arrows (PV plies)")
+                .setSingleChoiceItems(choices, mirrorAnalysisArrowPlyCount - 1, (dialog, which) -> {
                     int requested = clampArrowCount(which + 1);
-                    boolean changed = requested != mirrorAnalysisVariationCount;
-                    mirrorAnalysisVariationCount = requested;
-                    getPreferences(MODE_PRIVATE).edit().putInt("mirrorAnalysisVariationCount", requested).apply();
+                    mirrorAnalysisArrowPlyCount = requested;
+                    getPreferences(MODE_PRIVATE).edit().putInt("mirrorAnalysisArrowPlyCount", requested).commit();
                     dialog.dismiss();
-                    if (changed && mirrorAnalysisOn && mirrorAnalysisEngineActive) startMirrorAnalysis();
-                    Toast.makeText(this, "External-analysis arrows: " + requested, Toast.LENGTH_SHORT).show();
+                    // Re-render the cached current PV. Arrow count does not change MultiPV
+                    // and must not restart or deepen the analysis search.
+                    applyMirrorBoardHighlights(mirrorNavigatedLastMove);
+                    Toast.makeText(this, "External-analysis main-PV arrows: " + requested, Toast.LENGTH_SHORT).show();
                 }).setNegativeButton("Cancel", null).show();
     }
 
@@ -4636,7 +4715,10 @@ public final class TournamentActivity extends Activity {
             ArrayList<Move> cachedHints = mirrorAnalysisHintsByPly.get(target);
             if (cachedHints != null) mirrorAnalysisHints.addAll(cachedHints);
         }
-        if (mirrorBoard != null) mirrorBoard.setMoveHints(mirrorAnalysisHints.isEmpty() ? null : new ArrayList<>(mirrorAnalysisHints));
+        if (mirrorBoard != null) {
+            ArrayList<Move> visibleHints = visibleMirrorAnalysisHints();
+            mirrorBoard.setMoveHints(visibleHints.isEmpty() ? null : visibleHints);
+        }
         updateMirrorLastMove(target, null, false);
         if (mirrorStatusText != null) mirrorStatusText.setText(mirrorReplayMode ?
                 "Replay · ply " + target + "/" + (positions.size() - 1) :
@@ -4699,12 +4781,26 @@ public final class TournamentActivity extends Activity {
         return null;
     }
 
+    private ArrayList<Move> visibleMirrorAnalysisHints() {
+        if (mirrorAnalysisHints.isEmpty()) return new ArrayList<>();
+        int limit = mirrorAnalysisVariationCount > 1 ? mirrorAnalysisVariationCount : mirrorAnalysisArrowPlyCount;
+        limit = Math.max(1, Math.min(ColorTheme.MAX_ARROWS, limit));
+        ArrayList<Move> visible = new ArrayList<>();
+        for (Move move : mirrorAnalysisHints) {
+            if (move == null) continue;
+            visible.add(move);
+            if (visible.size() >= limit) break;
+        }
+        return visible;
+    }
+
     private void applyMirrorBoardHighlights(Move lastMove) {
         if (mirrorBoard == null) return;
         // Last-move marking is a square overlay, never an engine PV arrow.
         mirrorBoard.setLastMove(lastMove);
         mirrorBoard.setBranchMoves(mirrorBranchMode ? branchMovesOnActivePath() : null);
-        mirrorBoard.setMoveHints(mirrorAnalysisHints.isEmpty() ? null : new ArrayList<>(mirrorAnalysisHints));
+        ArrayList<Move> visibleHints = visibleMirrorAnalysisHints();
+        mirrorBoard.setMoveHints(visibleHints.isEmpty() ? null : visibleHints);
         mirrorBoard.setSelection(-1);
     }
 
@@ -9084,6 +9180,7 @@ public final class TournamentActivity extends Activity {
 
     private void showSavedTournamentActions(String fileName) {
         if (tournamentLoadInProgress) return;
+        TournamentDiagnostics.setPhase("tournament_restore", "selected saved tournament=" + fileName);
         tournamentLoadInProgress = true;
         final ProgressDialog progressDialog = new ProgressDialog(this);
         progressDialog.setMessage("Loading selected tournament…");
@@ -9093,8 +9190,11 @@ public final class TournamentActivity extends Activity {
         new Thread(() -> {
             TournamentManager saved = null;
             Exception failure = null;
+            long restoreStartedNs = System.nanoTime();
             try { saved = TournamentManager.restore(this, fileName); }
-            catch (Exception error) { failure = error; }
+            catch (Exception error) { failure = error; TournamentDiagnostics.recordError("RESTORE", "selected_tournament_restore_failed file=" + fileName, error); }
+            TournamentDiagnostics.record("RESTORE", "selected_tournament_loader_finished", "file=" + fileName + " elapsedMs=" +
+                    ((System.nanoTime() - restoreStartedNs) / 1_000_000L));
             final TournamentManager loaded = saved;
             final Exception loadError = failure;
             runOnUiThread(() -> {
@@ -9410,6 +9510,7 @@ public final class TournamentActivity extends Activity {
         mirrorUiFlipped = !mirrorUiFlipped;
         expandedPanelsSwapped = !expandedPanelsSwapped;
         expandedBottomPanelWhite = !expandedBottomPanelWhite;
+        saveExpandedPanelLayoutPreferences();
         reorderMirrorPlayerGroups();
         if (expandedMainDialog != null && expandedMainDialog.isShowing()) {
             applyExpandedPlayerRowOrder(!expandedWhitePanelBelowBoard);
@@ -10216,10 +10317,25 @@ public final class TournamentActivity extends Activity {
         startButton.setEnabled(false); resumeButton.setEnabled(false); stopButton.setEnabled(true);
         if (playPauseButton != null) playPauseButton.setText("P");
         if (tournamentTitleText != null) tournamentTitleText.setText(tournament.title());
-        currentTournamentScreen = 0;
+        SharedPreferences savedBoardPrefs = getPreferences(MODE_PRIVATE);
+        int savedBoardSelection = Math.max(0, Math.min(2, savedBoardPrefs.getInt("tournamentLastBoardSelection", 0)));
+        int savedNewBoardReturn = Math.max(0, Math.min(1, savedBoardPrefs.getInt("tournamentNewBoardReturnScreen", 0)));
         boardSelectionActive = true;
-        saveBoardSelectionState(0);
-        setContentView(playView);
+        if (savedBoardSelection == 2) {
+            expandedMainReturnScreen = savedNewBoardReturn;
+            currentTournamentScreen = savedNewBoardReturn;
+            setContentView(savedNewBoardReturn == 1 ? mirrorView : playView);
+            showExpandedMainBoard();
+            saveBoardSelectionState(2);
+        } else if (savedBoardSelection == 1) {
+            currentTournamentScreen = 1;
+            setContentView(mirrorView);
+            saveBoardSelectionState(1);
+        } else {
+            currentTournamentScreen = 0;
+            setContentView(playView);
+            saveBoardSelectionState(0);
+        }
         int moveRule = 50, repetitionRule = 3, maximumMoves = 160, ruleStartMove = 1;
         try { moveRule = Integer.parseInt(drawMoveRuleInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
         try { repetitionRule = Integer.parseInt(drawRepetitionInput.getText().toString().trim()); } catch (RuntimeException ignored) { }
@@ -10620,7 +10736,10 @@ public final class TournamentActivity extends Activity {
     }
 
     @Override protected void onPause() {
+        activityLeaving = true;
         activityVisible = false;
+        TournamentDiagnostics.record("ACTIVITY", "on_pause", "board=" + currentTournamentScreen + " newBoardDialog=" +
+                (expandedMainDialog != null && expandedMainDialog.isShowing()));
         if (boardSelectionActive) saveBoardSelectionState(expandedMainDialog != null && expandedMainDialog.isShowing() ? 2 : currentTournamentScreen);
         if (mirrorAnalysisEngine != null) { try { mirrorAnalysisEngine.stopSearch(); } catch (RuntimeException ignored) { } }
         saveSetup();
@@ -10637,7 +10756,9 @@ public final class TournamentActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        activityLeaving = false;
         activityVisible = true;
+        TournamentDiagnostics.record("ACTIVITY", "on_resume", "board=" + currentTournamentScreen);
         restoreBoardSelectionState();
         if (mirrorAnalysisOn && mirrorAnalysisEngineActive) startMirrorAnalysis();
         // Do not auto-resume the tournament when returning from Home/Recents. The user explicitly taps Play.
