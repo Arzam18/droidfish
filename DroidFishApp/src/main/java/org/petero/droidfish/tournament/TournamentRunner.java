@@ -1363,7 +1363,11 @@ public final class TournamentRunner {
                 // The final best-move snapshot is formatted synchronously below.
                 pendingPvPosition = pos;
                 pendingPvInfo = pv;
-                pendingPvInfos = new ArrayList<>(pvInfo);
+                // Tournament play is single-PV. Discard any secondary lines that an
+                // engine may emit despite the UCI MultiPV=1 request; arrows follow
+                // consecutive plies from this main PV only.
+                pendingPvInfos = new ArrayList<>();
+                pendingPvInfos.add(pv);
                 pendingVariationHintsNeedsPublish = true;
                 pendingPvNeedsFormatting = true;
                 hasCurrentSearchInfo = true;
@@ -1466,10 +1470,14 @@ public final class TournamentRunner {
             String text = header + engineWdlLine + (variation.length() == 0 ? "" : "\n" + variation);
             if (pendingVariationHintsNeedsPublish && pendingPvPosition != null) {
                 ArrayList<Move> hints = new ArrayList<>();
-                int requestedPlies = Math.max(1, Math.min(8, tournamentArrowCount));
+                // Cache the full eight-ply main line regardless of the current
+                // display selector. The selector is applied only by the board UI,
+                // so increasing 1 -> 8 redraws the same PV and never requests
+                // additional engine variations or a new search.
+                final int cachedPlyLimit = 8;
                 SearchListener.PvInfo mainPv = pendingPvInfos.isEmpty() ? pendingPvInfo : pendingPvInfos.get(0);
                 if (mainPv != null && mainPv.pv != null) {
-                    for (int ply = 0; ply < mainPv.pv.size() && ply < requestedPlies; ply++) {
+                    for (int ply = 0; ply < mainPv.pv.size() && ply < cachedPlyLimit; ply++) {
                         Move move = mainPv.pv.get(ply);
                         if (move == null) break;
                         hints.add(move);

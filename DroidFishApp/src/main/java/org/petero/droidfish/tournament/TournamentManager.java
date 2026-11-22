@@ -911,17 +911,6 @@ public final class TournamentManager {
             return migrated;
         }
         TournamentManager restored = new TournamentManager(context, root, fileName);
-        JSONArray modularStandings = new JSONArray();
-        for (Standing standing : restored.standings()) {
-            JSONObject row = new JSONObject(); row.put("engineId", standing.engineId);
-            String displayName = standing.engineId;
-            for (Engine engine : restored.engines()) if (standing.engineId.equals(engine.id)) { displayName = engine.displayName; break; }
-            row.put("name", displayName); row.put("played", standing.played); row.put("wins", standing.wins);
-            row.put("draws", standing.draws); row.put("losses", standing.losses); row.put("byes", standing.byes);
-            row.put("points", standing.points); row.put("sonnebornBerger", standing.sonnebornBerger);
-            modularStandings.put(row);
-        }
-        TournamentStorage.rebuildIfMissing(context, fileName, root, modularStandings);
         TournamentDiagnostics.record("RESTORE", "complete", "file=" + fileName + " elapsedMs=" +
                 ((System.nanoTime() - restoreStartedNs) / 1_000_000L) + " source=" + validSource.getAbsolutePath());
         TournamentDiagnostics.setPhase("tournament_restored", "file=" + fileName);
@@ -2447,7 +2436,6 @@ public final class TournamentManager {
 
     public void save() throws IOException, JSONException {
         final JSONObject root = new JSONObject();
-        final JSONArray modularStandings = new JSONArray();
         final long revision;
         synchronized (this) {
             root.put("title", title); root.put("format", format.name()); root.put("gamesPerPair", gamesPerPair);
@@ -2516,18 +2504,6 @@ public final class TournamentManager {
             }
             JSONArray queue = new JSONArray(); for (Integer index : playQueue) queue.put(index); root.put("playQueue", queue);
             root.put("activePairingIndex", activePairingIndex);
-            // Snapshot the exact official standings, including Swiss byes/tiebreaks,
-            // while the same manager lock still protects the root JSON snapshot.
-            for (Standing standing : standings()) {
-                JSONObject row = new JSONObject();
-                row.put("engineId", standing.engineId);
-                String displayName = standing.engineId;
-                for (Engine engine : engines) if (standing.engineId.equals(engine.id)) { displayName = engine.displayName; break; }
-                row.put("name", displayName); row.put("played", standing.played); row.put("wins", standing.wins);
-                row.put("draws", standing.draws); row.put("losses", standing.losses); row.put("byes", standing.byes);
-                row.put("points", standing.points); row.put("sonnebornBerger", standing.sonnebornBerger);
-                modularStandings.put(row);
-            }
             revision = ++latestSaveRevision;
         }
         // JSONObject serialization walks the entire schedule and every stored PGN.
@@ -2548,9 +2524,8 @@ public final class TournamentManager {
         }
         TournamentDiagnostics.record("SAVE", "primary_snapshot_committed", "file=" + fileName + " bytes=" +
                 bytes.length + " elapsedMs=" + ((System.nanoTime() - primarySaveStartedNs) / 1_000_000L));
-        // Stage 2: create versioned modular files and a ZIP bundle in the background.
-        // The compressed legacy JSON above remains authoritative until migration validation is complete.
-        TournamentStorage.enqueue(context, fileName, root, revision, modularStandings);
+        // Stage 2 modular mirroring is intentionally paused during stability recovery.
+        // The verified legacy compressed JSON remains the sole authoritative snapshot.
         synchronized (TournamentManager.class) { RESERVED_TOURNAMENT_FILE_NAMES.remove(fileName); }
         // Mirror the exact same snapshot to shared DroidFish storage after every save(),
         // including each completed game and the periodic elapsed-time checkpoint.
