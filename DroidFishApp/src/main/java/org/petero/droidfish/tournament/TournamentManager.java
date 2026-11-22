@@ -844,6 +844,9 @@ public final class TournamentManager {
     }
 
     public static TournamentManager restore(Context context, String fileName) throws IOException, JSONException {
+        final long restoreStartedNs = System.nanoTime();
+        TournamentDiagnostics.record("RESTORE", "begin", "file=" + fileName);
+        TournamentDiagnostics.setPhase("tournament_restore", "file=" + fileName);
         if (!isTournamentFileName(fileName)) throw new IOException("Invalid saved tournament name");
         File internal = new File(context.getFilesDir(), fileName);
         File shared = externalTournamentFile(context, fileName);
@@ -866,22 +869,31 @@ public final class TournamentManager {
         Exception lastError = null;
         for (File candidate : candidates) {
             if (candidate == null || !candidate.isFile()) continue;
+            TournamentDiagnostics.record("RESTORE", "candidate_read_begin", "path=" + candidate.getAbsolutePath());
             try {
                 root = readTournamentRoot(candidate);
                 validSource = candidate;
+                TournamentDiagnostics.record("RESTORE", "candidate_read_valid", "path=" + candidate.getAbsolutePath());
                 break;
             } catch (Exception invalidCopy) {
                 lastError = invalidCopy;
+                TournamentDiagnostics.recordError("RESTORE", "candidate_read_invalid path=" + candidate.getAbsolutePath(), invalidCopy);
             }
         }
         if (root == null || validSource == null) {
-            throw new IOException("No valid private or backup copy of the saved tournament could be read" +
+            IOException restoreError = new IOException("No valid private or backup copy of the saved tournament could be read" +
                     (lastError == null ? "" : ": " + lastError.getMessage()), lastError);
+            TournamentDiagnostics.recordError("RESTORE", "all_snapshot_candidates_invalid file=" + fileName, restoreError);
+            throw restoreError;
         }
 
         // Repair a missing/corrupt private copy only after a complete backup has
         // been parsed successfully. The original candidate is never truncated.
-        if (!validSource.equals(internal)) copyFileAtomic(validSource, internal);
+        if (!validSource.equals(internal)) {
+            TournamentDiagnostics.record("RESTORE", "repair_private_snapshot_begin", "source=" + validSource.getAbsolutePath());
+            copyFileAtomic(validSource, internal);
+            TournamentDiagnostics.record("RESTORE", "repair_private_snapshot_complete", "target=" + internal.getAbsolutePath());
+        }
 
         boolean legacyPlainJson = !isGzipFile(validSource);
         if (legacyPlainJson && fileName.endsWith(".json")) {
@@ -890,6 +902,7 @@ public final class TournamentManager {
             String compressedName = newUniqueFileName(context.getApplicationContext(), root.optString("title", "Tournament"));
             TournamentManager migrated = new TournamentManager(context, root, compressedName);
             migrated.save();
+            TournamentDiagnostics.record("RESTORE", "legacy_json_migrated", "from=" + fileName + " to=" + compressedName);
             // The new private snapshot is committed. Rename every legacy primary
             // and sidecar to a .legacy archive (never delete it), including old
             // external mirrors. This prevents a stale legacy backup from being
@@ -897,7 +910,22 @@ public final class TournamentManager {
             archiveLegacyCopies(context, fileName);
             return migrated;
         }
-        return new TournamentManager(context, root, fileName);
+        TournamentManager restored = new TournamentManager(context, root, fileName);
+        JSONArray modularStandings = new JSONArray();
+        for (Standing standing : restored.standings()) {
+            JSONObject row = new JSONObject(); row.put("engineId", standing.engineId);
+            String displayName = standing.engineId;
+            for (Engine engine : restored.engines()) if (standing.engineId.equals(engine.id)) { displayName = engine.displayName; break; }
+            row.put("name", displayName); row.put("played", standing.played); row.put("wins", standing.wins);
+            row.put("draws", standing.draws); row.put("losses", standing.losses); row.put("byes", standing.byes);
+            row.put("points", standing.points); row.put("sonnebornBerger", standing.sonnebornBerger);
+            modularStandings.put(row);
+        }
+        TournamentStorage.rebuildIfMissing(context, fileName, root, modularStandings);
+        TournamentDiagnostics.record("RESTORE", "complete", "file=" + fileName + " elapsedMs=" +
+                ((System.nanoTime() - restoreStartedNs) / 1_000_000L) + " source=" + validSource.getAbsolutePath());
+        TournamentDiagnostics.setPhase("tournament_restored", "file=" + fileName);
+        return restored;
     }
 
     private static void addSaveBackups(List<File> candidates, File target) {
@@ -2419,6 +2447,7 @@ public final class TournamentManager {
 
     public void save() throws IOException, JSONException {
         final JSONObject root = new JSONObject();
+        final JSONArray modularStandings = new JSONArray();
         final long revision;
         synchronized (this) {
             root.put("title", title); root.put("format", format.name()); root.put("gamesPerPair", gamesPerPair);
@@ -2487,6 +2516,18 @@ public final class TournamentManager {
             }
             JSONArray queue = new JSONArray(); for (Integer index : playQueue) queue.put(index); root.put("playQueue", queue);
             root.put("activePairingIndex", activePairingIndex);
+            // Snapshot the exact official standings, including Swiss byes/tiebreaks,
+            // while the same manager lock still protects the root JSON snapshot.
+            for (Standing standing : standings()) {
+                JSONObject row = new JSONObject();
+                row.put("engineId", standing.engineId);
+                String displayName = standing.engineId;
+                for (Engine engine : engines) if (standing.engineId.equals(engine.id)) { displayName = engine.displayName; break; }
+                row.put("name", displayName); row.put("played", standing.played); row.put("wins", standing.wins);
+                row.put("draws", standing.draws); row.put("losses", standing.losses); row.put("byes", standing.byes);
+                row.put("points", standing.points); row.put("sonnebornBerger", standing.sonnebornBerger);
+                modularStandings.put(row);
+            }
             revision = ++latestSaveRevision;
         }
         // JSONObject serialization walks the entire schedule and every stored PGN.
@@ -2498,7 +2539,18 @@ public final class TournamentManager {
             // written, its caller will acquire saveIoLock next and persist it.
             if (revision < latestSaveRevision) return;
         // Commit a complete, CRC-verified gzip snapshot atomically to private storage first.
-        writeAtomicCompressed(new File(context.getFilesDir(), fileName), bytes);
+        long primarySaveStartedNs = System.nanoTime();
+        try {
+            writeAtomicCompressed(new File(context.getFilesDir(), fileName), bytes);
+        } catch (IOException primarySaveError) {
+            TournamentDiagnostics.recordError("SAVE", "primary_snapshot_commit_failed file=" + fileName, primarySaveError);
+            throw primarySaveError;
+        }
+        TournamentDiagnostics.record("SAVE", "primary_snapshot_committed", "file=" + fileName + " bytes=" +
+                bytes.length + " elapsedMs=" + ((System.nanoTime() - primarySaveStartedNs) / 1_000_000L));
+        // Stage 2: create versioned modular files and a ZIP bundle in the background.
+        // The compressed legacy JSON above remains authoritative until migration validation is complete.
+        TournamentStorage.enqueue(context, fileName, root, revision, modularStandings);
         synchronized (TournamentManager.class) { RESERVED_TOURNAMENT_FILE_NAMES.remove(fileName); }
         // Mirror the exact same snapshot to shared DroidFish storage after every save(),
         // including each completed game and the periodic elapsed-time checkpoint.
@@ -2515,6 +2567,7 @@ public final class TournamentManager {
                 }
             }
         } catch (IOException | SecurityException sharedError) {
+            TournamentDiagnostics.recordError("SAVE", "shared_snapshot_mirror_failed file=" + fileName, sharedError);
             try {
                 File fallback = appExternalTournamentFile(context, fileName);
                 if (fallback == null) throw new IOException("App external storage is unavailable");
@@ -2522,6 +2575,7 @@ public final class TournamentManager {
                 externalSaveError = "Shared DroidFish/tournament folder unavailable; backup saved in " + fallback.getAbsolutePath();
             } catch (IOException | SecurityException fallbackError) {
                 externalSaveError = "Could not mirror tournament JSON to shared or app external storage: " + fallbackError.getMessage();
+                TournamentDiagnostics.recordError("SAVE", "all_snapshot_mirrors_failed file=" + fileName, fallbackError);
             }
         }
         }

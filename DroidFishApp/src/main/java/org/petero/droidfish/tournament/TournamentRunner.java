@@ -42,7 +42,7 @@ public final class TournamentRunner {
         }
         /** Persistent per-engine analysis text; each side retains its last line after moving. */
         void onEngineAnalysis(boolean white, String analysis);
-        /** First move of each current tournament PV, used only for optional board arrows. */
+        /** Consecutive moves from the current tournament main PV, used as plied arrows. */
         default void onEngineVariationHints(boolean white, long positionHash, ArrayList<Move> hints) { }
         void onReviewPosition(Position position, int ply, int totalPlies, String whiteAnalysis, String blackAnalysis, long moveTimeMs);
         void onMoveTime(boolean whiteMoved, long moveTimeMs, String openingName);
@@ -68,7 +68,7 @@ public final class TournamentRunner {
     private final boolean repeatOpening;
     private final double autoWinThreshold;
     private final boolean fastWinEnabled;
-    /** MultiPV count used for tournament engine arrows; 1 preserves legacy behaviour. */
+    /** Number of consecutive plies from the single tournament main PV to display as arrows. */
     private volatile int tournamentArrowCount = 1;
     private volatile double latestWhiteEvalPawns = Double.NaN;
     private volatile double latestBlackEvalPawns = Double.NaN;
@@ -131,7 +131,7 @@ public final class TournamentRunner {
         evalDrawCondition = Math.max(1, Math.min(10000, conditionFullMoves));
     }
 
-    /** Change the number of tournament PVs requested for subsequent engine turns. */
+    /** Change the number of consecutive main-PV plies displayed as tournament arrows. */
     public void setTournamentArrowCount(int count) {
         tournamentArrowCount = Math.max(1, Math.min(8, count));
     }
@@ -243,6 +243,8 @@ public final class TournamentRunner {
     }
 
     public void start() {
+        TournamentDiagnostics.setTournamentState("running", "runner start requested");
+        TournamentDiagnostics.setPhase("tournament_game_start", "opening game starter thread");
         synchronized (this) {
             if (stopped) throw new IllegalStateException("Runner has been stopped");
         }
@@ -262,6 +264,7 @@ public final class TournamentRunner {
     public synchronized void pause() {
         if (stopped || finished || paused) return;
         paused = true;
+        TournamentDiagnostics.setTournamentState("paused", "runner pause requested");
         turnGeneration++;
         if (clock != null) clock.pause();
         // Keep both UCI processes loaded. Stop only their current searches; pause/resume
@@ -276,6 +279,7 @@ public final class TournamentRunner {
         synchronized (this) {
             if (stopped || finished || !paused) return;
             paused = false;
+            TournamentDiagnostics.setTournamentState("running", "runner resumed");
             // A result writer owns the completed PGN until it commits. It will
             // schedule the next game, unless a later pause/stop intervenes.
             if (finalizingGame) return;
@@ -356,6 +360,7 @@ public final class TournamentRunner {
 
     public synchronized void stop() {
         stopped = true;
+        TournamentDiagnostics.setTournamentState("stopped", "runner stop requested");
         paused = false;
         nextGamePending = false;
         turnGeneration++;
@@ -456,6 +461,10 @@ public final class TournamentRunner {
         boolean retry = false;
         try {
             startNextGameInternal();
+        } catch (RuntimeException startError) {
+            TournamentDiagnostics.recordError("GAME_START", "uncaught_game_start_failure", startError);
+            stop();
+            listener.onError("Could not prepare or start the next tournament game", startError);
         } finally {
             synchronized (this) {
                 startingNextGame = false;
@@ -472,6 +481,8 @@ public final class TournamentRunner {
 
     private void startNextGameInternal() {
         if (stopped || finished || paused || finalizingGame) return;
+        final long gameLoadStartedNs = System.nanoTime();
+        TournamentDiagnostics.setPhase("load_current_game", "resolve next pairing");
         pairing = tournament.current();
         latestWhiteEvalPawns = Double.NaN;
         latestBlackEvalPawns = Double.NaN;
@@ -479,6 +490,8 @@ public final class TournamentRunner {
         evalDrawConsecutive = 0; evalDrawLastFullMove = -1;
         if (pairing == null) {
             finished = true;
+            TournamentDiagnostics.setTournamentState("completed", "all tournament pairings finished");
+            TournamentDiagnostics.setPhase("tournament_completed", "all pairings finished");
             whitePlayer.shutdownEngine();
             blackPlayer.shutdownEngine();
             listener.onTournamentFinished();
@@ -493,6 +506,8 @@ public final class TournamentRunner {
         }
         whiteEngine = findEngine(pairing.whiteEngineId);
         blackEngine = findEngine(pairing.blackEngineId);
+        TournamentDiagnostics.record("GAME", "pairing_loaded", "index=" + pairing.index + " round=" + pairing.round +
+                " white=" + whiteEngine.displayName + " black=" + blackEngine.displayName);
         TimeControlData tc = new TimeControlData();
         if (tournament.timeMode() == TournamentManager.TimeMode.MOVE_PERIOD)
             tc.setTimeControl((int)baseTimeMs, tournament.limitValue(), (int)baseTimeMs);
@@ -506,6 +521,8 @@ public final class TournamentRunner {
                 tournament.startPositionMode() != TournamentManager.StartPositionMode.STANDARD;
         TournamentPositionGenerator.PositionPair generatedPair = null;
         currentOpeningName = "Starting position";
+        long positionPreparationStartedNs = System.nanoTime();
+        TournamentDiagnostics.setPhase("fen_and_move_history_preparation", "game=" + pairing.index);
         try {
             if (customFenActive) {
                 Position customPosition = TextIO.readFEN(customFen);
@@ -549,6 +566,9 @@ public final class TournamentRunner {
             listener.onError("Could not create the configured tournament starting position", invalidStartPosition);
             stop(); return;
         }
+        TournamentDiagnostics.record("GAME", "starting_position_prepared", "game=" + pairing.index +
+                " elapsedMs=" + ((System.nanoTime() - positionPreparationStartedNs) / 1_000_000L) +
+                " fen=" + TextIO.toFEN(game.currPos()));
         game.tree.setPlayerNames(whiteEngine.displayName, blackEngine.displayName);
         positionHistory.clear(); whiteAnalysisHistory.clear(); blackAnalysisHistory.clear(); moveTimeHistory.clear();
         reviewPly = -1; lastMoveTimeMs = 0; humanAdjudication = false;
@@ -574,6 +594,8 @@ public final class TournamentRunner {
         // prepared with the tournament; BIN lines are drawn once on first use and
         // persisted before engines begin. Replay therefore cannot consume a new
         // opening number or make a different random Polyglot selection.
+        long openingPreparationStartedNs = System.nanoTime();
+        TournamentDiagnostics.setPhase("opening_assignment_and_application", "game=" + pairing.index);
         try {
             if (!customFenActive && !generatedVariantActive && !pairing.openingAssigned) {
                 if (!tournament.openingBinPath().trim().isEmpty()) {
@@ -593,11 +615,17 @@ public final class TournamentRunner {
             currentOpeningName = pairing.openingName == null || pairing.openingName.trim().isEmpty()
                     ? "Starting position" : pairing.openingName;
         }
+        TournamentDiagnostics.record("OPENING", "assignment_prepared", "game=" + pairing.index +
+                " name=" + currentOpeningName + " elapsedMs=" +
+                ((System.nanoTime() - openingPreparationStartedNs) / 1_000_000L));
         game.tree.setTournamentOpening(currentOpeningName);
         // Publish the new game before the opening callbacks. The Mirror Board
         // clears its previous game's move history in onGameStarted.
         listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
+        long openingPlaybackStartedNs = System.nanoTime();
         int appliedPlies = (customFenActive || generatedVariantActive) ? 0 : applyAssignedOpening(pairing.openingSanLine);
+        TournamentDiagnostics.record("OPENING", "opening_applied", "game=" + pairing.index + " plies=" + appliedPlies +
+                " elapsedMs=" + ((System.nanoTime() - openingPlaybackStartedNs) / 1_000_000L));
         if (!customFenActive && !generatedVariantActive && appliedPlies == 0 && pairing.openingSanLine != null && !pairing.openingSanLine.trim().isEmpty()) {
             listener.onError("The saved opening assignment for Game " + (pairing.index + 1) +
                     " contains no legal moves from the starting position.", null);
@@ -617,6 +645,9 @@ public final class TournamentRunner {
             clock.setMovesPlayed(completedWhiteMoves, completedBlackMoves);
         }
         recordPosition(0);
+        TournamentDiagnostics.record("GAME", "position_history_initialized", "game=" + pairing.index +
+                " positions=" + positionHistory.size() + " elapsedSinceLoadMs=" +
+                ((System.nanoTime() - gameLoadStartedNs) / 1_000_000L));
         listener.onMoveTime(false, 0, currentOpeningName);
         whitePlayer.setEngineOptions(engineOptions);
         blackPlayer.setEngineOptions(engineOptions);
@@ -624,10 +655,34 @@ public final class TournamentRunner {
         blackPlayer.uciNewGame();
         activeWhiteId = ++whiteSearchId;
         activeBlackId = ++blackSearchId;
-        whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.executableId);
-        blackPlayer.queueStartEngine(activeBlackId, blackEngine.executableId);
+        String whiteDiagnosticContext = "game=" + pairing.index + " round=" + pairing.round + " side=White engine=" + whiteEngine.displayName;
+        String blackDiagnosticContext = "game=" + pairing.index + " round=" + pairing.round + " side=Black engine=" + blackEngine.displayName;
+        boolean whiteAlreadyLoaded = whitePlayer.computerLoaded();
+        boolean blackAlreadyLoaded = blackPlayer.computerLoaded();
+        whiteAnalysisListener.prepareEngineStart(whiteDiagnosticContext, whiteAlreadyLoaded);
+        blackAnalysisListener.prepareEngineStart(blackDiagnosticContext, blackAlreadyLoaded);
+        TournamentDiagnostics.setPhase("engine_process_start", whiteDiagnosticContext + " | " + blackDiagnosticContext);
+        whitePlayer.queueStartEngine(activeWhiteId, whiteEngine.executableId, whiteDiagnosticContext);
+        blackPlayer.queueStartEngine(activeBlackId, blackEngine.executableId, blackDiagnosticContext);
+        if (!whiteAlreadyLoaded) startEngineReadyWatchdog(true, whiteDiagnosticContext);
+        if (!blackAlreadyLoaded) startEngineReadyWatchdog(false, blackDiagnosticContext);
         notifyPosition();
+        TournamentDiagnostics.record("GAME", "engine_start_requests_dispatched", "game=" + pairing.index +
+                " setupElapsedMs=" + ((System.nanoTime() - gameLoadStartedNs) / 1_000_000L));
         requestMove(game.currPos().whiteMove);
+    }
+
+    private void startEngineReadyWatchdog(final boolean white, final String context) {
+        final EngineListener target = white ? whiteAnalysisListener : blackAnalysisListener;
+        Thread watchdog = new Thread(() -> {
+            try { Thread.sleep(60000L); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
+            if (!target.isReadySeen() && !stopped && !finished && !paused)
+                TournamentDiagnostics.record("TIMEOUT", "uci_startup_timeout", context +
+                        " no readyok was observed within 60000ms; phase=" + TournamentDiagnostics.currentPhase());
+        }, "Tournament-UCI-Ready-Watchdog-" + (white ? "White" : "Black"));
+        watchdog.setDaemon(true);
+        watchdog.start();
     }
 
     /**
@@ -700,9 +755,12 @@ public final class TournamentRunner {
                     new Position(game.currPos()), game.haveDrawOffer(), wTime, bTime, inc, inc,
                     whiteToMove ? whiteEngine.executableId : blackEngine.executableId);
         }
-        // Request multiple UCI MultiPV lines from the same tournament engine.
-        // The UI renders only their first moves as arrows; no extra engine is started.
-        request.setNumPV(Math.max(1, Math.min(8, tournamentArrowCount)));
+        // Arrow count is a display limit in plies along the main PV. It must never
+        // change engine MultiPV or playing strength.
+        request.setNumPV(1);
+        request.diagnosticContext = "game=" + (pairing == null ? -1 : pairing.index) +
+                " side=" + (whiteToMove ? "White" : "Black") +
+                " engine=" + (whiteToMove ? whiteEngine.displayName : blackEngine.displayName);
         switch (tournament.timeMode()) {
             case MOVE_TIME: request.tournamentGoCommand = "go movetime " + Math.max(1, tournament.limitValue()); break;
             case DEPTH: request.tournamentGoCommand = "go depth " + Math.max(1, tournament.limitValue()); break;
@@ -711,8 +769,13 @@ public final class TournamentRunner {
         }
         (whiteToMove ? whiteAnalysisListener : blackAnalysisListener).beginSearch();
         currentTurnQueueSubmittedNs = System.nanoTime();
+        TournamentDiagnostics.setPhase("worker_sync_and_search_dispatch", request.diagnosticContext);
+        TournamentDiagnostics.record("WORKER", "search_request_queued", request.diagnosticContext +
+                " searchId=" + id + " moves=" + history.second.size() + " fen=" + TextIO.toFEN(game.currPos()));
         player.queueSearchRequest(request);
         currentTurnQueueReturnedNs = System.nanoTime();
+        TournamentDiagnostics.record("WORKER", "search_request_returned", request.diagnosticContext +
+                " queueCallMs=" + ((currentTurnQueueReturnedNs - currentTurnQueueSubmittedNs) / 1_000_000L));
         if (usesClock()) startClockWatchdog(whiteToMove, turnToken);
     }
 
@@ -1051,12 +1114,14 @@ public final class TournamentRunner {
                 long pgnBuildMs = (System.nanoTime() - pgnStartNs) / 1_000_000L;
                 long saveStartNs = System.nanoTime();
                 tournament.recordResult(completedIndex, outcome, completedPgn, completedWhiteEval, completedBlackEval);
+                TournamentDiagnostics.record("RESULT", "game_result_committed", "game=" + completedIndex + " outcome=" + outcome);
                 long resultSaveMs = (System.nanoTime() - saveStartNs) / 1_000_000L;
                 if (pgnBuildMs >= 100L || resultSaveMs >= 100L)
                     Log.w("CET-TournamentSave", "Game " + (completedIndex + 1) +
                             " finalization pgnBuild=" + pgnBuildMs + "ms resultSave=" + resultSaveMs + "ms");
                 pgn = completedPgn;
             } catch (IOException | JSONException | RuntimeException error) {
+                TournamentDiagnostics.recordError("RESULT", "game_result_save_failed", error);
                 stop();
                 synchronized (TournamentRunner.this) {
                     finalizingGame = false;
@@ -1189,7 +1254,26 @@ public final class TournamentRunner {
 
     private final class EngineListener implements SearchListener {
         private final boolean white;
+        private volatile String diagnosticContext = "";
+        private volatile boolean readySeen;
+        private volatile long engineStartNs;
         EngineListener(boolean white) { this.white = white; }
+        void prepareEngineStart(String context, boolean alreadyLoaded) {
+            diagnosticContext = context == null ? "" : context;
+            readySeen = alreadyLoaded;
+            engineStartNs = System.nanoTime();
+            TournamentDiagnostics.record("ENGINE", "startup_monitor_armed", diagnosticContext + " alreadyLoaded=" + alreadyLoaded);
+        }
+        boolean isReadySeen() { return readySeen; }
+        @Override public void notifyEngineInitialized() {
+            TournamentDiagnostics.record("ENGINE", "uci_handshake_initialized", diagnosticContext +
+                    " elapsedMs=" + ((System.nanoTime() - engineStartNs) / 1_000_000L));
+        }
+        @Override public void notifyEngineReady() {
+            readySeen = true;
+            TournamentDiagnostics.record("ENGINE", "uci_ready", diagnosticContext +
+                    " elapsedMs=" + ((System.nanoTime() - engineStartNs) / 1_000_000L));
+        }
         private volatile int lastDepth;
         private volatile long lastNodes;
         private volatile int lastNps;
@@ -1386,14 +1470,14 @@ public final class TournamentRunner {
             String text = header + engineWdlLine + (variation.length() == 0 ? "" : "\n" + variation);
             if (pendingVariationHintsNeedsPublish && pendingPvPosition != null) {
                 ArrayList<Move> hints = new ArrayList<>();
-                int requested = Math.max(1, Math.min(8, tournamentArrowCount));
-                // Preserve MultiPV numbering: if PV 2 is absent, never relabel PV 3
-                // as the second arrow. Only a contiguous prefix beginning at PV 1
-                // represents the ranked variations requested by the user.
-                for (int pvIndex = 0; pvIndex < pendingPvInfos.size() && pvIndex < requested; pvIndex++) {
-                    SearchListener.PvInfo variationPv = pendingPvInfos.get(pvIndex);
-                    if (variationPv == null || variationPv.pv == null || variationPv.pv.isEmpty()) break;
-                    hints.add(variationPv.pv.get(0));
+                int requestedPlies = Math.max(1, Math.min(8, tournamentArrowCount));
+                SearchListener.PvInfo mainPv = pendingPvInfos.isEmpty() ? pendingPvInfo : pendingPvInfos.get(0);
+                if (mainPv != null && mainPv.pv != null) {
+                    for (int ply = 0; ply < mainPv.pv.size() && ply < requestedPlies; ply++) {
+                        Move move = mainPv.pv.get(ply);
+                        if (move == null) break;
+                        hints.add(move);
+                    }
                 }
                 listener.onEngineVariationHints(white, pendingPvPosition.zobristHash(), hints);
                 pendingVariationHintsNeedsPublish = false;
@@ -1434,18 +1518,31 @@ public final class TournamentRunner {
             // Defer board/result handling so old-search cleanup cannot overwrite a new search.
             DroidComputerPlayer player = white ? whitePlayer : blackPlayer;
             Thread worker = new Thread(() -> {
+                long syncStartedNs = System.nanoTime();
+                boolean syncDelayLogged = false;
                 try {
-                    while (player.computerBusy()) Thread.sleep(2);
+                    while (player.computerBusy()) {
+                        if (!syncDelayLogged && System.nanoTime() - syncStartedNs >= 2_000_000_000L) {
+                            syncDelayLogged = true;
+                            TournamentDiagnostics.record("WORKER_SYNC", "search_result_wait_still_pending",
+                                    diagnosticContext + " searchId=" + id + " command=" + cmd + " waitedMs=2000+");
+                        }
+                        Thread.sleep(2);
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;
                 }
+                long syncWaitMs = (System.nanoTime() - syncStartedNs) / 1_000_000L;
+                if (syncWaitMs >= 25L) TournamentDiagnostics.record("WORKER_SYNC", "search_result_wait_complete",
+                        diagnosticContext + " waitedMs=" + syncWaitMs);
                 onSearchResult(white, id, cmd, acceptedAtArrival, analysisAtBestMove);
             }, "CET-Tournament-Result");
             worker.start();
         }
         @Override public void notifyEngineName(String engineName) { }
         @Override public void reportEngineError(String errMsg) {
+            TournamentDiagnostics.record("ENGINE", "engine_reported_error", diagnosticContext + " message=" + errMsg);
             TournamentManager.Engine engine = white ? whiteEngine : blackEngine;
             String side = white ? "White" : "Black";
             String engineName = engine == null ? "unknown engine" : engine.displayName;
