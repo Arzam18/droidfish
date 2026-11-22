@@ -109,6 +109,9 @@ public interface SearchListener {
     /** Report engine error. */
     void reportEngineError(String errMsg);
 
-    /** Report that engine has been initialized. */
+    /** Report that UCI options have been read (uciok received). */
     void notifyEngineInitialized();
+
+    /** Report that the engine answered isready with readyok. */
+    default void notifyEngineReady() { }
 }
