@@ -626,6 +626,11 @@ public final class TournamentActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
         scroll.addView(root);
 
+        Button diagnosticsButton = new Button(this);
+        diagnosticsButton.setText("Show / Copy Freeze Diagnostic Log");
+        root.addView(diagnosticsButton, fullWidth());
+        diagnosticsButton.setOnClickListener(v -> showTournamentDiagnostics());
+
         Button choose = new Button(this);
         choose.setText("Select tournament engines");
         root.addView(choose, fullWidth());
@@ -869,10 +874,6 @@ public final class TournamentActivity extends Activity {
         root.addView(importTournamentButton, fullWidth());
         importTournamentButton.setOnClickListener(v -> chooseTournamentJson());
         stopButton = new Button(this); stopButton.setText("Stop and Save Tournament"); stopButton.setEnabled(false); root.addView(stopButton, fullWidth());
-        Button diagnosticsButton = new Button(this);
-        diagnosticsButton.setText("Show / Copy Freeze Diagnostic Log");
-        root.addView(diagnosticsButton, fullWidth());
-        diagnosticsButton.setOnClickListener(v -> showTournamentDiagnostics());
         Button goToTournamentBoardButton = new Button(this);
         goToTournamentBoardButton.setText("Go to Tournament Board");
         goToTournamentBoardButton.setEnabled(true);
@@ -940,7 +941,7 @@ public final class TournamentActivity extends Activity {
         enginePanelsRow.setGravity(android.view.Gravity.TOP);
         expandedBlackAnalysisPanel = createExpandedAnalysisPanel(false);
         expandedWhiteAnalysisPanel = createExpandedAnalysisPanel(true);
-        expandedBottomPanelWhite = !tournamentUiFlipped;
+        // expandedBottomPanelWhite was restored from preferences above; do not reset it here.
         LinearLayout.LayoutParams blackPanelParams = new LinearLayout.LayoutParams(0, -2, 1.0f);
         blackPanelParams.rightMargin = dp(2);
         LinearLayout.LayoutParams whitePanelParams = new LinearLayout.LayoutParams(0, -2, 1.0f);
@@ -1066,6 +1067,9 @@ public final class TournamentActivity extends Activity {
             dialog.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
             dialog.getWindow().setBackgroundDrawableResource(android.R.color.black);
         }
+        // Re-apply the persisted logo/info order after rebuilding the dialog views.
+        // Without this call, newly-created panels kept the factory order (logo above the name).
+        applyExpandedAnalysisPanelLayouts();
         updateExpandedMainBoard();
         updateExpandedClockDisplay();
     }
@@ -10741,6 +10745,7 @@ public final class TournamentActivity extends Activity {
         TournamentDiagnostics.record("ACTIVITY", "on_pause", "board=" + currentTournamentScreen + " newBoardDialog=" +
                 (expandedMainDialog != null && expandedMainDialog.isShowing()));
         if (boardSelectionActive) saveBoardSelectionState(expandedMainDialog != null && expandedMainDialog.isShowing() ? 2 : currentTournamentScreen);
+        saveExpandedPanelLayoutPreferences();
         if (mirrorAnalysisEngine != null) { try { mirrorAnalysisEngine.stopSearch(); } catch (RuntimeException ignored) { } }
         saveSetup();
         if (runner != null && !runner.isPaused()) {
