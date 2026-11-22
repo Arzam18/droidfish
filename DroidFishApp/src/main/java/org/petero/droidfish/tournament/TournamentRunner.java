@@ -1265,10 +1265,6 @@ public final class TournamentRunner {
             TournamentDiagnostics.record("ENGINE", "startup_monitor_armed", diagnosticContext + " alreadyLoaded=" + alreadyLoaded);
         }
         boolean isReadySeen() { return readySeen; }
-        @Override public void notifyEngineInitialized() {
-            TournamentDiagnostics.record("ENGINE", "uci_handshake_initialized", diagnosticContext +
-                    " elapsedMs=" + ((System.nanoTime() - engineStartNs) / 1_000_000L));
-        }
         @Override public void notifyEngineReady() {
             readySeen = true;
             TournamentDiagnostics.record("ENGINE", "uci_ready", diagnosticContext +
@@ -1549,6 +1545,10 @@ public final class TournamentRunner {
             listener.onError(side + " engine '" + engineName + "': " + errMsg, null);
         }
         @Override public void notifyEngineInitialized() {
+            // Record the completed UCI initialization before restoring per-engine options.
+            // Keep this diagnostic and the option-restoration behavior in one override.
+            TournamentDiagnostics.record("ENGINE", "uci_handshake_initialized", diagnosticContext +
+                    " elapsedMs=" + ((System.nanoTime() - engineStartNs) / 1_000_000L));
             // UCI option discovery clears pending options, so re-apply the saved per-engine
             // settings (with tournament defaults only for options the user has not changed).
             TournamentManager.Engine engine = white ? whiteEngine : blackEngine;
