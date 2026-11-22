@@ -686,8 +686,14 @@ public class DroidComputerPlayer {
         clearInfo();
         uciEngine.setEloStrength(searchRequest.elo);
         if (maxPV > 1) {
-            int num = Math.min(maxPV, searchRequest.numPV);
-            uciEngine.setOption("MultiPV", num);
+            // Tournament requests intentionally set numPV=1. Arrow count is a
+            // display-only number of plies along PV 1 and must never change MultiPV.
+            int requested = Math.max(1, searchRequest.numPV);
+            int num = Math.min(maxPV, requested);
+            boolean accepted = uciEngine.setOption("MultiPV", Integer.toString(num));
+            if (!searchRequest.diagnosticContext.isEmpty())
+                TournamentDiagnostics.record("ENGINE", "multipv_option_applied",
+                        searchRequest.diagnosticContext + " requested=" + requested + " effective=" + num + " accepted=" + accepted);
         }
 
         if (isSearch) { // Search or ponder search
