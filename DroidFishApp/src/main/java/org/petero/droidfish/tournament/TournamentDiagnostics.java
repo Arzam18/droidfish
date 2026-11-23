@@ -1,7 +1,10 @@
 package org.petero.droidfish.tournament;
 
+import android.Manifest;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.os.Build;
+import android.os.Environment;
 import android.os.Process;
 
 import java.io.BufferedReader;
@@ -33,6 +36,8 @@ public final class TournamentDiagnostics {
     private static volatile String tournamentState = "idle";
     private static volatile Thread writerThread;
     private static volatile long droppedRecords;
+    private static volatile File resolvedDiagnosticsDirectory;
+    private static volatile boolean usingSharedStorage;
 
     private TournamentDiagnostics() { }
 
@@ -51,7 +56,12 @@ public final class TournamentDiagnostics {
         if (context == null) return;
         appContext = context.getApplicationContext();
         ensureWriter();
-        String previous = readSmallFile(new File(diagnosticsDir(), "session.state"));
+        File activeDir = diagnosticsDir(true);
+        String previous = readSmallFile(new File(activeDir, "session.state"));
+        if (previous == null) {
+            File legacyState = new File(new File(appContext.getFilesDir(), "tournament-diagnostics"), "session.state");
+            previous = readSmallFile(legacyState);
+        }
         if (previous != null && previous.startsWith("RUNNING|")) {
             enqueue(new Record("RECOVERY", "unclean_previous_process",
                     "Previous process ended while tournament was marked RUNNING; this indicates interruption, not a proven cause. Previous state=" + previous,
@@ -60,7 +70,9 @@ public final class TournamentDiagnostics {
             enqueue(new Record("RECOVERY", "previous_session_was_paused", previous, null, true, null), true);
         }
         enqueue(new Record("APP", "diagnostics_initialized",
-                "sdk=" + Build.VERSION.SDK_INT + " device=" + Build.MANUFACTURER + "/" + Build.MODEL + " pid=" + Process.myPid(),
+                "sdk=" + Build.VERSION.SDK_INT + " device=" + Build.MANUFACTURER + "/" + Build.MODEL +
+                        " pid=" + Process.myPid() + " logPath=" + new File(activeDir, "error_log.txt").getAbsolutePath() +
+                        " sharedStorage=" + usingSharedStorage,
                 "IDLE|" + System.currentTimeMillis() + "|startup", true, null), true);
     }
 
@@ -128,28 +140,79 @@ public final class TournamentDiagnostics {
     public static String readLog(Context context) {
         Context app = context == null ? appContext : context.getApplicationContext();
         if (app == null) return "Diagnostics are not initialized.";
-        // Ask the writer to flush recent records, but never hold the UI for long.
+        // Refresh shared-storage access first, then place a barrier behind it so
+        // the writer closes/reopens its stream at the selected public/private path.
+        File activeDir = diagnosticsDir(true);
         CountDownLatch barrier = new CountDownLatch(1);
         enqueue(new Record("", "", "", null, true, barrier), true);
         try { barrier.await(750L, TimeUnit.MILLISECONDS); }
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
-        File dir = new File(app.getFilesDir(), "tournament-diagnostics");
-        File previous = new File(dir, "diagnostics.previous.log");
-        File current = new File(dir, "diagnostics.log");
+
         StringBuilder out = new StringBuilder();
-        appendFileToString(previous, out);
-        appendFileToString(current, out);
-        return out.length() == 0 ? "No tournament diagnostic events have been recorded yet." : out.toString();
+        File privateDir = new File(app.getFilesDir(), "tournament-diagnostics");
+        // Keep both older private formats visible after changing storage locations.
+        appendFileToString(new File(privateDir, "diagnostics.previous.log"), out);
+        appendFileToString(new File(privateDir, "diagnostics.log"), out);
+        if (!activeDir.equals(privateDir)) {
+            appendFileToString(new File(privateDir, "error_log_previous.txt"), out);
+            appendFileToString(new File(privateDir, "error_log.txt"), out);
+        }
+        appendFileToString(new File(activeDir, "error_log_previous.txt"), out);
+        appendFileToString(new File(activeDir, "error_log.txt"), out);
+        return out.length() == 0 ? "No tournament diagnostic events have been recorded yet. Check shared-storage permission and relaunch DroidFish." : out.toString();
     }
 
     public static String getLogPath(Context context) {
         Context app = context == null ? appContext : context.getApplicationContext();
-        return app == null ? "unavailable" : new File(new File(app.getFilesDir(), "tournament-diagnostics"), "diagnostics.log").getAbsolutePath();
+        if (app == null) return "unavailable";
+        File directory = diagnosticsDir(true);
+        return directory == null ? "unavailable" : new File(directory, "error_log.txt").getAbsolutePath();
     }
 
-    private static File diagnosticsDir() {
+    private static File diagnosticsDir() { return diagnosticsDir(false); }
+
+    /** Re-check shared-storage access when the app initializes or the user opens the log viewer. */
+    private static File diagnosticsDir(boolean refresh) {
+        File cached = resolvedDiagnosticsDirectory;
+        if (!refresh && cached != null) return cached;
         Context context = appContext;
-        return context == null ? null : new File(context.getFilesDir(), "tournament-diagnostics");
+        if (context == null) return null;
+        synchronized (START_LOCK) {
+            cached = resolvedDiagnosticsDirectory;
+            if (!refresh && cached != null) return cached;
+
+            // Android 10+ uses scoped storage for newer targets. This application
+            // still targets API 28 and already requests WRITE_EXTERNAL_STORAGE,
+            // so use the conventional shared DroidFish folder when permission is granted.
+            boolean permissionGranted = Build.VERSION.SDK_INT < 23 ||
+                    context.checkCallingOrSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                            PackageManager.PERMISSION_GRANTED;
+            if (permissionGranted && Environment.MEDIA_MOUNTED.equals(Environment.getExternalStorageState())) {
+                File externalRoot = Environment.getExternalStorageDirectory();
+                File publicDir = new File(new File(externalRoot, "DroidFish"), "error_log");
+                try {
+                    if ((publicDir.isDirectory() || publicDir.mkdirs()) && publicDir.isDirectory()) {
+                        // Verify actual create/write access rather than relying on canWrite().
+                        File probe = new File(publicDir, ".write_check_" + Process.myPid());
+                        try (FileOutputStream out = new FileOutputStream(probe, false)) {
+                            out.write(1);
+                            out.flush();
+                        }
+                        //noinspection ResultOfMethodCallIgnored
+                        probe.delete();
+                        usingSharedStorage = true;
+                        resolvedDiagnosticsDirectory = publicDir;
+                        return publicDir;
+                    }
+                } catch (Exception denied) {
+                    android.util.Log.w(TAG, "Shared diagnostic directory unavailable; using private fallback", denied);
+                }
+            }
+            File privateDir = new File(context.getFilesDir(), "tournament-diagnostics");
+            usingSharedStorage = false;
+            resolvedDiagnosticsDirectory = privateDir;
+            return privateDir;
+        }
     }
 
     private static void enqueue(Record record, boolean important) {
@@ -166,6 +229,7 @@ public final class TournamentDiagnostics {
 
     private static void writerLoop() {
         FileOutputStream stream = null;
+        File streamFile = null;
         long lastSyncNs = System.nanoTime();
         try {
             while (!Thread.currentThread().isInterrupted()) {
@@ -176,6 +240,11 @@ public final class TournamentDiagnostics {
                     File dir = diagnosticsDir();
                     if (dir == null) continue;
                     if (!dir.exists() && !dir.mkdirs() && !dir.isDirectory()) continue;
+                    File desiredLog = new File(dir, "error_log.txt");
+                    if (stream != null && streamFile != null && !desiredLog.equals(streamFile)) {
+                        stream.flush(); stream.getFD().sync(); stream.close();
+                        stream = null; streamFile = null;
+                    }
                     if (record != null && record.barrier != null && record.category.isEmpty()) {
                         if (stream != null) { stream.flush(); stream.getFD().sync(); }
                         lastSyncNs = System.nanoTime();
@@ -185,8 +254,11 @@ public final class TournamentDiagnostics {
                     if (record != null && record.sessionState != null)
                         writeSmallFile(new File(dir, "session.state"), record.sessionState);
                     if (record != null && !record.category.isEmpty()) {
-                        File log = new File(dir, "diagnostics.log");
-                        if (stream == null) stream = new FileOutputStream(log, true);
+                        File log = desiredLog;
+                        if (stream == null) {
+                            stream = new FileOutputStream(log, true);
+                            streamFile = log;
+                        }
                         String line = System.currentTimeMillis() + "\t" + System.nanoTime() + "\tpid=" + Process.myPid() +
                                 "\ttid=" + Thread.currentThread().getId() + "\t" + clean(record.category) + "\t" + clean(record.event) +
                                 "\tphase=" + clean(currentPhase) + "\t" + clean(record.detail) + "\tdropped=" + droppedRecords + "\n";
@@ -198,16 +270,16 @@ public final class TournamentDiagnostics {
                         stream.getFD().sync();
                         lastSyncNs = now;
                     }
-                    File log = new File(dir, "diagnostics.log");
+                    File log = new File(dir, "error_log.txt");
                     if (stream != null && log.length() > MAX_LOG_BYTES) {
-                        stream.flush(); stream.getFD().sync(); stream.close(); stream = null;
-                        File previous = new File(dir, "diagnostics.previous.log");
+                        stream.flush(); stream.getFD().sync(); stream.close(); stream = null; streamFile = null;
+                        File previous = new File(dir, "error_log_previous.txt");
                         if (previous.exists() && !previous.delete()) android.util.Log.w(TAG, "Could not delete previous diagnostic log");
                         if (log.exists() && !log.renameTo(previous)) android.util.Log.w(TAG, "Could not rotate diagnostic log");
                     }
                 } catch (Exception error) {
                     android.util.Log.e(TAG, "Unable to persist tournament diagnostic", error);
-                    if (stream != null) { try { stream.close(); } catch (Exception ignored) { } stream = null; }
+                    if (stream != null) { try { stream.close(); } catch (Exception ignored) { } stream = null; streamFile = null; }
                 }
             }
         } finally {

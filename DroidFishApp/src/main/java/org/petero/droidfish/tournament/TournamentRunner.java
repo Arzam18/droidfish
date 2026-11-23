@@ -842,6 +842,10 @@ public final class TournamentRunner {
             return;
         }
         lastMoveTimeMs = usesClock() ? clock.lastTurnElapsedMs() : Math.max(0, (System.nanoTime() - currentTurnStartedNs) / 1_000_000L);
+        // Publish the exact final search snapshot before notifying the new position.
+        // The UI reuses this callback for its per-ply graph sample; no extra search is run.
+        if (analysisAtBestMove != null && !analysisAtBestMove.trim().isEmpty())
+            listener.onEngineAnalysis(whiteEngineSide, analysisAtBestMove);
         addMoveAnalysisComment(whiteEngineSide, lastMoveTimeMs, analysisAtBestMove);
         recordPosition(lastMoveTimeMs);
         if (fastWinPendingResult != null && !fastWinAwaitingPostMoveEval &&
