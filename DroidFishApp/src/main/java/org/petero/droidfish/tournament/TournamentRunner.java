@@ -56,6 +56,21 @@ public final class TournamentRunner {
         void onError(String message, Throwable error);
     }
 
+    /** Copy of the runner's existing search snapshots, indexed by position after opening. */
+    public static final class AnalysisHistorySnapshot {
+        public final ArrayList<String> white;
+        public final ArrayList<String> black;
+        public final int openingPlies;
+        public final int completedPlies;
+        AnalysisHistorySnapshot(ArrayList<String> white, ArrayList<String> black,
+                                int openingPlies, int completedPlies) {
+            this.white = white;
+            this.black = black;
+            this.openingPlies = openingPlies;
+            this.completedPlies = completedPlies;
+        }
+    }
+
     private final TournamentManager tournament;
     private final Listener listener;
     private final EngineOptions engineOptions;
@@ -93,7 +108,10 @@ public final class TournamentRunner {
     private final ArrayList<String> whiteAnalysisHistory = new ArrayList<>();
     private final ArrayList<String> blackAnalysisHistory = new ArrayList<>();
     private final ArrayList<Long> moveTimeHistory = new ArrayList<>();
+    private final Object analysisHistoryLock = new Object();
     private int reviewPly = -1;
+    /** Opening plies applied before the runner starts its first engine search. */
+    private int openingPliesApplied;
     private String currentOpeningName = "Starting position";
     private String latestWhiteAnalysis = "WHITE analysis waiting…";
     private String latestBlackAnalysis = "BLACK analysis waiting…";
@@ -406,12 +424,31 @@ public final class TournamentRunner {
                 whiteAnalysisHistory.get(index), blackAnalysisHistory.get(index), moveTimeHistory.get(index));
     }
 
-    private void recordPosition(long moveTimeMs) {
-        positionHistory.add(new Position(game.currPos()));
-        whiteAnalysisHistory.add(latestWhiteAnalysis);
-        blackAnalysisHistory.add(latestBlackAnalysis);
-        moveTimeHistory.add(Math.max(0, moveTimeMs));
-        reviewPly = -1;
+    private synchronized void recordPosition(long moveTimeMs) {
+        synchronized (analysisHistoryLock) {
+            Position position = new Position(game.currPos());
+            positionHistory.add(position);
+            // The engine whose turn it is must publish fresh search information
+            // for this position. Do not copy its previous position's analysis into
+            // the new graph row; retain the opponent's last completed output.
+            whiteAnalysisHistory.add(position.whiteMove ? "WHITE analysis waiting…" : latestWhiteAnalysis);
+            blackAnalysisHistory.add(position.whiteMove ? latestBlackAnalysis : "BLACK analysis waiting…");
+            moveTimeHistory.add(Math.max(0, moveTimeMs));
+            reviewPly = -1;
+        }
+    }
+
+    /**
+     * Return the existing per-position analysis cache for the graph. Index 0 is
+     * the first position after the assigned opening; each subsequent index is
+     * the position after one completed engine move. No engine search is started.
+     */
+    public AnalysisHistorySnapshot getAnalysisHistorySnapshot() {
+        synchronized (analysisHistoryLock) {
+            return new AnalysisHistorySnapshot(new ArrayList<>(whiteAnalysisHistory),
+                    new ArrayList<>(blackAnalysisHistory), openingPliesApplied,
+                    openingPliesApplied + Math.max(0, positionHistory.size() - 1));
+        }
     }
 
     /** Select a BIN line on a throwaway position so it can be persisted before replaying it. */
@@ -570,7 +607,10 @@ public final class TournamentRunner {
                 " elapsedMs=" + ((System.nanoTime() - positionPreparationStartedNs) / 1_000_000L) +
                 " fen=" + TextIO.toFEN(game.currPos()));
         game.tree.setPlayerNames(whiteEngine.displayName, blackEngine.displayName);
-        positionHistory.clear(); whiteAnalysisHistory.clear(); blackAnalysisHistory.clear(); moveTimeHistory.clear();
+        synchronized (analysisHistoryLock) {
+            positionHistory.clear(); whiteAnalysisHistory.clear(); blackAnalysisHistory.clear(); moveTimeHistory.clear();
+            openingPliesApplied = 0;
+        }
         reviewPly = -1; lastMoveTimeMs = 0; humanAdjudication = false;
         latestWhiteAnalysis = "WHITE analysis waiting…"; latestBlackAnalysis = "BLACK analysis waiting…";
         String eventType = tournament.format().name().toLowerCase(java.util.Locale.US).replace('_', ' ');
@@ -624,6 +664,7 @@ public final class TournamentRunner {
         listener.onGameStarted(pairing, whiteEngine.displayName, blackEngine.displayName);
         long openingPlaybackStartedNs = System.nanoTime();
         int appliedPlies = (customFenActive || generatedVariantActive) ? 0 : applyAssignedOpening(pairing.openingSanLine);
+        synchronized (analysisHistoryLock) { openingPliesApplied = appliedPlies; }
         TournamentDiagnostics.record("OPENING", "opening_applied", "game=" + pairing.index + " plies=" + appliedPlies +
                 " elapsedMs=" + ((System.nanoTime() - openingPlaybackStartedNs) / 1_000_000L));
         if (!customFenActive && !generatedVariantActive && appliedPlies == 0 && pairing.openingSanLine != null && !pairing.openingSanLine.trim().isEmpty()) {
@@ -1292,6 +1333,7 @@ public final class TournamentRunner {
         private volatile String lastPv = "";
         private volatile boolean hasCurrentSearchInfo;
         private volatile boolean hasCurrentSearchOutput;
+        private volatile boolean hasCurrentSearchStats;
         // Keep the newest raw PV and format it only when the UI snapshot is due.
         // PV callbacks can arrive much faster than a human can read them.
         private Position pendingPvPosition;
@@ -1313,6 +1355,7 @@ public final class TournamentRunner {
             lastWdlWin = lastWdlDraw = lastWdlLoss = 0;
             lastPv = "";
             hasCurrentSearchOutput = false;
+            hasCurrentSearchStats = false;
             pendingPvPosition = null;
             pendingPvInfo = null;
             pendingPvInfos.clear();
@@ -1325,8 +1368,11 @@ public final class TournamentRunner {
         }
 
         String snapshotForMove() {
-            if (!hasCurrentSearchOutput) return "Eval: n/a Depth: n/a Nodes: n/a NPS: n/a";
+            if (!hasCurrentSearchOutput && !hasCurrentSearchInfo)
+                return "Eval: n/a Depth: n/a Nodes: n/a NPS: n/a";
             // Flush the most recent depth/PV/stats before writing the PGN comment.
+            // Engines can publish valid depth/nodes/NPS/time without a usable PV;
+            // those measurements still belong in PGN and the tournament graph.
             publishAnalysis(true);
             return white ? latestWhiteAnalysis : latestBlackAnalysis;
         }
@@ -1362,6 +1408,7 @@ public final class TournamentRunner {
                 lastSelDepth = pv.seldepth;
                 lastHashFull = pv.hash;
                 lastTimeMs = pv.time;
+                hasCurrentSearchStats = true;
                 if (pv.hasWdl) {
                     hasNativeWdl = true;
                     lastWdlWin = pv.wdlWin;
@@ -1389,6 +1436,7 @@ public final class TournamentRunner {
             if (!isCurrentSearch(id)) return;
             lastNodes = nodes; lastNps = nps; lastSelDepth = seldepth; lastHashFull = hash; lastTimeMs = time;
             hasCurrentSearchInfo = true;
+            hasCurrentSearchStats = true;
             publishAnalysis(false);
         }
         @Override public void notifyBookInfo(int id, String bookInfo, ArrayList<Move> moveList, String eco, int distToEcoTree) {
@@ -1428,7 +1476,7 @@ public final class TournamentRunner {
             return Long.toString(value);
         }
         private void publishAnalysis(boolean force) {
-            if (stopped || finished || !hasCurrentSearchOutput) return;
+            if (stopped || finished || (!hasCurrentSearchOutput && !hasCurrentSearchInfo)) return;
             long nowNs = System.nanoTime();
             if (!force && lastPublishNs != 0 && nowNs - lastPublishNs < ANALYSIS_PUBLISH_INTERVAL_NS) return;
             lastPublishNs = nowNs;
@@ -1468,12 +1516,15 @@ public final class TournamentRunner {
             } else if (!lastPv.isEmpty()) {
                 pvLine = lastPv;
             }
-            String nodes = compactCount(lastNodes);
-            String nps = compactCount(lastNps);
+            String nodes = hasCurrentSearchStats ? compactCount(lastNodes) : "n/a";
+            String nps = hasCurrentSearchStats && lastNps > 0 ? compactCount(lastNps) : "n/a";
+            String depthText = lastDepth > 0 ? Integer.toString(lastDepth) : "n/a";
+            if (lastDepth > 0 && lastSelDepth > 0) depthText += "/" + lastSelDepth;
+            String timeText = hasCurrentSearchStats
+                    ? String.format(java.util.Locale.US, "%.2fs", Math.max(0, lastTimeMs) / 1000.0) : "n/a";
             String variation = pvLine == null ? "" : pvLine.trim();
-            String header = "Eval: " + score + "    Depth: " + lastDepth +
-                    (lastSelDepth > 0 ? "/" + lastSelDepth : "") + "    Nodes: " + nodes +
-                    "    NPS: " + nps + "    Time: " + String.format(java.util.Locale.US, "%.2fs", Math.max(0, lastTimeMs) / 1000.0) +
+            String header = "Eval: " + score + "    Depth: " + depthText + "    Nodes: " + nodes +
+                    "    NPS: " + nps + "    Time: " + timeText +
                     (lastHashFull > 0 ? "    Hash: " + String.format(java.util.Locale.US, "%.1f%%", lastHashFull / 10.0) : "");
             String engineWdlLine = hasNativeWdl ? "\nEngine WDL: W: " + String.format(java.util.Locale.US, "%.1f%%", lastWdlWin / 10.0) +
                     " D: " + String.format(java.util.Locale.US, "%.1f%%", lastWdlDraw / 10.0) +
@@ -1497,10 +1548,12 @@ public final class TournamentRunner {
                 listener.onEngineVariationHints(white, pendingPvPosition.zobristHash(), hints);
                 pendingVariationHintsNeedsPublish = false;
             }
-            if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
-            if (!positionHistory.isEmpty() && reviewPly < 0) {
-                int last = positionHistory.size() - 1;
-                if (white) whiteAnalysisHistory.set(last, text); else blackAnalysisHistory.set(last, text);
+            synchronized (analysisHistoryLock) {
+                if (white) latestWhiteAnalysis = text; else latestBlackAnalysis = text;
+                if (!positionHistory.isEmpty() && reviewPly < 0) {
+                    int last = positionHistory.size() - 1;
+                    if (white) whiteAnalysisHistory.set(last, text); else blackAnalysisHistory.set(last, text);
+                }
             }
             listener.onEngineAnalysis(white, text);
         }
