@@ -2928,7 +2928,7 @@ public final class TournamentActivity extends Activity {
             boolean whiteMove = before == null ? ((i & 1) == 0) : before.whiteMove;
             boolean followsWhiteInSameFullMove = !whiteMove && i > 0 && i - 1 < history.size() &&
                     history.get(i - 1).whiteMove && history.get(i - 1).fullMoveCounter == moveNumber;
-            if (whiteMove || !followsWhiteInSameFullMove) moves.append(moveNumber).append(whiteMove ? "." : "...");
+            if (whiteMove || !followsWhiteInSameFullMove) moves.append(String.valueOf(moveNumber)).append(whiteMove ? "." : "...");
             moves.append(sans.get(i));
             int moveEnd = moves.length();
             if (i + 1 == selectedPly) {
