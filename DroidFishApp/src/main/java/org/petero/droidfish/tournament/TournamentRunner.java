@@ -982,10 +982,17 @@ public final class TournamentRunner {
             if (compactNps.endsWith("k")) compactNps = compactNps.substring(0, compactNps.length() - 1) + "knps";
             else if (compactNps.endsWith("m")) compactNps = compactNps.substring(0, compactNps.length() - 1) + "mnps";
             else if (!compactNps.endsWith("nps") && !"?".equals(compactNps)) compactNps += "nps";
+            // Preserve engine search duration in the existing per-move PGN snapshot.
+            // The tX token below continues to represent move elapsed time.
+            String compactEngineTime = "";
+            if (!"n/a".equals(engineTime)) {
+                String timeValue = engineTime.trim().replaceAll("(?i)s$", "");
+                if (timeValue.matches("[0-9]+(?:\\.[0-9]+)?")) compactEngineTime = " et" + timeValue + "s";
+            }
             String compactClock = remaining < 0L ? "?" : clockText(remaining);
             String compactPv = firstTwoPvPlies(pv);
             String comment = ("n/a".equals(eval) ? "?" : eval) +
-                    " d" + compactDepth + " n" + compactNodes + " " + compactNps +
+                    " d" + compactDepth + " n" + compactNodes + " " + compactNps + compactEngineTime +
                     " clk" + compactClock + " t" + moveTimeText(moveMs) +
                     (compactPv.isEmpty() ? "" : " " + compactPv) + engineWdl + whiteWdl;
             // The engine-provided WDL remains in the engine's own perspective. No
