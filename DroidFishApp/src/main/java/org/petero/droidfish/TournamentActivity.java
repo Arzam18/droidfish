@@ -523,10 +523,16 @@ public final class TournamentActivity extends Activity {
     }
 
     private void saveExpandedPanelLayoutPreferences() {
-        getPreferences(MODE_PRIVATE).edit()
-                .putBoolean("tournamentExpandedBlackLogoAfterInfo", expandedBlackLogoAfterInfo)
-                .putBoolean("tournamentExpandedWhiteLogoAfterInfo", expandedWhiteLogoAfterInfo)
-                .putBoolean("tournamentExpandedPanelsSwapped", expandedPanelsSwapped)
+        SharedPreferences.Editor editor = getPreferences(MODE_PRIVATE).edit();
+        // Normal and double-tap layouts own independent icon placement settings.
+        if (expandedWhitePanelBelowBoard) {
+            editor.putBoolean("tournamentExpandedBlackLogoAfterInfoDoubleTap", expandedBlackLogoAfterInfo)
+                    .putBoolean("tournamentExpandedWhiteLogoAfterInfoDoubleTap", expandedWhiteLogoAfterInfo);
+        } else {
+            editor.putBoolean("tournamentExpandedBlackLogoAfterInfoNormal", expandedBlackLogoAfterInfo)
+                    .putBoolean("tournamentExpandedWhiteLogoAfterInfoNormal", expandedWhiteLogoAfterInfo);
+        }
+        editor.putBoolean("tournamentExpandedPanelsSwapped", expandedPanelsSwapped)
                 .putBoolean("tournamentExpandedBottomPanelWhite", expandedBottomPanelWhite)
                 .putBoolean("tournamentUiFlipped", tournamentUiFlipped)
                 .commit();
@@ -917,8 +923,9 @@ public final class TournamentActivity extends Activity {
         tournamentUiFlipped = boardPrefs.getBoolean("tournamentUiFlipped", tournamentUiFlipped);
         expandedPanelsSwapped = boardPrefs.getBoolean("tournamentExpandedPanelsSwapped", false);
         expandedBottomPanelWhite = boardPrefs.getBoolean("tournamentExpandedBottomPanelWhite", !tournamentUiFlipped);
-        expandedBlackLogoAfterInfo = boardPrefs.getBoolean("tournamentExpandedBlackLogoAfterInfo", expandedWhitePanelBelowBoard);
-        expandedWhiteLogoAfterInfo = boardPrefs.getBoolean("tournamentExpandedWhiteLogoAfterInfo", expandedWhitePanelBelowBoard);
+        // Avoid carrying the temporary double-tap icon order into normal New Board.
+        // Legacy shared keys are only a fallback for existing double-tap users.
+        restoreExpandedPanelLogoPreferences(boardPrefs);
         Dialog dialog = new Dialog(this);
         expandedMainDialog = dialog;
 
@@ -1203,14 +1210,30 @@ public final class TournamentActivity extends Activity {
                 }).show();
     }
 
+    private void restoreExpandedPanelLogoPreferences(SharedPreferences prefs) {
+        if (expandedWhitePanelBelowBoard) {
+            expandedBlackLogoAfterInfo = prefs.getBoolean("tournamentExpandedBlackLogoAfterInfoDoubleTap",
+                    prefs.getBoolean("tournamentExpandedBlackLogoAfterInfo", true));
+            expandedWhiteLogoAfterInfo = prefs.getBoolean("tournamentExpandedWhiteLogoAfterInfoDoubleTap",
+                    prefs.getBoolean("tournamentExpandedWhiteLogoAfterInfo", true));
+        } else {
+            // Normal New Board defaults to the engine icon above its information.
+            expandedBlackLogoAfterInfo = prefs.getBoolean("tournamentExpandedBlackLogoAfterInfoNormal", false);
+            expandedWhiteLogoAfterInfo = prefs.getBoolean("tournamentExpandedWhiteLogoAfterInfoNormal", false);
+        }
+    }
+
     private void toggleExpandedWhitePanelPlacement() {
         if (expandedRoot == null || expandedPanelsRow == null || expandedMovesContainer == null ||
                 expandedBoardFrame == null) return;
+        // Save the layout being left, then restore the destination mode's own
+        // icon order. This prevents normal New Board's top-icon layout from
+        // overwriting the separately saved double-tap arrangement (and vice versa).
+        saveExpandedPanelLayoutPreferences();
         expandedWhitePanelBelowBoard = !expandedWhitePanelBelowBoard;
         saveBoardSelectionState(2);
         if (expandedWhitePanelBelowBoard) expandedBottomPanelWhite = !tournamentUiFlipped;
-        expandedWhiteLogoAfterInfo = expandedWhitePanelBelowBoard;
-        expandedBlackLogoAfterInfo = expandedWhitePanelBelowBoard;
+        restoreExpandedPanelLogoPreferences(getPreferences(MODE_PRIVATE));
         saveExpandedPanelLayoutPreferences();
         applyExpandedAnalysisPanelLayouts();
     }
@@ -5094,7 +5117,7 @@ public final class TournamentActivity extends Activity {
             case 1: return "Depth|D";
             case 2: return "Nodes|N";
             case 3: return "NPS|nps";
-            case 4: return "Time|TimeUsed";
+            case 4: return "EngineTime|Time|TimeUsed";
             case 6: return "SelDepth|SDepth|SD";
             default: return "Eval|eval";
         }
@@ -5210,7 +5233,7 @@ public final class TournamentActivity extends Activity {
 
         ArrayList<Float> whiteValues = new ArrayList<>();
         ArrayList<Float> blackValues = new ArrayList<>();
-        double[] depthSum = {0, 0}, npsSum = {0, 0}, clockSum = {0, 0};
+        double[] depthSum = {0, 0}, npsSum = {0, 0}, searchTimeSum = {0, 0};
         int[] depthCount = {0, 0}, npsCount = {0, 0};
         int[] recorded = {0, 0};
         double[] lastEvalBySide = {0.0, 0.0};
@@ -5235,13 +5258,14 @@ public final class TournamentActivity extends Activity {
             String timeRaw = mirrorGraphRawValue(raw, 4);
             if (timeRaw.isEmpty() && !live.isEmpty()) timeRaw = mirrorGraphRawValue(live, 4);
             double moveSeconds = parseMirrorGraphValue(timeRaw, 4);
-            if (Double.isFinite(moveSeconds) && moveSeconds > 0) clockSum[side] += moveSeconds;
+            if (Double.isFinite(moveSeconds) && moveSeconds > 0) searchTimeSum[side] += moveSeconds;
 
             String value = mirrorGraphValueForPly(raw, mirrorGraphMetric, ply);
             if ((value.isEmpty() || value.equalsIgnoreCase("n/a")) && !live.isEmpty())
                 value = mirrorGraphValueForPly(live, mirrorGraphMetric, ply);
             double parsed = parseMirrorGraphValue(value, mirrorGraphMetric);
-            boolean valid = Double.isFinite(parsed);
+            boolean hasRecordedSample = Double.isFinite(parsed);
+            boolean valid = hasRecordedSample;
             if (mirrorGraphMetric == 0) {
                 if (ply < bookOpeningPlies) {
                     parsed = 0.0;
@@ -5257,7 +5281,7 @@ public final class TournamentActivity extends Activity {
                     valid = true;
                 }
             }
-            if (valid) recorded[side]++;
+            if (hasRecordedSample) recorded[side]++;
             whiteValues.add(side == 0 && valid ? (float)parsed : Float.NaN);
             blackValues.add(side == 1 && valid ? (float)parsed : Float.NaN);
         }
@@ -5267,7 +5291,8 @@ public final class TournamentActivity extends Activity {
             String liveAnalysis = currentWhiteToMove ? lastWhiteAnalysis : lastBlackAnalysis;
             String value = mirrorGraphValueForPly(liveAnalysis, mirrorGraphMetric, livePly);
             double parsed = parseMirrorGraphValue(value, mirrorGraphMetric);
-            boolean valid = Double.isFinite(parsed);
+            boolean hasRecordedSample = Double.isFinite(parsed);
+            boolean valid = hasRecordedSample;
             if (mirrorGraphMetric == 0) {
                 int side = livePly & 1;
                 if (livePly < bookOpeningPlies) {
@@ -5281,13 +5306,13 @@ public final class TournamentActivity extends Activity {
                     valid = true;
                 }
             }
-            if (valid) recorded[livePly & 1]++;
+            if (hasRecordedSample) recorded[livePly & 1]++;
             whiteValues.add((livePly & 1) == 0 && valid ? (float)parsed : Float.NaN);
             blackValues.add((livePly & 1) == 1 && valid ? (float)parsed : Float.NaN);
         }
 
         String[] titles = {"Evaluation (White's view)", "Search depth", "Nodes searched", "Nodes per second",
-                "Time per move", "Engine WDL win probability", "Selective search depth"};
+                "Engine search time", "Engine WDL win probability", "Selective search depth"};
         TextView chartTitle = text(titles[mirrorGraphMetric]);
         chartTitle.setTextSize(13); chartTitle.setTypeface(null, android.graphics.Typeface.BOLD);
         chartTitle.setTextColor(0xFFE2E8EC); chartTitle.setPadding(dp(8), dp(8), dp(8), dp(2));
@@ -5298,6 +5323,11 @@ public final class TournamentActivity extends Activity {
         axisNote.setTextSize(10); axisNote.setTextColor(0xFF9EABB4);
         axisNote.setPadding(dp(8), 0, dp(8), dp(3));
         content.addView(axisNote, fullWidth());
+        TextView sampleSummary = text("Recorded search samples · White " + recorded[0] + " · Black " + recorded[1]);
+        sampleSummary.setTextSize(10);
+        sampleSummary.setTextColor(0xFF9EABB4);
+        sampleSummary.setPadding(dp(8), 0, dp(8), dp(4));
+        content.addView(sampleSummary, fullWidth());
 
         int screenWidth = getResources().getDisplayMetrics().widthPixels;
         int graphCount = Math.max(1, moves.size() + ((!mirrorReplayMode && runner != null && !runner.isFinished()) ? 1 : 0));
@@ -5329,7 +5359,7 @@ public final class TournamentActivity extends Activity {
         statsTable.setBackgroundColor(0xFF303030);
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
-        String[] columns = {"ENGINE", "AVG DEPTH", "AVG NPS", "CLOCK USED"};
+        String[] columns = {"ENGINE", "AVG DEPTH", "AVG NPS", "SEARCH TIME"};
         float[] weights = {1.45f, 0.9f, 0.95f, 0.95f};
         for (int i = 0; i < columns.length; i++) {
             TextView cell = text(columns[i]);
@@ -5346,7 +5376,7 @@ public final class TournamentActivity extends Activity {
             row.setBackgroundColor(side == 0 ? 0xFF262626 : 0xFF3A3A3A);
             String depthText = depthCount[side] == 0 ? "—" : String.format(java.util.Locale.US, "%.1f", depthSum[side] / depthCount[side]);
             String npsText = npsCount[side] == 0 ? "—" : compactViewerCount((long)(npsSum[side] / npsCount[side]));
-            String[] values = {rowNames[side], depthText, npsText, formatMirrorGraphClock(clockSum[side])};
+            String[] values = {rowNames[side], depthText, npsText, formatMirrorGraphClock(searchTimeSum[side])};
             for (int i = 0; i < values.length; i++) {
                 TextView cell = text(values[i]);
                 cell.setTextSize(i == 0 ? 10 : 10); cell.setTextColor(0xFFE0E0E0);
@@ -5512,7 +5542,9 @@ public final class TournamentActivity extends Activity {
                 if (!thisSidePly) continue; // The other engine's turn is not a gap in this series.
                 boolean logMetric = metric == 2 || metric == 3 || metric == 6;
                 boolean valid = value != null && (!Float.isNaN(value) && !Float.isInfinite(value)) && (!logMetric || value >= 0);
-                if (!valid) { previousValid = false; continue; }
+                // Skip missing metric samples without breaking the line. This connects
+                // the last and next available snapshot for the same engine.
+                if (!valid) continue;
                 float x = left + step * i;
                 float y = mapY(value, min, max, top, bottom);
                 if (previousValid) {
@@ -6593,6 +6625,13 @@ public final class TournamentActivity extends Activity {
         if (lowerKeys.contains("clock") || lowerKeys.contains("clk")) {
             m = java.util.regex.Pattern.compile("(?i)(?:^|\\s)clk([^\\s]+)").matcher(comment);
             if (m.find()) return m.group(1);
+        }
+        if (lowerKeys.contains("enginet")) {
+            // Compact PGN snapshots store engine search duration as etXs.
+            m = java.util.regex.Pattern.compile("(?i)(?:^|\\s)et([0-9]+(?:\\.[0-9]+)?)(?:s)?(?=\\s|$)").matcher(comment);
+            if (m.find()) return m.group(1) + "s";
+            // Do not confuse legacy tX move-elapsed time with engine search time.
+            return "";
         }
         if (lowerKeys.contains("time") || lowerKeys.contains("timeused")) {
             m = java.util.regex.Pattern.compile("(?i)(?:^|\\s)t([0-9]+(?::[0-9]{2})?(?:\\.[0-9]+)?)").matcher(comment);
