@@ -4750,13 +4750,24 @@ public final class TournamentActivity extends Activity {
         options.imp.comments = true;
         options.imp.variations = false;
         options.imp.nag = true;
-        if (!tree.readPGN(pgn, options)) {
+        boolean parsedByTree = false;
+        try {
+            parsedByTree = tree.readPGN(pgn, options);
+        } catch (ChessParseError parseError) {
+            // Treat a checked PGN parse failure like a false parse result and
+            // let the legal SAN fallback attempt to recover the complete line.
+            parsedByTree = false;
+        }
+        if (!parsedByTree) {
             Position fallbackRoot = standardStartPosition();
             java.util.regex.Matcher fenTag = java.util.regex.Pattern.compile(
-                    "(?im)^\\s*\\[FEN\\s+\"([^\"]+)\"\\]\\s*$").matcher(pgn);
+                    "(?im)^\\s*\\[FEN\\s+\\"([^\\"]+)\\"\\]\\s*$").matcher(pgn);
             if (fenTag.find()) {
-                try { fallbackRoot = TextIO.readFEN(fenTag.group(1)); }
-                catch (RuntimeException invalidFen) { throw new IOException("PGN contains an invalid FEN", invalidFen); }
+                try {
+                    fallbackRoot = TextIO.readFEN(fenTag.group(1));
+                } catch (ChessParseError | RuntimeException invalidFen) {
+                    throw new IOException("PGN contains an invalid FEN", invalidFen);
+                }
             }
             MirrorPgnHistory fallback = parseMirrorPgnMovetext(pgn, fallbackRoot);
             if (fallback != null && !fallback.moves.isEmpty()) return fallback;
