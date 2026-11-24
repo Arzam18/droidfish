@@ -24,6 +24,7 @@ import java.util.List;
 
 import org.petero.droidfish.ColorTheme;
 import org.petero.droidfish.PieceSet;
+import org.petero.droidfish.tournament.TournamentDiagnostics;
 import org.petero.droidfish.gamelogic.Move;
 import org.petero.droidfish.gamelogic.Piece;
 import org.petero.droidfish.gamelogic.Position;
@@ -37,6 +38,7 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Rect;
+import android.os.SystemClock;
 import android.util.AttributeSet;
 import android.view.MotionEvent;
 import android.view.View;
@@ -145,15 +147,71 @@ public abstract class ChessBoard extends View {
         AnimInfo() { startTime = -1; }
         boolean paused;
         long posHash;   // Position the animation is valid for
-        long startTime; // Time in milliseconds when animation was started
-        long stopTime;  // Time in milliseconds when animation should stop
-        long now;       // Current time in milliseconds
+        long startTime; // Monotonic uptime when animation was started
+        long stopTime;  // Monotonic uptime when animation should stop
+        long now;       // Current monotonic uptime
+        long lastFrameTime = -1;
+        long maxFrameGapMs;
+        long frameDrawStartNs = -1;
+        long maxFrameDrawMs;
+        int frameCount;
+        int slowFrameGaps;
+        int slowDrawFrames;
+        boolean frameStatsReported;
         int piece1, from1, to1, hide1;
         int piece2, from2, to2, hide2;
 
         public final boolean updateState() {
-            now = System.currentTimeMillis();
-            return animActive();
+            now = SystemClock.uptimeMillis();
+            boolean active = animActive();
+            if (active) {
+                if (lastFrameTime >= 0) {
+                    long gap = now - lastFrameTime;
+                    if (gap > maxFrameGapMs) maxFrameGapMs = gap;
+                    if (gap > 32) slowFrameGaps++;
+                }
+                lastFrameTime = now;
+                frameDrawStartNs = System.nanoTime();
+                frameCount++;
+            } else if (!paused) {
+                reportFrameStats();
+            }
+            return active;
+        }
+
+        private void resetFrameStats() {
+            lastFrameTime = -1;
+            maxFrameGapMs = 0;
+            frameDrawStartNs = -1;
+            maxFrameDrawMs = 0;
+            frameCount = 0;
+            slowFrameGaps = 0;
+            slowDrawFrames = 0;
+            frameStatsReported = false;
+        }
+
+        void finishFrame() {
+            if (frameDrawStartNs < 0) return;
+            long drawMs = (System.nanoTime() - frameDrawStartNs) / 1_000_000L;
+            frameDrawStartNs = -1;
+            if (drawMs > maxFrameDrawMs) maxFrameDrawMs = drawMs;
+            if (drawMs > 16) slowDrawFrames++;
+        }
+
+        private void reportFrameStats() {
+            if (frameStatsReported || startTime < 0) return;
+            frameStatsReported = true;
+            // Keep diagnostics quiet for smooth animations; log only frame drops or
+            // slow board draws so a user-provided error log stays useful.
+            if (slowFrameGaps > 0 || slowDrawFrames > 0 || frameCount < 7) {
+                TournamentDiagnostics.record("ANIMATION", "move_animation_frame_stats",
+                        "board=" + ChessBoard.this.getClass().getSimpleName() +
+                        " expectedDurationMs=" + (stopTime - startTime) +
+                        " frames=" + frameCount + " frameGapsOver32ms=" + slowFrameGaps +
+                        " worstFrameGapMs=" + maxFrameGapMs + " slowDrawFramesOver16ms=" + slowDrawFrames +
+                        " worstDrawMs=" + maxFrameDrawMs +
+                        " positionValid=" + (posHash == pos.zobristHash()));
+            }
         }
         private boolean animActive() {
             return !paused && startTime >= 0 && now < stopTime && posHash == pos.zobristHash();
@@ -210,6 +268,7 @@ public abstract class ChessBoard extends View {
     public final void setAnimMove(Position sourcePos, Move move, boolean forward, int durationMs) {
         if (sourcePos == null || move == null) return;
         anim.startTime = -1;
+        anim.resetFrameStats();
         anim.paused = true; // Animation starts at next position update
         if (forward) {
             // The animation will be played when pos == targetPos
@@ -229,7 +288,7 @@ public abstract class ChessBoard extends View {
             animTime = (int)Math.round(t);
         }
         if (animTime > 0) {
-            anim.startTime = System.currentTimeMillis();
+            anim.startTime = SystemClock.uptimeMillis();
             anim.stopTime = anim.startTime + animTime;
             anim.piece2 = Piece.EMPTY;
             anim.from2 = -1;
@@ -426,8 +485,10 @@ public abstract class ChessBoard extends View {
         final int width = getWidth();
         final int height = getHeight();
         sqSize = Math.min(getSqSizeW(width), getSqSizeH(height));
-        if (sqSize <= 0)
+        if (sqSize <= 0) {
+            anim.finishFrame();
             return;
+        }
         labelPaint.setTextSize(sqSize/4.0f);
         decorationPaint.setTextSize(sqSize/3.0f);
         computeOrigin(width, height);
@@ -443,7 +504,7 @@ public abstract class ChessBoard extends View {
                 drawSquareUnderlay(canvas, sq, xCrd, yCrd);
                 if (!(animActive && anim.squareHidden(sq) || sq == dragSquare)) {
                     int p = pos.getPiece(sq);
-                    drawPiece(canvas, xCrd, yCrd, p);
+                    if (p != Piece.EMPTY) drawPiece(canvas, xCrd, yCrd, p);
                 }
                 if (drawSquareLabels) {
                     if (x == (flipped ? 7 : 0)) {
@@ -479,6 +540,7 @@ public abstract class ChessBoard extends View {
             float yCrd = dragYCrd + h;
             drawDragMarker(canvas, xCrd, yCrd);
         }
+        anim.finishFrame();
 
 //      long t1 = System.currentTimeMillis();
 //      System.out.printf("draw: %d\n", t1-t0);
@@ -545,7 +607,7 @@ public abstract class ChessBoard extends View {
     abstract protected void drawExtraSquares(Canvas canvas);
 
     protected final void drawPiece(Canvas canvas, int xCrd, int yCrd, int p) {
-        if (blindMode)
+        if (blindMode || p == Piece.EMPTY)
             return;
 
         Bitmap bm = PieceSet.instance().getPieceBitmap(p, sqSize);
