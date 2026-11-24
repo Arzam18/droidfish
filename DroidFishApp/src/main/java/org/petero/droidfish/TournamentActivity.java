@@ -4761,7 +4761,7 @@ public final class TournamentActivity extends Activity {
         if (!parsedByTree) {
             Position fallbackRoot = standardStartPosition();
             java.util.regex.Matcher fenTag = java.util.regex.Pattern.compile(
-                    "(?im)^\\s*\\[FEN\\s+\\"([^\\"]+)\\"\\]\\s*$").matcher(pgn);
+                    "(?im)^\\s*\\[FEN\\s+\"([^\"]+)\"\\]\\s*$").matcher(pgn);
             if (fenTag.find()) {
                 try {
                     fallbackRoot = TextIO.readFEN(fenTag.group(1));
