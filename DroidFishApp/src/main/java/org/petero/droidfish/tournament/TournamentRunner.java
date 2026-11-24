@@ -1335,6 +1335,29 @@ public final class TournamentRunner {
         }
     }
 
+    private void checkEvaluationDrawRule() {
+        // This callback runs on engineRuleExecutor, after the originating Player
+        // monitor has been released. Take the Runner lock for a consistent game,
+        // clock and evaluation snapshot, preserving the Runner -> Player lock order.
+        synchronized (TournamentRunner.this) {
+            if (!drawRulesEnabled || stopped || finished || paused || game == null || pairing == null) return;
+            double w = latestWhiteEvalPawns, b = latestBlackEvalPawns;
+            if (!Double.isFinite(w) || !Double.isFinite(b)) return;
+            int fullMove = game.currPos().fullMoveCounter;
+            if (fullMove < ruleStartFullMove || fullMove == evalDrawLastFullMove) return;
+            // Count one completed full move only when both independent engine evaluations are in range.
+            if (Math.abs(w) <= evalDrawScore && Math.abs(b) <= evalDrawScore) evalDrawConsecutive++;
+            else evalDrawConsecutive = 0;
+            evalDrawLastFullMove = fullMove;
+            if (evalDrawConsecutive < evalDrawCondition) return;
+            turnGeneration++; if (clock != null) clock.pause();
+            whitePlayer.stopSearch(); blackPlayer.stopSearch(); humanAdjudication = false;
+            game.adjudicateTournament("1/2-1/2");
+            finishCurrentGame(TournamentManager.Outcome.DRAW, String.format(java.util.Locale.US,
+                    "evaluation draw: both engines within ±%.2f for %d consecutive full moves", evalDrawScore, evalDrawCondition));
+        }
+    }
+
     private final class EngineListener implements SearchListener {
         private final boolean white;
         private volatile String diagnosticContext = "";
@@ -1517,28 +1540,6 @@ public final class TournamentRunner {
                 pendingPvNeedsFormatting = false;
                 hasCurrentSearchInfo = true;
                 publishAnalysis(false);
-            }
-        }
-        private void checkEvaluationDrawRule() {
-            // This callback runs on engineRuleExecutor, after the originating Player
-            // monitor has been released. Take the Runner lock for a consistent game,
-            // clock and evaluation snapshot, preserving the Runner -> Player lock order.
-            synchronized (TournamentRunner.this) {
-                if (!drawRulesEnabled || stopped || finished || paused || game == null || pairing == null) return;
-                double w = latestWhiteEvalPawns, b = latestBlackEvalPawns;
-                if (!Double.isFinite(w) || !Double.isFinite(b)) return;
-                int fullMove = game.currPos().fullMoveCounter;
-                if (fullMove < ruleStartFullMove || fullMove == evalDrawLastFullMove) return;
-                // Count one completed full move only when both independent engine evaluations are in range.
-                if (Math.abs(w) <= evalDrawScore && Math.abs(b) <= evalDrawScore) evalDrawConsecutive++;
-                else evalDrawConsecutive = 0;
-                evalDrawLastFullMove = fullMove;
-                if (evalDrawConsecutive < evalDrawCondition) return;
-                turnGeneration++; if (clock != null) clock.pause();
-                whitePlayer.stopSearch(); blackPlayer.stopSearch(); humanAdjudication = false;
-                game.adjudicateTournament("1/2-1/2");
-                finishCurrentGame(TournamentManager.Outcome.DRAW, String.format(java.util.Locale.US,
-                        "evaluation draw: both engines within ±%.2f for %d consecutive full moves", evalDrawScore, evalDrawCondition));
             }
         }
 
