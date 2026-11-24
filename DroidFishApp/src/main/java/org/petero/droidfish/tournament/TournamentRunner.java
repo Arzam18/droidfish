@@ -24,6 +24,11 @@ import org.json.JSONException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Runs a saved tournament with two independent UCI engine processes.
@@ -93,7 +98,19 @@ public final class TournamentRunner {
     private volatile CetClock clock;
     private TournamentManager.Pairing pairing;
     private TournamentManager.Engine whiteEngine, blackEngine;
-    private final Map<String, Map<String, String>> tournamentUciOptionValues = new HashMap<>();
+    // UCI option snapshots are read from engine monitor callbacks while those callbacks
+    // still hold the DroidComputerPlayer monitor. A concurrent map avoids acquiring the
+    // runner monitor in the reverse (Player -> Runner) lock order.
+    private final ConcurrentMap<String, ConcurrentMap<String, String>> tournamentUciOptionValues =
+            new ConcurrentHashMap<>();
+    // Rule callbacks can originate inside DroidComputerPlayer.processEngineOutput(),
+    // which owns the player monitor. Run lock-taking tournament adjudication only after
+    // returning from that callback so the lock order stays Runner -> Player, never both.
+    private final ExecutorService engineRuleExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread thread = new Thread(r, "CET-Tournament-Rule-Checks");
+        thread.setDaemon(true);
+        return thread;
+    });
     private int whiteSearchId, blackSearchId;
     private volatile int activeWhiteId, activeBlackId;
     private long turnGeneration;
@@ -328,7 +345,8 @@ public final class TournamentRunner {
         }
     }
 
-    public synchronized boolean isPaused() { return paused; }
+    /** Lock-free state read for UI callbacks; paused is volatile and needs no runner monitor. */
+    public boolean isPaused() { return paused; }
     public boolean isFinished() { return finished; }
 
     /** Return the UCI options for the explicitly selected side, not the side to move. */
@@ -343,11 +361,8 @@ public final class TournamentRunner {
                                                                 Map<String, String> options) {
         TournamentManager.Engine engine = whiteSide ? whiteEngine : blackEngine;
         if (engineId == null || engine == null || !engineId.equals(engine.id) || options == null) return;
-        Map<String, String> saved = tournamentUciOptionValues.get(engineId);
-        if (saved == null) {
-            saved = new HashMap<>();
-            tournamentUciOptionValues.put(engineId, saved);
-        }
+        ConcurrentMap<String, String> saved = tournamentUciOptionValues.computeIfAbsent(
+                engineId, ignored -> new ConcurrentHashMap<>());
         saved.putAll(options);
         (whiteSide ? whitePlayer : blackPlayer).setEngineUCIOptions(options);
     }
@@ -385,6 +400,7 @@ public final class TournamentRunner {
         if (clock != null) clock.pause();
         whitePlayer.shutdownEngine();
         blackPlayer.shutdownEngine();
+        engineRuleExecutor.shutdown();
     }
 
     /** Navigate completed plies while paused; -1 means return to live position. */
@@ -1241,6 +1257,21 @@ public final class TournamentRunner {
         return "1-0".equals(result) ? eval >= autoWinThreshold : eval <= -autoWinThreshold;
     }
 
+    private void scheduleEngineRuleChecks(boolean reportingWhiteEngine, long reportingPositionHash,
+                                          boolean checkEvaluationDraw) {
+        if (!fastWinEnabled && (!drawRulesEnabled || !checkEvaluationDraw)) return;
+        try {
+            engineRuleExecutor.execute(() -> {
+                if (fastWinEnabled)
+                    checkFastWinRule(reportingWhiteEngine, reportingPositionHash);
+                if (drawRulesEnabled && checkEvaluationDraw)
+                    checkEvaluationDrawRule();
+            });
+        } catch (RejectedExecutionException ignored) {
+            // The runner has been stopped; queued callbacks must not restart rule work.
+        }
+    }
+
     private void checkFastWinRule(boolean reportingWhiteEngine, long reportingPositionHash) {
         synchronized (TournamentRunner.this) {
             if (!fastWinEnabled || stopped || finished || paused || finalizingGame || game == null || pairing == null) return;
@@ -1334,6 +1365,14 @@ public final class TournamentRunner {
         private volatile boolean hasCurrentSearchInfo;
         private volatile boolean hasCurrentSearchOutput;
         private volatile boolean hasCurrentSearchStats;
+        // Per-field validity survives beginSearch(). A new search may initially
+        // report only depth or an empty/book line; that must not erase the last
+        // usable panel values with n/a placeholders.
+        private volatile boolean hasValidSearchSnapshot;
+        private volatile boolean hasValidNodes;
+        private volatile boolean hasValidNps;
+        private volatile boolean hasValidTime;
+        private volatile boolean hasValidHash;
         // Keep the newest raw PV and format it only when the UI snapshot is due.
         // PV callbacks can arrive much faster than a human can read them.
         private Position pendingPvPosition;
@@ -1345,15 +1384,9 @@ public final class TournamentRunner {
         private static final long ANALYSIS_PUBLISH_INTERVAL_NS = 250_000_000L;
 
         void beginSearch() {
-            lastDepth = 0;
-            lastNodes = 0;
-            lastNps = 0;
-            lastSelDepth = 0;
-            lastHashFull = 0;
-            lastTimeMs = 0;
-            hasNativeWdl = false;
-            lastWdlWin = lastWdlDraw = lastWdlLoss = 0;
-            lastPv = "";
+            // Keep the most recent valid panel values visible while this engine's
+            // next turn is starting. Current-search flags are reset, but cached PV,
+            // score, depth and statistics are replaced only by fresh engine output.
             hasCurrentSearchOutput = false;
             hasCurrentSearchStats = false;
             pendingPvPosition = null;
@@ -1368,8 +1401,16 @@ public final class TournamentRunner {
         }
 
         String snapshotForMove() {
-            if (!hasCurrentSearchOutput && !hasCurrentSearchInfo)
+            // If this search ended before it produced any usable PV or search stats
+            // (for example a book move), preserve the last valid engine panel output
+            // rather than replacing it with an n/a-only snapshot.
+            if (!hasCurrentSearchOutput && !hasCurrentSearchStats) {
+                synchronized (analysisHistoryLock) {
+                    String previous = white ? latestWhiteAnalysis : latestBlackAnalysis;
+                    if (previous != null && !previous.trim().isEmpty()) return previous;
+                }
                 return "Eval: n/a Depth: n/a Nodes: n/a NPS: n/a";
+            }
             // Flush the most recent depth/PV/stats before writing the PGN comment.
             // Engines can publish valid depth/nodes/NPS/time without a usable PV;
             // those measurements still belong in PGN and the tournament graph.
@@ -1382,17 +1423,31 @@ public final class TournamentRunner {
         }
         @Override public void notifyDepth(int id, int depth) {
             if (!isCurrentSearch(id)) return;
-            lastDepth = depth;
+            if (depth > 0) lastDepth = depth;
             hasCurrentSearchInfo = true;
-            publishAnalysis(false);
+            // Depth may be the first partial info token for a new search. Do not
+            // publish a header full of n/a fields until PV or numeric stats arrive.
         }
         @Override public void notifyCurrMove(int id, Position pos, Move move, int moveNr) { }
         @Override public void notifyPV(int id, Position pos, ArrayList<PvInfo> pvInfo, Move ponderMove) {
             if (!isCurrentSearch(id)) return;
-            if (pvInfo != null && !pvInfo.isEmpty()) {
-                PvInfo pv = pvInfo.get(0);
-                if (pv == null) return;
+            if (pvInfo == null || pvInfo.isEmpty()) return;
+            PvInfo pv = pvInfo.get(0);
+            if (pv == null) return;
+
+            boolean hasUsablePv = pv.pv != null && !pv.pv.isEmpty();
+            boolean hasNewMeasurement = false;
+            if (pv.hasWdl) {
+                hasNativeWdl = true;
+                lastWdlWin = pv.wdlWin;
+                lastWdlDraw = pv.wdlDraw;
+                lastWdlLoss = pv.wdlLoss;
+                hasNewMeasurement = true;
+            }
+
+            if (hasUsablePv) {
                 hasCurrentSearchOutput = true;
+                hasValidSearchSnapshot = true;
 
                 // Retain every newest engine measurement and evaluation for rules
                 // and the final PGN snapshot, but defer expensive SAN formatting.
@@ -1400,25 +1455,22 @@ public final class TournamentRunner {
                 double evalPawns = pv.isMate ? (whitePerspectiveScore >= 0 ? 1000.0 : -1000.0)
                         : whitePerspectiveScore / 100.0;
                 if (white) latestWhiteEvalPawns = evalPawns; else latestBlackEvalPawns = evalPawns;
-                TournamentRunner.this.checkFastWinRule(white, pos == null ? 0L : pos.zobristHash());
-                if (!pv.isMate) checkEvaluationDrawRule();
-                lastDepth = pv.depth;
-                lastNodes = pv.nodes;
-                lastNps = pv.nps;
-                lastSelDepth = pv.seldepth;
-                lastHashFull = pv.hash;
-                lastTimeMs = pv.time;
+                // processEngineOutput() invokes SearchListener while holding the player
+                // monitor. Do not acquire the runner monitor here; the runner can be
+                // dispatching the next search while holding its own monitor and waiting
+                // for this player. Queue both rules after this callback returns.
+                scheduleEngineRuleChecks(white, pos == null ? 0L : pos.zobristHash(), !pv.isMate);
+                if (pv.depth > 0) lastDepth = pv.depth;
+                if (pv.nodes > 0) { lastNodes = pv.nodes; hasValidNodes = true; }
+                if (pv.nps > 0) { lastNps = pv.nps; hasValidNps = true; }
+                if (pv.seldepth > 0) lastSelDepth = pv.seldepth;
+                if (pv.hash > 0) { lastHashFull = pv.hash; hasValidHash = true; }
+                if (pv.time > 0) { lastTimeMs = pv.time; hasValidTime = true; }
                 hasCurrentSearchStats = true;
-                if (pv.hasWdl) {
-                    hasNativeWdl = true;
-                    lastWdlWin = pv.wdlWin;
-                    lastWdlDraw = pv.wdlDraw;
-                    lastWdlLoss = pv.wdlLoss;
-                }
+                if (pv.hasWdl) hasNativeWdl = true;
                 // DroidComputerPlayer creates a fresh PvInfo snapshot for
                 // each UCI info line. Retain that object directly instead of cloning
                 // the Position and allocating another copy of every PV Move here.
-                // The final best-move snapshot is formatted synchronously below.
                 pendingPvPosition = pos;
                 pendingPvInfo = pv;
                 // Tournament play is single-PV. Discard any secondary lines that an
@@ -1429,19 +1481,37 @@ public final class TournamentRunner {
                 pendingVariationHintsNeedsPublish = true;
                 pendingPvNeedsFormatting = true;
                 hasCurrentSearchInfo = true;
-                publishAnalysis(false);
+                hasNewMeasurement = true;
+            } else if (pv.hasWdl) {
+                // A WDL-only info record is still useful, but it has no new score or
+                // PV. Keep the previous evaluation, depth and variation intact.
+                hasCurrentSearchStats = true;
+                hasCurrentSearchInfo = true;
+                hasValidSearchSnapshot = true;
             }
+            if (hasNewMeasurement) publishAnalysis(false);
         }
         @Override public void notifyStats(int id, long nodes, int nps, long tbHits, int hash, int time, int seldepth) {
             if (!isCurrentSearch(id)) return;
-            lastNodes = nodes; lastNps = nps; lastSelDepth = seldepth; lastHashFull = hash; lastTimeMs = time;
+            boolean hasNewMeasurement = false;
+            if (nodes > 0) { lastNodes = nodes; hasValidNodes = true; hasNewMeasurement = true; }
+            if (nps > 0) { lastNps = nps; hasValidNps = true; hasNewMeasurement = true; }
+            if (seldepth > 0) lastSelDepth = seldepth;
+            if (hash > 0) { lastHashFull = hash; hasValidHash = true; hasNewMeasurement = true; }
+            if (time > 0) { lastTimeMs = time; hasValidTime = true; hasNewMeasurement = true; }
+            if (!hasNewMeasurement) return;
             hasCurrentSearchInfo = true;
             hasCurrentSearchStats = true;
+            hasValidSearchSnapshot = true;
             publishAnalysis(false);
         }
         @Override public void notifyBookInfo(int id, String bookInfo, ArrayList<Move> moveList, String eco, int distToEcoTree) {
             if (!isCurrentSearch(id)) return;
             if (bookInfo != null && !bookInfo.isEmpty()) {
+                // Show book information only before this engine has produced any
+                // measured analysis. On later turns, a book/empty callback must not
+                // replace the last valid evaluation and statistics with n/a values.
+                if (hasValidSearchSnapshot && !lastPv.startsWith("Book:")) return;
                 hasCurrentSearchOutput = true;
                 lastPv = "Book: " + bookInfo;
                 pendingPvNeedsFormatting = false;
@@ -1450,23 +1520,25 @@ public final class TournamentRunner {
             }
         }
         private void checkEvaluationDrawRule() {
-            if (!drawRulesEnabled || stopped || finished || paused || game == null || pairing == null) return;
-            double w = latestWhiteEvalPawns, b = latestBlackEvalPawns;
-            if (!Double.isFinite(w) || !Double.isFinite(b)) return;
-            int fullMove = game.currPos().fullMoveCounter;
-            if (fullMove < ruleStartFullMove || fullMove == evalDrawLastFullMove) return;
-            // Count one completed full move only when both independent engine evaluations are in range.
-            if (Math.abs(w) <= evalDrawScore && Math.abs(b) <= evalDrawScore) evalDrawConsecutive++;
-            else evalDrawConsecutive = 0;
-            evalDrawLastFullMove = fullMove;
-            if (evalDrawConsecutive < evalDrawCondition) return;
+            // This callback runs on engineRuleExecutor, after the originating Player
+            // monitor has been released. Take the Runner lock for a consistent game,
+            // clock and evaluation snapshot, preserving the Runner -> Player lock order.
             synchronized (TournamentRunner.this) {
-                if (stopped || finished || paused || game == null || pairing == null) return;
+                if (!drawRulesEnabled || stopped || finished || paused || game == null || pairing == null) return;
+                double w = latestWhiteEvalPawns, b = latestBlackEvalPawns;
+                if (!Double.isFinite(w) || !Double.isFinite(b)) return;
+                int fullMove = game.currPos().fullMoveCounter;
+                if (fullMove < ruleStartFullMove || fullMove == evalDrawLastFullMove) return;
+                // Count one completed full move only when both independent engine evaluations are in range.
+                if (Math.abs(w) <= evalDrawScore && Math.abs(b) <= evalDrawScore) evalDrawConsecutive++;
+                else evalDrawConsecutive = 0;
+                evalDrawLastFullMove = fullMove;
+                if (evalDrawConsecutive < evalDrawCondition) return;
                 turnGeneration++; if (clock != null) clock.pause();
                 whitePlayer.stopSearch(); blackPlayer.stopSearch(); humanAdjudication = false;
                 game.adjudicateTournament("1/2-1/2");
                 finishCurrentGame(TournamentManager.Outcome.DRAW, String.format(java.util.Locale.US,
-                        "evaluation draw: both engines within ±%.2f for %d consecutive full moves", evalDrawScore, evalDrawConsecutive));
+                        "evaluation draw: both engines within ±%.2f for %d consecutive full moves", evalDrawScore, evalDrawCondition));
             }
         }
 
@@ -1516,16 +1588,16 @@ public final class TournamentRunner {
             } else if (!lastPv.isEmpty()) {
                 pvLine = lastPv;
             }
-            String nodes = hasCurrentSearchStats ? compactCount(lastNodes) : "n/a";
-            String nps = hasCurrentSearchStats && lastNps > 0 ? compactCount(lastNps) : "n/a";
+            String nodes = hasValidNodes ? compactCount(lastNodes) : "n/a";
+            String nps = hasValidNps ? compactCount(lastNps) : "n/a";
             String depthText = lastDepth > 0 ? Integer.toString(lastDepth) : "n/a";
             if (lastDepth > 0 && lastSelDepth > 0) depthText += "/" + lastSelDepth;
-            String timeText = hasCurrentSearchStats
+            String timeText = hasValidTime
                     ? String.format(java.util.Locale.US, "%.2fs", Math.max(0, lastTimeMs) / 1000.0) : "n/a";
             String variation = pvLine == null ? "" : pvLine.trim();
             String header = "Eval: " + score + "    Depth: " + depthText + "    Nodes: " + nodes +
                     "    NPS: " + nps + "    Time: " + timeText +
-                    (lastHashFull > 0 ? "    Hash: " + String.format(java.util.Locale.US, "%.1f%%", lastHashFull / 10.0) : "");
+                    (hasValidHash ? "    Hash: " + String.format(java.util.Locale.US, "%.1f%%", lastHashFull / 10.0) : "");
             String engineWdlLine = hasNativeWdl ? "\nEngine WDL: W: " + String.format(java.util.Locale.US, "%.1f%%", lastWdlWin / 10.0) +
                     " D: " + String.format(java.util.Locale.US, "%.1f%%", lastWdlDraw / 10.0) +
                     " L: " + String.format(java.util.Locale.US, "%.1f%%", lastWdlLoss / 10.0) : "";
@@ -1625,18 +1697,15 @@ public final class TournamentRunner {
             // settings (with tournament defaults only for options the user has not changed).
             TournamentManager.Engine engine = white ? whiteEngine : blackEngine;
             if (engine == null) return;
-            Map<String, String> optionSnapshot;
-            synchronized (TournamentRunner.this) {
-                Map<String, String> options = tournamentUciOptionValues.get(engine.id);
-                if (options == null) {
-                    options = new HashMap<>();
-                    tournamentUciOptionValues.put(engine.id, options);
-                }
-                options.putIfAbsent("Threads", "1");
-                options.putIfAbsent("Hash", "16");
-                options.putIfAbsent("Ponder", "false");
-                optionSnapshot = new HashMap<>(options);
-            }
+            ConcurrentMap<String, String> options = tournamentUciOptionValues.computeIfAbsent(
+                    engine.id, ignored -> new ConcurrentHashMap<>());
+            options.putIfAbsent("Threads", "1");
+            options.putIfAbsent("Hash", "16");
+            options.putIfAbsent("Ponder", "false");
+            // Snapshot without taking TournamentRunner.this while the engine monitor
+            // is held. This removes the Runner <-> DroidComputerPlayer lock inversion
+            // observed in the freeze log.
+            Map<String, String> optionSnapshot = new HashMap<>(options);
             (white ? whitePlayer : blackPlayer).setEngineUCIOptions(optionSnapshot);
         }
     }
