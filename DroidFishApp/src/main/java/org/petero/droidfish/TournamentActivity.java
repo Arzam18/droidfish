@@ -4084,7 +4084,8 @@ public final class TournamentActivity extends Activity {
             @Override public boolean onPreDraw() {
                 if (movesScroll.getViewTreeObserver().isAlive())
                     movesScroll.getViewTreeObserver().removeOnPreDrawListener(this);
-                View content = movesScroll.getChildAt(0);
+                View contentView = movesScroll.getChildAt(0);
+                ViewGroup content = contentView instanceof ViewGroup ? (ViewGroup) contentView : null;
                 int maxY = content == null ? 0 : Math.max(0, content.getHeight() - movesScroll.getHeight());
                 int targetY;
                 if (mirrorReplayMode && content != null) {
