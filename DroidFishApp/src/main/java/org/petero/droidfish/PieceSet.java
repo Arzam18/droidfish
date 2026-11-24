@@ -43,6 +43,8 @@ import java.io.InputStream;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -53,11 +55,15 @@ public class PieceSet {
 
     private HashMap<String,Integer> nameToPieceType;
     private SVG[] svgTable = new SVG[Piece.nPieceTypes];
-    private Bitmap[] bitmapTable = new Bitmap[Piece.nPieceTypes];
+    // Keep a tiny LRU of rasterized piece sets. The main and Mirror boards may
+    // alternate between different square sizes; rebuilding all SVG bitmaps on
+    // every size switch creates avoidable frame-time spikes during move animation.
+    private static final int MAX_BITMAP_SIZE_CACHE = 2;
+    private final LinkedHashMap<Integer, Bitmap[]> bitmapCache =
+            new LinkedHashMap<Integer, Bitmap[]>(4, 0.75f, true);
     private Set<String> availPieceSets;
     private String defaultPieceSet = "chesscases";
     private String cachedPieceSet = defaultPieceSet;
-    private int cachedSquareSize = -1;
     private int cachedWhiteColor = 0xffffffff;
     private int cachedBlackColor = 0xff000000;
 
@@ -96,7 +102,7 @@ public class PieceSet {
     }
 
     /** Re-parse SVG data if piece properties have changed. */
-    final void readPrefs(SharedPreferences settings) {
+    final synchronized void readPrefs(SharedPreferences settings) {
         String pieceSet = settings.getString("viewPieceSet", cachedPieceSet);
         boolean modified = !pieceSet.equals(cachedPieceSet);
         if (modified) {
@@ -111,18 +117,23 @@ public class PieceSet {
             recycleBitmaps();
             cachedWhiteColor = whiteColor;
             cachedBlackColor = blackColor;
-            cachedSquareSize = -1;
         }
     }
 
     /** Return a bitmap for the specified piece type and square size. */
-    public Bitmap getPieceBitmap(int pType, int sqSize) {
-        if (sqSize != cachedSquareSize) {
-            recycleBitmaps();
-            createBitmaps(sqSize);
-            cachedSquareSize = sqSize;
+    public synchronized Bitmap getPieceBitmap(int pType, int sqSize) {
+        if (pType < 0 || pType >= Piece.nPieceTypes || sqSize <= 0) return null;
+        Bitmap[] bitmaps = bitmapCache.get(sqSize);
+        if (bitmaps == null) {
+            bitmaps = createBitmaps(sqSize);
+            bitmapCache.put(sqSize, bitmaps);
+            while (bitmapCache.size() > MAX_BITMAP_SIZE_CACHE) {
+                Map.Entry<Integer, Bitmap[]> eldest = bitmapCache.entrySet().iterator().next();
+                recycleBitmaps(eldest.getValue());
+                bitmapCache.remove(eldest.getKey());
+            }
         }
-        return bitmapTable[pType];
+        return bitmaps[pType];
     }
 
     private void parseSvgData() {
@@ -163,16 +174,22 @@ public class PieceSet {
         return new ZipInputStream(is);
     }
 
-    private void recycleBitmaps() {
-        for (int i = 0; i < Piece.nPieceTypes; i++) {
-            if (bitmapTable[i] != null) {
-                bitmapTable[i].recycle();
-                bitmapTable[i] = null;
+    private synchronized void recycleBitmaps() {
+        for (Bitmap[] bitmaps : bitmapCache.values()) recycleBitmaps(bitmaps);
+        bitmapCache.clear();
+    }
+
+    private void recycleBitmaps(Bitmap[] bitmaps) {
+        for (int i = 0; i < bitmaps.length; i++) {
+            if (bitmaps[i] != null) {
+                bitmaps[i].recycle();
+                bitmaps[i] = null;
             }
         }
     }
 
-    private void createBitmaps(int sqSize) {
+    private Bitmap[] createBitmaps(int sqSize) {
+        Bitmap[] bitmaps = new Bitmap[Piece.nPieceTypes];
         Paint colorPaint = new Paint();
         {
             float[] f = new float[3];
@@ -228,10 +245,11 @@ public class PieceSet {
                 if (alphaPaint != null)
                     canvas.drawBitmap(svgBM, scaleMat, alphaPaint);
 
-                bitmapTable[i] = bm;
+                bitmaps[i] = bm;
             }
         }
 
         svgBM.recycle();
+        return bitmaps;
     }
 }

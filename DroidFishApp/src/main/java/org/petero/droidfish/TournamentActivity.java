@@ -330,7 +330,7 @@ public final class TournamentActivity extends Activity {
     private EditText drawMoveRuleInput, drawRepetitionInput, drawMaximumInput, ruleStartMoveInput, evalDrawScoreInput, evalDrawConditionInput;
 
     private CheckBox repeatOpeningCheck;
-    private Button startButton, resumeButton, stopButton, playPauseButton;
+    private Button startButton, resumeButton, completedButton, stopButton, playPauseButton;
     private boolean autoPaused;
     private boolean activityVisible = true;
     private TournamentRunner runner;
@@ -879,7 +879,8 @@ public final class TournamentActivity extends Activity {
         applyTimers.setOnClickListener(v -> applyAdvancedTimers(true));
 
         startButton = new Button(this); startButton.setText("Start tournament"); root.addView(startButton, fullWidth());
-        resumeButton = new Button(this); resumeButton.setText("Resume saved tournament"); root.addView(resumeButton, fullWidth());
+        resumeButton = new Button(this); resumeButton.setText("Active tournaments · Resume / View"); root.addView(resumeButton, fullWidth());
+        completedButton = new Button(this); completedButton.setText("Completed tournaments · View only"); root.addView(completedButton, fullWidth());
         Button importTournamentButton = new Button(this);
         importTournamentButton.setText("Import tournament JSON");
         root.addView(importTournamentButton, fullWidth());
@@ -910,6 +911,7 @@ public final class TournamentActivity extends Activity {
         standingsText = text(""); root.addView(standingsText, fullWidth());
         startButton.setOnClickListener(v -> startTournament());
         resumeButton.setOnClickListener(v -> chooseSavedTournament());
+        completedButton.setOnClickListener(v -> chooseCompletedTournaments());
         stopButton.setOnClickListener(v -> stopAndSaveTournament());
         // Horizontal swipes no longer navigate between setup and tournament screens.
         scroll.setOnTouchListener((v, event) -> false);
@@ -6530,20 +6532,25 @@ public final class TournamentActivity extends Activity {
     }
 
     private void renderMirrorInfoSection() {
-        Button tournamentShortcut = new Button(this);
-        tournamentShortcut.setText("TOURNAMENT · BROWSE / RESUME SAVED EVENTS");
-        tournamentShortcut.setOnClickListener(v -> chooseSavedTournament());
-        mirrorSectionHost.addView(tournamentShortcut, fullWidth());
+        Button activeShortcut = new Button(this);
+        activeShortcut.setText("ACTIVE TOURNAMENTS · RESUME / VIEW");
+        activeShortcut.setOnClickListener(v -> chooseSavedTournament());
+        mirrorSectionHost.addView(activeShortcut, fullWidth());
+        Button completedShortcut = new Button(this);
+        completedShortcut.setText("COMPLETED TOURNAMENTS · VIEW ONLY");
+        completedShortcut.setOnClickListener(v -> chooseCompletedTournaments());
+        mirrorSectionHost.addView(completedShortcut, fullWidth());
         TournamentManager t = activeTournamentManager;
         if (t == null) {
-            TextView empty = text("No tournament loaded. Select Tournament above to browse, resume, or review a saved event.");
+            TextView empty = text("No tournament loaded. Choose Active Tournaments to resume an event, or Completed Tournaments to view a read-only archive.");
             empty.setTextColor(0xFFE0E0E0);
             empty.setPadding(dp(10), dp(12), dp(10), dp(8));
             mirrorSectionHost.addView(empty, fullWidth());
             return;
         }
         StringBuilder info = new StringBuilder();
-        info.append(t.title()).append("\n\n");
+        info.append(t.title()).append("\n");
+        info.append(t.isComplete() ? "STATUS · COMPLETED — READ ONLY\n\n" : "STATUS · ACTIVE — RESUMABLE\n\n");
         info.append("FORMAT\n").append(t.format().name().replace('_', ' ')).append("\n\n");
         info.append("PROGRESS\n").append(t.completedGamesCount()).append(" / ").append(t.pairings().size())
                 .append(" games completed\n").append("Engines: ").append(t.engines().size()).append("\n\n");
@@ -9561,17 +9568,52 @@ public final class TournamentActivity extends Activity {
         return stem.replace('_', ' ') + sequence;
     }
 
+    /** Active events are the only tournaments offered for resuming. */
     private void chooseSavedTournament() {
+        chooseTournamentList(false);
+    }
+
+    /** Completed archives are exposed through a separate, read-only picker. */
+    private void chooseCompletedTournaments() {
+        chooseTournamentList(true);
+    }
+
+    private void chooseTournamentList(boolean completedOnly) {
         if (tournamentLoadInProgress || tournamentReviewPreparationInProgress) {
             Toast.makeText(this, "Tournament data is still loading", Toast.LENGTH_SHORT).show();
             return;
         }
-        List<String> files = TournamentManager.savedTournamentFiles(this);
-        if (files.isEmpty()) { Toast.makeText(this, "No saved tournaments", Toast.LENGTH_SHORT).show(); return; }
+        // Classify older single-file snapshots on a worker before presenting the
+        // split lists. This also moves historical completed events into ZIP archives.
+        if (runner == null && TournamentManager.hasLegacyTournamentsToMigrate(this)) {
+            tournamentLoadInProgress = true;
+            final ProgressDialog progress = new ProgressDialog(this);
+            progress.setMessage("Organizing saved tournaments…");
+            progress.setIndeterminate(true);
+            progress.setCancelable(false);
+            progress.show();
+            new Thread(() -> {
+                TournamentManager.migrateLegacyTournaments(this);
+                runOnUiThread(() -> {
+                    progress.dismiss();
+                    tournamentLoadInProgress = false;
+                    if (!isFinishing()) showTournamentList(completedOnly);
+                });
+            }, "tournament-legacy-migration").start();
+            return;
+        }
+        showTournamentList(completedOnly);
+    }
 
-        // Listing is intentionally metadata-only. Do not restore/parse every large
-        // JSON snapshot just to label this menu; restore only the entry selected.
-        // In particular, restore() may repair a private copy or migrate legacy data.
+    private void showTournamentList(boolean completedOnly) {
+        List<String> files = completedOnly ? TournamentManager.completedTournamentFiles(this) :
+                TournamentManager.activeTournamentFiles(this);
+        if (files.isEmpty()) {
+            Toast.makeText(this, completedOnly ? "No completed tournaments" : "No active tournaments", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        // Listing is metadata-only. Restore is performed only after selection.
         final ArrayList<SavedTournamentEntry> entries = new ArrayList<>();
         String[] labels = new String[files.size()];
         for (int i = 0; i < files.size(); i++) {
@@ -9580,11 +9622,12 @@ public final class TournamentActivity extends Activity {
             entries.add(entry);
             labels[i] = entry.label;
         }
-        new AlertDialog.Builder(this).setTitle("Saved tournaments")
+        String title = completedOnly ? "Completed tournaments · View only" : "Active tournaments · Resume / View";
+        new AlertDialog.Builder(this).setTitle(title)
             .setItems(labels, (dialog, which) -> {
                 SavedTournamentEntry entry = entries.get(which);
                 if (runner != null) {
-                    if (activeTournamentManager != null &&
+                    if (!completedOnly && activeTournamentManager != null &&
                             entry.fileName.equals(activeTournamentManager.savedFileName())) {
                         setContentView(isMirrorShowing() ? mirrorView : playView);
                     } else {
@@ -9630,12 +9673,13 @@ public final class TournamentActivity extends Activity {
     }
 
     private void showSavedTournamentActions(String fileName, TournamentManager saved) {
-        final String[] actions = saved.isComplete()
-                ? new String[]{"View completed tournament", "Load setup", "Delete tournament"}
+        final boolean completedArchive = TournamentManager.isCompletedTournament(this, fileName) || saved.isComplete();
+        final String[] actions = completedArchive
+                ? new String[]{"View completed tournament"}
                 : new String[]{"Resume tournament", "View tournament", "Delete tournament"};
         new AlertDialog.Builder(this).setTitle(saved.title()).setItems(actions, (dialog, which) -> {
             if (which == 0) {
-                if (saved.isComplete()) {
+                if (completedArchive) {
                     showSavedTournamentReview(saved);
                 } else {
                     // Resume is a continuation, not a request to open the review UI.
@@ -9649,17 +9693,9 @@ public final class TournamentActivity extends Activity {
                     savedTournamentReviewMode = false;
                     launchTournament(saved);
                 }
-            } else if (which == 1) {
-                if (saved.isComplete()) {
-                    loadTournamentSetup(saved);
-                    savedTournamentReviewMode = false;
-                    boardSelectionActive = false;
-                    setContentView(setupView);
-                    Toast.makeText(this, "Tournament settings loaded into setup.", Toast.LENGTH_LONG).show();
-                } else {
-                    showSavedTournamentReview(saved);
-                }
-            } else if (which == 2) {
+            } else if (!completedArchive && which == 1) {
+                showSavedTournamentReview(saved);
+            } else if (!completedArchive && which == 2) {
                 new AlertDialog.Builder(this).setTitle("Delete saved tournament?").setMessage(saved.title() + " will be permanently deleted.")
                     .setNegativeButton("Cancel", null).setPositiveButton("Delete", (d, w) -> {
                         try { TournamentManager.deleteSavedTournament(this, fileName); Toast.makeText(this, "Tournament deleted", Toast.LENGTH_SHORT).show(); }
@@ -10499,7 +10535,10 @@ public final class TournamentActivity extends Activity {
                 final org.petero.droidfish.gamelogic.Move moveToHighlight = lastMove;
                 final long callbackPostedNs = System.nanoTime();
                 runOnUiThread(() -> {
-                    long uiDelayMs = Math.max(0L, (System.nanoTime() - callbackPostedNs) / 1_000_000L);
+                    long uiWorkStartedNs = System.nanoTime();
+                    long uiDelayMs = Math.max(0L, (uiWorkStartedNs - callbackPostedNs) / 1_000_000L);
+                    long historyWorkMs = 0L;
+                    long mirrorSyncWorkMs = 0L;
                     if (uiDelayMs >= 250L)
                         android.util.Log.w("CET-UiLag", "Position callback delayed by " + uiDelayMs + " ms");
                     String analysisForLastMove = null;
@@ -10529,7 +10568,9 @@ public final class TournamentActivity extends Activity {
                     updateTurnNameLabels();
                     if (pgnMoves != null) currentPgnMoves = pgnMoves;
                     boolean rebuildMirrorHistory = !mirrorLiveHistoryInitialized || pgnMoves != null;
+                    long historyStartedNs = System.nanoTime();
                     ensureMirrorHistoryMatchesLivePgn(position, rebuildMirrorHistory, moveToHighlight, previousPosition);
+                    historyWorkMs = (System.nanoTime() - historyStartedNs) / 1_000_000L;
                     mirrorLiveHistoryInitialized = true;
                     if (analysisForLastMove != null) {
                         int analysisPly = mirrorPositions.size() - 1;
@@ -10575,7 +10616,11 @@ public final class TournamentActivity extends Activity {
                             }
                         } catch (RuntimeException ignored) { }
                     }
-                    if (isMirrorShowing() && !mirrorReplayMode && mirrorPly < 0) syncMirrorFromLive();
+                    if (isMirrorShowing() && !mirrorReplayMode && mirrorPly < 0) {
+                        long mirrorSyncStartedNs = System.nanoTime();
+                        syncMirrorFromLive();
+                        mirrorSyncWorkMs = (System.nanoTime() - mirrorSyncStartedNs) / 1_000_000L;
+                    }
                     invalidateMirrorMovesSubCache(0);
                     invalidateMirrorMovesSubCache(2);
                     invalidateMirrorSectionCache(0);
@@ -10598,6 +10643,15 @@ public final class TournamentActivity extends Activity {
                     updateExpandedMainBoard(true);
                     int livePlyCount = mirrorLiveHistoryInitialized ? mirrorLiveSanMoves.size() : currentMirrorSanMoves(null).size();
                     moveStatusText.setText("PGN: " + livePlyCount + " plies");
+                    long callbackWorkMs = (System.nanoTime() - uiWorkStartedNs) / 1_000_000L;
+                    if (callbackWorkMs >= 16L || historyWorkMs >= 8L || mirrorSyncWorkMs >= 8L) {
+                        TournamentDiagnostics.record("ANIMATION", "position_callback_ui_work",
+                                "uiDelayMs=" + uiDelayMs + " uiWorkMs=" + callbackWorkMs +
+                                " historyMs=" + historyWorkMs + " mirrorSyncMs=" + mirrorSyncWorkMs +
+                                " livePly=" + livePlyCount + " fullPgnSnapshot=" + (pgnMoves != null) +
+                                " mirrorVisible=" + isMirrorShowing() + " expandedVisible=" +
+                                (expandedMainDialog != null && expandedMainDialog.isShowing()));
+                    }
                 });
             }
             @Override public void onEngineAnalysis(boolean white, String analysis) {
