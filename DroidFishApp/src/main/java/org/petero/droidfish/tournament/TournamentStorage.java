@@ -355,6 +355,41 @@ final class TournamentStorage {
         File active = activeTournamentDirectory(context, sourceFileName);
         if (!active.exists() && !active.mkdirs() && !active.isDirectory())
             throw new IOException("Cannot create active tournament directory: " + active);
+        String sourceSignature = signature(sourceRoot);
+        try {
+            // Only skip publication when the primary pointer itself is valid.
+            // If recovery is currently relying on the backup pointer, let the
+            // normal commit path repair current.json rather than preserving a
+            // potentially damaged primary pointer indefinitely.
+            File primaryPointer = new File(active, "current.json");
+            if (!primaryPointer.isFile()) throw new IOException("Missing primary pointer");
+            JSONObject committed = readJson(primaryPointer);
+            if (sourceSignature.equals(committed.optString("sourceSignature", ""))) {
+                String primaryGenerationName = committed.optString("generationDirectory", "");
+                if (primaryGenerationName.isEmpty() || primaryGenerationName.contains("/") ||
+                        primaryGenerationName.contains("\\"))
+                    throw new IOException("Invalid primary tournament generation pointer");
+                File primaryGeneration = new File(active, primaryGenerationName);
+                validateGeneration(primaryGeneration, committed.optString("sourceSignature", ""),
+                        committed.optLong("sourceGeneration", -1L));
+                validatePgnReferences(primaryGeneration, active);
+                String committedName = primaryGenerationName;
+                if (!committedName.isEmpty() && !committedName.contains("/") && !committedName.contains("\\")) {
+                    JSONObject storedStandings = readJson(new File(new File(active, committedName), "standings.json"));
+                    JSONArray storedRows = storedStandings.optJSONArray("standings");
+                    JSONArray requestedRows = standingsSnapshot == null ? new JSONArray() : standingsSnapshot;
+                    if (storedRows != null && storedRows.toString().equals(requestedRows.toString())) {
+                        TournamentDiagnostics.record("STORAGE", "unchanged_generation_skipped",
+                                "tournament=" + safeBaseName(sourceFileName) + " generation=" +
+                                        committed.optLong("sourceGeneration", -1L));
+                        return;
+                    }
+                }
+            }
+        } catch (Exception invalidCommittedSnapshot) {
+            // Missing or damaged current/backup pointers are deliberately rebuilt
+            // by the normal validated generation-publication path below.
+        }
         long generation = currentGeneration(active) + 1L;
         String generationName = String.format(java.util.Locale.US, "generation-%08d", generation);
         File staging = new File(active, "." + generationName + ".tmp");
@@ -362,7 +397,6 @@ final class TournamentStorage {
         deleteRecursively(staging);
         if (!staging.mkdirs()) throw new IOException("Cannot create tournament generation directory");
 
-        String sourceSignature = signature(sourceRoot);
         JSONObject tournament = envelope(sourceFileName, generation, sourceSignature);
         tournament.put("tournamentId", safeBaseName(sourceFileName));
         JSONObject settings = new JSONObject();

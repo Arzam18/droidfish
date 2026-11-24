@@ -989,7 +989,6 @@ public final class TournamentRunner {
             if (list == null || list.first == null || list.first.isEmpty()) return;
             GameTree.Node node = list.first.get(list.first.size() - 1);
             String eval = "n/a", depth = "n/a", selDepth = "n/a", nodes = "n/a", nps = "n/a";
-            String engineTime = "n/a", hash = "n/a", engineWdl = "", whiteWdl = "";
             if (analysisAtBestMove != null) {
                 String flat = analysisAtBestMove.replace('\n', ' ');
                 eval = commentField(flat, "Eval");
@@ -1002,20 +1001,6 @@ public final class TournamentRunner {
                 }
                 nodes = commentField(flat, "Nodes");
                 nps = commentField(flat, "NPS");
-                engineTime = commentField(flat, "Time");
-                hash = commentField(flat, "Hash");
-                java.util.regex.Matcher w = java.util.regex.Pattern.compile(
-                        "(?i)Engine\\s+WDL:\\s*W:\\s*([0-9]+(?:\\.[0-9]+)?)%\\s+D:\\s*([0-9]+(?:\\.[0-9]+)?)%\\s+L:\\s*([0-9]+(?:\\.[0-9]+)?)%")
-                        .matcher(flat);
-                if (w.find()) {
-                    String engineWin = w.group(1), draw = w.group(2), engineLoss = w.group(3);
-                    engineWdl = " EngineWDL: W:" + engineWin + "% D:" + draw + "% L:" + engineLoss + "%";
-                    // Persist an additional White-perspective form for the tournament
-                    // graph, whose two traces represent the White and Black engines.
-                    String whiteWin = whiteMoved ? engineWin : engineLoss;
-                    String whiteLoss = whiteMoved ? engineLoss : engineWin;
-                    whiteWdl = " WhiteWDL: W:" + whiteWin + "% D:" + draw + "% L:" + whiteLoss + "%";
-                }
             }
             long remaining = clock == null || !usesClock() ? -1L : clock.remainingMs(whiteMoved);
             String pv = "";
@@ -1033,8 +1018,10 @@ public final class TournamentRunner {
             }
             if (usesClock() && remaining >= 0L)
                 node.setRemainingTimeMs((int)Math.min(Integer.MAX_VALUE, remaining));
-            // Compact, replayable per-move analysis record. Keep depth and seldepth
-            // together, and retain the graph's explicit WDL fields for compatibility.
+            // PGN comments keep only the compact move-analysis fields requested for
+            // replay. WDL remains available in the live engine output, but is not
+            // duplicated into every saved move comment. The engine-search-time
+            // token (et...) was not requested; t... remains the move elapsed time.
             String compactDepth = "n/a".equals(depth) ? "?" : depth;
             if (!"n/a".equals(selDepth)) compactDepth += "/" + selDepth;
             String compactNodes = "n/a".equals(nodes) ? "?" : nodes.toLowerCase(java.util.Locale.US);
@@ -1043,21 +1030,12 @@ public final class TournamentRunner {
             if (compactNps.endsWith("k")) compactNps = compactNps.substring(0, compactNps.length() - 1) + "knps";
             else if (compactNps.endsWith("m")) compactNps = compactNps.substring(0, compactNps.length() - 1) + "mnps";
             else if (!compactNps.endsWith("nps") && !"?".equals(compactNps)) compactNps += "nps";
-            // Preserve engine search duration in the existing per-move PGN snapshot.
-            // The tX token below continues to represent move elapsed time.
-            String compactEngineTime = "";
-            if (!"n/a".equals(engineTime)) {
-                String timeValue = engineTime.trim().replaceAll("(?i)s$", "");
-                if (timeValue.matches("[0-9]+(?:\\.[0-9]+)?")) compactEngineTime = " et" + timeValue + "s";
-            }
             String compactClock = remaining < 0L ? "?" : clockText(remaining);
             String compactPv = firstTwoPvPlies(pv);
             String comment = ("n/a".equals(eval) ? "?" : eval) +
-                    " d" + compactDepth + " n" + compactNodes + " " + compactNps + compactEngineTime +
+                    " d" + compactDepth + " n" + compactNodes + " " + compactNps +
                     " clk" + compactClock + " t" + moveTimeText(moveMs) +
-                    (compactPv.isEmpty() ? "" : " " + compactPv) + engineWdl + whiteWdl;
-            // The engine-provided WDL remains in the engine's own perspective. No
-            // probability is estimated when UCI_ShowWDL is unsupported.
+                    (compactPv.isEmpty() ? "" : " " + compactPv);
             node.setPostComment(comment);
         } catch (RuntimeException ignored) { }
     }

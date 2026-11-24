@@ -43,6 +43,69 @@ public final class PgnOpeningBook {
         return moves;
     }
 
+    /** Count main-line SAN plies without allocating a move list or replaying legal positions. */
+    public static int mainLinePlyCount(String pgn) {
+        if (pgn == null || pgn.isEmpty()) return 0;
+        int count = 0;
+        int variationDepth = 0;
+        boolean inTag = false, inBrace = false, inLineComment = false, finished = false;
+        StringBuilder token = new StringBuilder(24);
+        for (int i = 0; i < pgn.length() && !finished; i++) {
+            char c = pgn.charAt(i);
+            if (inLineComment) {
+                if (c == '\n' || c == '\r') inLineComment = false;
+                continue;
+            }
+            if (inBrace) {
+                if (c == '}') inBrace = false;
+                continue;
+            }
+            if (inTag) {
+                if (c == ']') inTag = false;
+                continue;
+            }
+            if (c == '{' || c == '[' || c == ';' || c == '(' || c == ')') {
+                if (variationDepth == 0 && token.length() > 0) {
+                    String value = token.toString();
+                    token.setLength(0);
+                    String san = normalizeMainLineToken(value);
+                    if (RESULT.matcher(san).matches()) { finished = true; break; }
+                    if (!san.isEmpty() && !MOVE_NUMBER.matcher(san).matches() && !"e.p.".equals(san)) count++;
+                } else {
+                    token.setLength(0);
+                }
+                if (c == '{') inBrace = true;
+                else if (c == '[') inTag = true;
+                else if (c == ';') inLineComment = true;
+                else if (c == '(') variationDepth++;
+                else if (c == ')' && variationDepth > 0) variationDepth--;
+                continue;
+            }
+            if (variationDepth > 0) continue;
+            if (Character.isWhitespace(c)) {
+                if (token.length() == 0) continue;
+                String san = normalizeMainLineToken(token.toString());
+                token.setLength(0);
+                if (RESULT.matcher(san).matches()) { finished = true; break; }
+                if (!san.isEmpty() && !MOVE_NUMBER.matcher(san).matches() && !"e.p.".equals(san)) count++;
+            } else {
+                token.append(c);
+            }
+        }
+        if (!finished && token.length() > 0) {
+            String san = normalizeMainLineToken(token.toString());
+            if (!RESULT.matcher(san).matches() && !san.isEmpty() &&
+                    !MOVE_NUMBER.matcher(san).matches() && !"e.p.".equals(san)) count++;
+        }
+        return count;
+    }
+
+    private static String normalizeMainLineToken(String token) {
+        return token.replaceFirst("^\\d+\\.(?:\\.\\.)?", "")
+                .replaceFirst("\\$\\d+$", "")
+                .replaceAll("[!?]+$", "");
+    }
+
     /** Read a PGN tag value, returning an empty string when the tag is absent. */
     public static String tagValue(String pgn, String tagName) {
         if (pgn == null || tagName == null) return "";
