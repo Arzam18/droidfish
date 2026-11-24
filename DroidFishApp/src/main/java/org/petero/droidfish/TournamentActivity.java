@@ -2679,25 +2679,25 @@ public final class TournamentActivity extends Activity {
         // Apply the requested existing layout preset once, even for users whose
         // older saved preference values were different. Subsequent user changes
         // are preserved independently for normal and double-tap output rows.
-        final int layoutPresetVersion = 2;
+        final int layoutPresetVersion = 3;
         if (prefs.getInt("mirrorPanelLayoutPresetVersion", 0) < layoutPresetVersion) {
             mirrorPlayerPanelsCompact = false;
-            // Final default: apply only "Swap icon / engine info position".
-            // Do not apply "Swap icon + engine / variation".
+            // Final default: enable both requested swaps in normal and double-tap
+            // Mirror Board. Keep the large engine panel size.
             mirrorBlackIconAfterInfo = true;
             mirrorWhiteIconAfterInfo = true;
             mirrorFocusIconAfterInfo = true;
-            mirrorBlackInfoAfterVariation = false;
-            mirrorWhiteInfoAfterVariation = false;
-            mirrorFocusInfoAfterVariation = false;
+            mirrorBlackInfoAfterVariation = true;
+            mirrorWhiteInfoAfterVariation = true;
+            mirrorFocusInfoAfterVariation = true;
             prefs.edit()
                     .putBoolean("mirrorPlayerPanelsCompact", false)
                     .putBoolean("mirrorBlackIconAfterInfo", true)
                     .putBoolean("mirrorWhiteIconAfterInfo", true)
                     .putBoolean("mirrorFocusIconAfterInfo", true)
-                    .putBoolean("mirrorBlackInfoAfterVariation", false)
-                    .putBoolean("mirrorWhiteInfoAfterVariation", false)
-                    .putBoolean("mirrorFocusInfoAfterVariation", false)
+                    .putBoolean("mirrorBlackInfoAfterVariation", true)
+                    .putBoolean("mirrorWhiteInfoAfterVariation", true)
+                    .putBoolean("mirrorFocusInfoAfterVariation", true)
                     .putInt("mirrorPanelLayoutPresetVersion", layoutPresetVersion)
                     .apply();
             return;
@@ -3491,12 +3491,13 @@ public final class TournamentActivity extends Activity {
         if (mirrorView == null || playView == null) return;
         if (!isMirrorShowing() && runner != null && !runner.isFinished() && !runner.isPaused()) {
             new AlertDialog.Builder(this)
-                    .setTitle("Pause tournament before viewing?")
-                    .setMessage("Pause the tournament before reviewing moves, standings, schedule, or game information. The engines will stop searching while you browse.")
+                    .setTitle("Tournament is running")
+                    .setMessage("You can pause the tournament before reviewing moves, standings, schedule, or game information, or enter Mirror Board while both engines continue searching.")
                     .setPositiveButton("PAUSE", (dialog, which) -> {
                         if (runner != null && !runner.isPaused() && !runner.isFinished()) togglePauseResume();
                         switchTournamentAndMirrorNow();
                     })
+                    .setNeutralButton("GO ANYWAY", (dialog, which) -> switchTournamentAndMirrorNow())
                     .setNegativeButton("CLOSE", (dialog, which) -> dialog.dismiss())
                     .show();
             return;
