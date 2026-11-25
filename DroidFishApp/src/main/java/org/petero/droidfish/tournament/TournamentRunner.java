@@ -51,6 +51,8 @@ public final class TournamentRunner {
         default void onEngineVariationHints(boolean white, long positionHash, ArrayList<Move> hints) { }
         void onReviewPosition(Position position, int ply, int totalPlies, String whiteAnalysis, String blackAnalysis, long moveTimeMs);
         void onMoveTime(boolean whiteMoved, long moveTimeMs, String openingName);
+        /** Show the decided result immediately while the durable tournament commit is pending. */
+        default void onGameResultPending(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String reason) { }
         void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome, String pgn);
         /** Result plus the concrete rule/termination reason for the result announcement. */
         default void onGameFinished(TournamentManager.Pairing pairing, TournamentManager.Outcome outcome,
@@ -118,6 +120,8 @@ public final class TournamentRunner {
     /** A finished game is persisted on a worker while the live runner lock stays free. */
     private volatile boolean finalizingGame;
     private volatile boolean nextGamePending;
+    private volatile long gameResultPendingNs;
+    private volatile long gameResultCommittedNs;
     /** Prevent a Resume tap and the delayed auto-advance worker from starting the same pairing twice. */
     private boolean startingNextGame;
     private boolean retryStartAfterStartingGame;
@@ -424,8 +428,7 @@ public final class TournamentRunner {
         if (!("1-0".equals(result) || "0-1".equals(result) || "1/2-1/2".equals(result))) return;
         turnGeneration++;
         clock.pause();
-        whitePlayer.stopSearch();
-        blackPlayer.stopSearch();
+        // finishCurrentGame() requests both engine stops after announcing the outcome.
         humanAdjudication = true;
         game.adjudicateTournament(result);
         TournamentManager.Outcome outcome = "1-0".equals(result) ? TournamentManager.Outcome.WHITE_WIN :
@@ -535,6 +538,10 @@ public final class TournamentRunner {
     private void startNextGameInternal() {
         if (stopped || finished || paused || finalizingGame) return;
         final long gameLoadStartedNs = System.nanoTime();
+        long sinceResultCommitMs = gameResultCommittedNs == 0L ? -1L :
+                Math.max(0L, (gameLoadStartedNs - gameResultCommittedNs) / 1_000_000L);
+        TournamentDiagnostics.record("GAME_START", "next_game_setup_started",
+                "sinceResultCommitMs=" + sinceResultCommitMs);
         TournamentDiagnostics.setPhase("load_current_game", "resolve next pairing");
         pairing = tournament.current();
         latestWhiteEvalPawns = Double.NaN;
@@ -1133,13 +1140,27 @@ public final class TournamentRunner {
         finalizingGame = true;
         turnGeneration++;
         if (clock != null) clock.pause();
-        whitePlayer.stopSearch();
-        blackPlayer.stopSearch();
 
         final boolean wasHumanAdjudication = humanAdjudication;
         final String stateReason = terminationForState(game.getGameState());
         final String resultReason = explicitReason != null && !explicitReason.trim().isEmpty() ? explicitReason :
                 (wasHumanAdjudication ? "automatic evaluation adjudication" : stateReason);
+        final TournamentManager.Pairing announcedPairing = pairing;
+        gameResultPendingNs = System.nanoTime();
+        TournamentDiagnostics.record("RESULT", "game_result_pending",
+                "game=" + announcedPairing.index + " outcome=" + outcome + " reason=" + resultReason);
+        // Publish the result label before engine stop handling and durable storage;
+        // the user sees the outcome while the finalizer completes the commit.
+        try { listener.onGameResultPending(announcedPairing, outcome, resultReason); }
+        catch (RuntimeException callbackError) {
+            TournamentDiagnostics.recordError("RESULT", "pending_result_callback_failed", callbackError);
+        }
+        long stopSearchStartedNs = System.nanoTime();
+        whitePlayer.stopSearch();
+        blackPlayer.stopSearch();
+        long stopSearchMs = (System.nanoTime() - stopSearchStartedNs) / 1_000_000L;
+        TournamentDiagnostics.record("RESULT", "engine_stop_requests_sent",
+                "game=" + announcedPairing.index + " elapsedMs=" + stopSearchMs);
         game.tree.setTournamentTermination(wasHumanAdjudication ? "adjudication" : resultReason);
         humanAdjudication = false;
 
@@ -1159,9 +1180,13 @@ public final class TournamentRunner {
                 String completedPgn = completedTree.toPGN(pgnOptions);
                 long pgnBuildMs = (System.nanoTime() - pgnStartNs) / 1_000_000L;
                 long saveStartNs = System.nanoTime();
-                tournament.recordResult(completedIndex, outcome, completedPgn, completedWhiteEval, completedBlackEval);
-                TournamentDiagnostics.record("RESULT", "game_result_committed", "game=" + completedIndex + " outcome=" + outcome);
-                long resultSaveMs = (System.nanoTime() - saveStartNs) / 1_000_000L;
+                tournament.recordResultAndSelectNext(completedIndex, outcome, completedPgn, completedWhiteEval, completedBlackEval);
+                gameResultCommittedNs = System.nanoTime();
+                long pendingToCommitMs = gameResultPendingNs == 0L ? -1L :
+                        Math.max(0L, (gameResultCommittedNs - gameResultPendingNs) / 1_000_000L);
+                TournamentDiagnostics.record("RESULT", "game_result_committed", "game=" + completedIndex +
+                        " outcome=" + outcome + " pendingToCommitMs=" + pendingToCommitMs);
+                long resultSaveMs = (gameResultCommittedNs - saveStartNs) / 1_000_000L;
                 if (pgnBuildMs >= 100L || resultSaveMs >= 100L)
                     Log.w("CET-TournamentSave", "Game " + (completedIndex + 1) +
                             " finalization pgnBuild=" + pgnBuildMs + "ms resultSave=" + resultSaveMs + "ms");
@@ -1280,8 +1305,8 @@ public final class TournamentRunner {
                 clearFastWinPending();
                 turnGeneration++;
                 if (clock != null) clock.pause();
-                whitePlayer.stopSearch();
-                blackPlayer.stopSearch();
+                // finishCurrentGame() publishes the result before requesting engine stops.
+                // Avoid a second stop request here, which can block behind an engine callback.
                 humanAdjudication = false;
                 game.adjudicateTournament(confirmedResult);
                 TournamentManager.Outcome outcome = "1-0".equals(confirmedResult)
@@ -1329,7 +1354,8 @@ public final class TournamentRunner {
             evalDrawLastFullMove = fullMove;
             if (evalDrawConsecutive < evalDrawCondition) return;
             turnGeneration++; if (clock != null) clock.pause();
-            whitePlayer.stopSearch(); blackPlayer.stopSearch(); humanAdjudication = false;
+            // finishCurrentGame() handles engine stop after publishing the result.
+            humanAdjudication = false;
             game.adjudicateTournament("1/2-1/2");
             finishCurrentGame(TournamentManager.Outcome.DRAW, String.format(java.util.Locale.US,
                     "evaluation draw: both engines within ±%.2f for %d consecutive full moves", evalDrawScore, evalDrawCondition));

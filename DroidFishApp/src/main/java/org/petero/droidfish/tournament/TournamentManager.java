@@ -1851,6 +1851,7 @@ public final class TournamentManager {
         synchronized (this) {
             Pairing p = pairings.get(index);
             if (p.isComplete() && !p.replayPending) throw new IllegalStateException("Only a pending game can become active");
+            if (activePairingIndex == index) return;
             activePairingIndex = index;
         }
         save();
@@ -2067,6 +2068,19 @@ public final class TournamentManager {
 
     public void recordResult(int index, Outcome outcome, String pgn,
                              double whiteEvalPawns, double blackEvalPawns) throws IOException, JSONException {
+        recordResultInternal(index, outcome, pgn, whiteEvalPawns, blackEvalPawns, false);
+    }
+
+    /** Persist a completed result and the next pending pairing in one storage generation. */
+    public void recordResultAndSelectNext(int index, Outcome outcome, String pgn,
+                                          double whiteEvalPawns, double blackEvalPawns)
+            throws IOException, JSONException {
+        recordResultInternal(index, outcome, pgn, whiteEvalPawns, blackEvalPawns, true);
+    }
+
+    private void recordResultInternal(int index, Outcome outcome, String pgn,
+                                      double whiteEvalPawns, double blackEvalPawns,
+                                      boolean selectNextPairing) throws IOException, JSONException {
         if (outcome == null || outcome == Outcome.UNFINISHED) throw new IllegalArgumentException("A final result is required");
         RuntimeException pairingError = null;
         Format resultFormat;
@@ -2094,6 +2108,10 @@ public final class TournamentManager {
                     swissCurrentRound < swissRoundsTotal && swissRoundComplete(swissCurrentRound)) {
                 try { generateSwissRound(); }
                 catch (RuntimeException error) { pairingError = error; }
+            }
+            if (selectNextPairing) {
+                Pairing nextPairing = current();
+                activePairingIndex = nextPairing == null ? -1 : nextPairing.index;
             }
         }
         // Tournament reads (standings, schedules and clocks) remain responsive while
