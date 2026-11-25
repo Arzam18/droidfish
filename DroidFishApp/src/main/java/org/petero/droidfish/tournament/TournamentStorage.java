@@ -16,6 +16,7 @@ import java.nio.charset.Charset;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -350,12 +351,16 @@ final class TournamentStorage {
      * generation readable. Keep the current and one previous generation.
      */
     static void saveActive(Context context, String sourceFileName, JSONObject sourceRoot,
-                           JSONArray standingsSnapshot) throws IOException, JSONException {
+                           JSONArray standingsSnapshot, Map<Integer, String> pgnContents,
+                           Set<Integer> changedPgnIndexes) throws IOException, JSONException {
         if (context == null || sourceRoot == null) throw new IOException("Tournament storage is unavailable");
+        final long commitStartedNs = System.nanoTime();
         File active = activeTournamentDirectory(context, sourceFileName);
         if (!active.exists() && !active.mkdirs() && !active.isDirectory())
             throw new IOException("Cannot create active tournament directory: " + active);
+        long signatureStartedNs = System.nanoTime();
         String sourceSignature = signature(sourceRoot);
+        long signatureBuildMs = (System.nanoTime() - signatureStartedNs) / 1_000_000L;
         try {
             // Only skip publication when the primary pointer itself is valid.
             // If recovery is currently relying on the backup pointer, let the
@@ -364,7 +369,8 @@ final class TournamentStorage {
             File primaryPointer = new File(active, "current.json");
             if (!primaryPointer.isFile()) throw new IOException("Missing primary pointer");
             JSONObject committed = readJson(primaryPointer);
-            if (sourceSignature.equals(committed.optString("sourceSignature", ""))) {
+            if ((changedPgnIndexes == null || changedPgnIndexes.isEmpty()) &&
+                    sourceSignature.equals(committed.optString("sourceSignature", ""))) {
                 String primaryGenerationName = committed.optString("generationDirectory", "");
                 if (primaryGenerationName.isEmpty() || primaryGenerationName.contains("/") ||
                         primaryGenerationName.contains("\\"))
@@ -372,7 +378,8 @@ final class TournamentStorage {
                 File primaryGeneration = new File(active, primaryGenerationName);
                 validateGeneration(primaryGeneration, committed.optString("sourceSignature", ""),
                         committed.optLong("sourceGeneration", -1L));
-                validatePgnReferences(primaryGeneration, active);
+                // Existing PGN files were validated when the previous generation was
+                // published. A metadata-only no-op must not stat every historical PGN.
                 String committedName = primaryGenerationName;
                 if (!committedName.isEmpty() && !committedName.contains("/") && !committedName.contains("\\")) {
                     JSONObject storedStandings = readJson(new File(new File(active, committedName), "standings.json"));
@@ -392,6 +399,7 @@ final class TournamentStorage {
         }
         long generation = currentGeneration(active) + 1L;
         String generationName = String.format(java.util.Locale.US, "generation-%08d", generation);
+        long generationBuildStartedNs = System.nanoTime();
         File staging = new File(active, "." + generationName + ".tmp");
         File publishedGeneration = new File(active, generationName);
         deleteRecursively(staging);
@@ -408,6 +416,7 @@ final class TournamentStorage {
         JSONArray resultRecords = new JSONArray();
         JSONArray graphPoints = new JSONArray();
         Map<String, JSONObject> headToHead = new HashMap<>();
+        Map<Integer, String> previousPgnFiles = readActivePgnReferences(active);
         File pgnDirectory = new File(active, "pgn");
         if (!pgnDirectory.mkdirs() && !pgnDirectory.isDirectory())
             throw new IOException("Cannot create active tournament PGN directory");
@@ -417,12 +426,23 @@ final class TournamentStorage {
             if (pairing == null) throw new IOException("Invalid pairing record at index " + i);
             JSONObject scheduled = new JSONObject(pairing.toString());
             scheduled.remove("pgn");
-            String pgn = pairing.optString("pgn", "");
-            byte[] pgnBytes = pgn.getBytes(UTF8);
-            String pgnName = pgn.isEmpty() ? "" : contentAddressedPgnName(pairing.optInt("index", i), pgnBytes);
-            String pgnFile = pgnName.isEmpty() ? "" : "pgn/" + pgnName;
+            int pairingIndex = pairing.optInt("index", i);
+            String pgn = pgnContents == null ? "" : pgnContents.get(pairingIndex);
+            if (pgn == null) pgn = "";
+            String pgnFile = "";
+            if (!pgn.isEmpty()) {
+                String previousFile = previousPgnFiles.get(pairingIndex);
+                boolean changed = changedPgnIndexes == null || changedPgnIndexes.contains(pairingIndex);
+                if (!changed && previousFile != null && !previousFile.isEmpty()) {
+                    pgnFile = previousFile;
+                } else {
+                    byte[] pgnBytes = pgn.getBytes(UTF8);
+                    String pgnName = contentAddressedPgnName(pairingIndex, pgnBytes);
+                    pgnFile = "pgn/" + pgnName;
+                    writeRawFileIfAbsent(new File(pgnDirectory, pgnName), pgnBytes);
+                }
+            }
             scheduled.put("pgnFile", pgnFile);
-            if (!pgnName.isEmpty()) writeRawFileIfAbsent(new File(pgnDirectory, pgnName), pgnBytes);
             scheduled.remove("outcome");
             scheduled.remove("whiteEvalPawns");
             scheduled.remove("blackEvalPawns");
@@ -488,7 +508,9 @@ final class TournamentStorage {
         crosstable.put("matches", matches);
         JSONObject graphs = envelope(sourceFileName, generation, sourceSignature);
         graphs.put("points", graphPoints);
+        long generationBuildMs = (System.nanoTime() - generationBuildStartedNs) / 1_000_000L;
 
+        long moduleWriteStartedNs = System.nanoTime();
         writeJson(new File(staging, "tournament.json"), tournament);
         writeJson(new File(staging, "schedule.json"), schedule);
         writeResultsJsonl(new File(staging, "results.jsonl"), resultsHeader, resultRecords);
@@ -496,16 +518,185 @@ final class TournamentStorage {
         writeJson(new File(staging, "crosstable.json"), crosstable);
         writeJson(new File(staging, "graphs.json"), graphs);
         validateGeneration(staging, sourceSignature, generation);
-        validatePgnReferences(staging, active);
+        validatePgnReferencesForCommit(staging, active, previousPgnFiles, changedPgnIndexes);
+        long moduleWriteAndValidationMs = (System.nanoTime() - moduleWriteStartedNs) / 1_000_000L;
         if (publishedGeneration.exists()) deleteRecursively(publishedGeneration);
         if (!staging.renameTo(publishedGeneration)) throw new IOException("Cannot publish tournament generation");
 
         JSONObject pointer = envelope(sourceFileName, generation, sourceSignature);
         pointer.put("sourceFile", sourceFileName);
         pointer.put("generationDirectory", generationName);
+        long pointerPublishStartedNs = System.nanoTime();
         writeJson(new File(active, "current.json"), pointer);
+        long pointerPublishMs = (System.nanoTime() - pointerPublishStartedNs) / 1_000_000L;
+        long pruneStartedNs = System.nanoTime();
         pruneGenerations(active, generationName);
         prunePgnFiles(active);
+        long pruneMs = (System.nanoTime() - pruneStartedNs) / 1_000_000L;
+        TournamentDiagnostics.record("STORAGE", "active_generation_commit_timing",
+                "tournament=" + safeBaseName(sourceFileName) + " generation=" + generation +
+                        " totalMs=" + ((System.nanoTime() - commitStartedNs) / 1_000_000L) +
+                        " signatureMs=" + signatureBuildMs + " generationBuildMs=" + generationBuildMs +
+                        " moduleWriteValidateMs=" + moduleWriteAndValidationMs +
+                        " pointerPublishMs=" + pointerPublishMs + " pruneMs=" + pruneMs);
+    }
+
+    private static boolean isCompletedGeneration(File generation) throws IOException, JSONException {
+        JSONObject schedule = readJson(new File(generation, "schedule.json"));
+        JSONArray pairings = schedule.optJSONArray("pairings");
+        if (pairings == null || pairings.length() == 0) return false;
+        HashSet<Integer> completed = new HashSet<>();
+        try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(
+                new FileInputStream(new File(generation, "results.jsonl")), UTF8))) {
+            String line = reader.readLine();
+            if (line == null) return false;
+            while ((line = reader.readLine()) != null) {
+                if (line.trim().isEmpty()) continue;
+                JSONObject result = new JSONObject(line);
+                if (!"UNFINISHED".equals(result.optString("outcome", "UNFINISHED")))
+                    completed.add(result.optInt("index", -1));
+            }
+        }
+        for (int i = 0; i < pairings.length(); i++) {
+            JSONObject pairing = pairings.optJSONObject(i);
+            if (pairing == null || pairing.optBoolean("replayPending", false) ||
+                    !completed.contains(pairing.optInt("index", i))) return false;
+        }
+        JSONObject tournament = readJson(new File(generation, "tournament.json"));
+        JSONObject settings = tournament.optJSONObject("settings");
+        return settings == null || !"CUP".equals(settings.optString("format", "")) ||
+                settings.optBoolean("cupFinished", false);
+    }
+
+    private static Map<Integer, String> readActivePgnReferences(File active) {
+        HashMap<Integer, String> references = new HashMap<>();
+        File[] candidates = {new File(active, "current.json"),
+                new File(active, "current.json.previous.bak")};
+        Exception lastError = null;
+        for (File pointerFile : candidates) {
+            if (!pointerFile.isFile()) continue;
+            try {
+                JSONObject pointer = readJson(pointerFile);
+                String generationName = pointer.optString("generationDirectory", "");
+                if (!generationName.matches("generation-[0-9]{8}"))
+                    throw new IOException("Invalid active tournament generation pointer");
+                JSONObject schedule = readJson(new File(new File(active, generationName), "schedule.json"));
+                JSONArray pairings = schedule.optJSONArray("pairings");
+                if (pairings == null) throw new IOException("Active schedule module has no pairings");
+                for (int i = 0; i < pairings.length(); i++) {
+                    JSONObject pairing = pairings.optJSONObject(i);
+                    if (pairing == null) continue;
+                    String pgnFile = pairing.optString("pgnFile", "");
+                    if (!pgnFile.isEmpty()) {
+                        validatePgnRelativePath(pgnFile);
+                        references.put(pairing.optInt("index", i), pgnFile);
+                    }
+                }
+                return references;
+            } catch (Exception invalidPriorSchedule) {
+                lastError = invalidPriorSchedule;
+                references.clear();
+            }
+        }
+        if (lastError != null)
+            TournamentDiagnostics.recordError("STORAGE", "prior_pgn_reference_cache_unavailable", lastError);
+        return references;
+    }
+
+    static boolean isManuallyKeptActive(Context context, String sourceFileName) {
+        return new File(activeTournamentDirectory(context, sourceFileName), ".keep-active").isFile();
+    }
+
+    /** Restore a validated completed archive to the active directory without deleting the
+     * archive until the extracted generation and its PGN references are fully validated. */
+    static void restoreCompletedToActive(Context context, String sourceFileName) throws IOException, JSONException {
+        File active = activeTournamentDirectory(context, sourceFileName);
+        if (hasActive(context, sourceFileName)) throw new IOException("Tournament is already active");
+        File archive = new File(completedTournamentDirectory(context, sourceFileName), safeBaseName(sourceFileName) + ".zip");
+        if (!archive.isFile()) throw new IOException("Completed tournament archive was not found");
+        File parent = active.getParentFile();
+        if (!parent.exists() && !parent.mkdirs() && !parent.isDirectory())
+            throw new IOException("Cannot create active tournament folder");
+        File staging = new File(parent, "." + active.getName() + ".restore-" + Long.toHexString(System.nanoTime()));
+        deleteRecursively(staging);
+        if (!staging.mkdirs()) throw new IOException("Cannot create active tournament restore staging folder");
+        try {
+            try (ZipFile zip = new ZipFile(archive)) {
+                java.util.Enumeration<? extends ZipEntry> entries = zip.entries();
+                while (entries.hasMoreElements()) {
+                    ZipEntry entry = entries.nextElement();
+                    String name = entry.getName();
+                    if (name == null || name.isEmpty() || name.startsWith("/") || name.contains("..") || name.contains("\\"))
+                        throw new IOException("Unsafe completed archive entry");
+                    boolean allowedRoot = "tournament.json".equals(name) || "schedule.json".equals(name) ||
+                            "results.jsonl".equals(name) || "standings.json".equals(name) ||
+                            "crosstable.json".equals(name) || "graphs.json".equals(name);
+                    if (!allowedRoot && !name.startsWith("pgn/")) throw new IOException("Unexpected archive entry: " + name);
+                    if (name.startsWith("pgn/") && (name.endsWith("/") || name.length() <= 4))
+                        throw new IOException("Invalid PGN archive entry");
+                    File outputFile = new File(staging, name);
+                    if (!outputFile.getCanonicalPath().startsWith(staging.getCanonicalPath() + File.separator))
+                        throw new IOException("Archive entry escaped active staging folder");
+                    if (entry.isDirectory()) {
+                        if (!outputFile.mkdirs() && !outputFile.isDirectory()) throw new IOException("Cannot create archive folder");
+                    } else {
+                        File outputParent = outputFile.getParentFile();
+                        if (!outputParent.exists() && !outputParent.mkdirs() && !outputParent.isDirectory())
+                            throw new IOException("Cannot create archive entry folder");
+                        try (InputStream input = zip.getInputStream(entry); FileOutputStream output = new FileOutputStream(outputFile)) {
+                            byte[] buffer = new byte[16384]; int count;
+                            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+                            output.flush(); output.getFD().sync();
+                        }
+                    }
+                }
+            }
+            JSONObject metadata = readJson(new File(staging, "tournament.json"));
+            long generation = metadata.optLong("sourceGeneration", -1L);
+            String signature = metadata.optString("sourceSignature", "");
+            validateGeneration(staging, signature, generation);
+            validatePgnReferences(staging, staging);
+            JSONObject pointer = envelope(sourceFileName, generation, signature);
+            pointer.put("sourceFile", sourceFileName);
+            pointer.put("generationDirectory", String.format(java.util.Locale.US, "generation-%08d", generation));
+            // Archive entries are the generation modules themselves. Move them into the
+            // immutable generation subfolder expected by active storage.
+            File generationFolder = new File(staging, pointer.getString("generationDirectory"));
+            if (!generationFolder.mkdir()) throw new IOException("Cannot create restored generation folder");
+            String[] moduleNames = {"tournament.json", "schedule.json", "results.jsonl", "standings.json", "crosstable.json", "graphs.json"};
+            for (String moduleName : moduleNames) {
+                File module = new File(staging, moduleName);
+                if (!module.renameTo(new File(generationFolder, moduleName)))
+                    throw new IOException("Cannot stage restored module " + moduleName);
+            }
+            validateGeneration(generationFolder, signature, generation);
+            validatePgnReferences(generationFolder, staging);
+            writeJson(new File(staging, "current.json"), pointer);
+            // A finished event remains classified in Active only because the user
+            // explicitly requested that move. An unfinished event may resume and
+            // should still auto-archive normally when it eventually completes.
+            if (isCompletedGeneration(generationFolder))
+                writeRawFile(new File(staging, ".keep-active"), new byte[]{'1'});
+            if (active.exists()) throw new IOException("Active tournament destination already exists");
+            if (!staging.renameTo(active)) throw new IOException("Cannot publish restored active tournament");
+            // Hide the completed ZIP from the archive picker only after the active
+            // generation is safely published. Keep a recovery copy until the rename succeeds.
+            File hiddenArchive = new File(archive.getParentFile(), archive.getName() + ".restored.bak");
+            if (hiddenArchive.exists() && !hiddenArchive.delete()) {
+                deleteRecursively(active);
+                throw new IOException("Could not clear an earlier archive-restore backup");
+            }
+            if (!archive.renameTo(hiddenArchive)) {
+                deleteRecursively(active);
+                throw new IOException("Could not retire completed archive after active restore");
+            }
+            if (hiddenArchive.exists() && !hiddenArchive.delete())
+                TournamentDiagnostics.record("STORAGE", "restored_archive_backup_retained", "file=" + sourceFileName);
+            TournamentDiagnostics.record("STORAGE", "completed_archive_restored_to_active", "file=" + sourceFileName);
+        } catch (IOException | JSONException error) {
+            deleteRecursively(staging);
+            throw error;
+        }
     }
 
     private static JSONObject readCurrentPointer(File active) throws IOException, JSONException {
@@ -534,8 +725,20 @@ final class TournamentStorage {
     }
 
     private static long currentGeneration(File active) {
-        try { return readCurrentPointer(active).optLong("sourceGeneration", 0L); }
-        catch (Exception ignored) { return 0L; }
+        File[] candidates = {new File(active, "current.json"),
+                new File(active, "current.json.previous.bak")};
+        for (File pointerFile : candidates) {
+            if (!pointerFile.isFile()) continue;
+            try {
+                JSONObject pointer = readJson(pointerFile);
+                String generationName = pointer.optString("generationDirectory", "");
+                if (!generationName.matches("generation-[0-9]{8}") ||
+                        !new File(active, generationName).isDirectory()) continue;
+                long generation = pointer.optLong("sourceGeneration", -1L);
+                if (generation >= 0L) return generation;
+            } catch (Exception ignored) { /* Try the previous committed pointer. */ }
+        }
+        return 0L;
     }
 
     static void archiveCompleted(Context context, String sourceFileName) throws IOException, JSONException {
@@ -722,6 +925,33 @@ final class TournamentStorage {
             File pgn = new File(pgnRoot, pgnFile);
             if (!pgn.getCanonicalPath().startsWith(pgnCanonical) || !pgn.isFile())
                 throw new IOException("Tournament PGN is missing or outside its storage folder: " + pgnFile);
+        }
+    }
+
+    /** Validate newly-written PGNs at commit time while reusing already-verified
+     * references for immutable historical games. Full validation still runs on restore/archive. */
+    private static void validatePgnReferencesForCommit(File generation, File pgnRoot,
+                                                        Map<Integer, String> previousPgnFiles,
+                                                        Set<Integer> changedPgnIndexes) throws IOException, JSONException {
+        JSONObject schedule = readJson(new File(generation, "schedule.json"));
+        JSONArray pairings = schedule.optJSONArray("pairings");
+        if (pairings == null) throw new IOException("Tournament schedule module is missing pairings");
+        File pgnDirectory = new File(pgnRoot, "pgn");
+        String pgnCanonical = pgnDirectory.getCanonicalPath() + File.separator;
+        for (int i = 0; i < pairings.length(); i++) {
+            JSONObject pair = pairings.optJSONObject(i);
+            if (pair == null) throw new IOException("Tournament schedule contains an invalid pairing");
+            String pgnFile = pair.optString("pgnFile", "");
+            if (pgnFile.isEmpty()) continue;
+            validatePgnRelativePath(pgnFile);
+            int index = pair.optInt("index", i);
+            String previous = previousPgnFiles == null ? null : previousPgnFiles.get(index);
+            boolean alreadyVerified = previous != null && previous.equals(pgnFile) &&
+                    changedPgnIndexes != null && !changedPgnIndexes.contains(index);
+            if (alreadyVerified) continue;
+            File pgn = new File(pgnRoot, pgnFile);
+            if (!pgn.getCanonicalPath().startsWith(pgnCanonical) || !pgn.isFile())
+                throw new IOException("New tournament PGN is missing or outside its storage folder: " + pgnFile);
         }
     }
 
@@ -915,7 +1145,6 @@ final class TournamentStorage {
                     File previousGeneration = new File(active, candidate);
                     validateGeneration(previousGeneration, pointer.optString("sourceSignature", ""),
                             pointer.optLong("sourceGeneration", -1L));
-                    validatePgnReferences(previousGeneration, active);
                     previousName = candidate;
                 }
             } catch (Exception invalidPrevious) {
@@ -949,13 +1178,16 @@ final class TournamentStorage {
         File active = activeTournamentDirectory(context, fileName);
         File archive = new File(completedTournamentDirectory(context, fileName), safeBaseName(fileName) + ".zip");
         File archiveBackup = new File(archive.getAbsolutePath() + ".previous.bak");
+        File restoredArchiveBackup = new File(archive.getAbsolutePath() + ".restored.bak");
         File archiveTemp = new File(archive.getAbsolutePath() + ".tmp");
-        boolean found = active.exists() || archive.exists() || archiveBackup.exists() || archiveTemp.exists();
+        boolean found = active.exists() || archive.exists() || archiveBackup.exists() ||
+                restoredArchiveBackup.exists() || archiveTemp.exists();
         if (!found) throw new IOException("No modular tournament files were found");
         boolean failed = false;
         if (active.exists()) { deleteRecursively(active); failed |= active.exists(); }
         if (archive.exists() && !archive.delete()) failed = true;
         if (archiveBackup.exists() && !archiveBackup.delete()) failed = true;
+        if (restoredArchiveBackup.exists() && !restoredArchiveBackup.delete()) failed = true;
         if (archiveTemp.exists() && !archiveTemp.delete()) failed = true;
         if (failed) throw new IOException("Could not remove all modular tournament files");
     }

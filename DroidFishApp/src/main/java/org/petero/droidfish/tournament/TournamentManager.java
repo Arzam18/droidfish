@@ -169,6 +169,9 @@ public final class TournamentManager {
     private static final double ANOMALY_EVAL_THRESHOLD_PAWNS = 1.50;
     private final List<Engine> engines = new ArrayList<>();
     private final List<Pairing> pairings = new ArrayList<>();
+    // The last PGN string committed to modular storage per pairing. PGN strings are
+    // immutable; reference equality makes unchanged historic games O(1) to skip.
+    private final Map<Integer, String> persistedPgnReferences = new HashMap<>();
     // Elo is opt-in per tournament. Older saved tournaments therefore remain unrated.
     private boolean ratingEnabled;
     private boolean ratingShowDecimals;
@@ -545,6 +548,14 @@ public final class TournamentManager {
                 }
             }
         }
+        // A modular restore has already committed each non-empty PGN as a content-
+        // addressed file. Remember those immutable strings so a transition only writes
+        // the newly completed game's PGN rather than re-hashing every historic game.
+        if (TournamentStorage.hasActive(this.context, this.fileName)) {
+            for (Pairing pairing : pairings)
+                if (pairing.pgn != null && !pairing.pgn.isEmpty())
+                    persistedPgnReferences.put(pairing.index, pairing.pgn);
+        }
     }
 
 
@@ -853,7 +864,8 @@ public final class TournamentManager {
             try {
                 JSONObject archivedRoot = TournamentStorage.readCompletedRoot(context, fileName);
                 TournamentManager archived = new TournamentManager(context, archivedRoot, fileName);
-                if (!archived.isComplete()) throw new IOException("Completed archive contains an unfinished tournament");
+                // User-archived unfinished tournaments are deliberately view-only while
+                // they remain in completed/. Completion is no longer a ZIP prerequisite.
                 TournamentDiagnostics.record("RESTORE", "completed_archive_restored", "file=" + fileName);
                 return archived;
             } catch (Exception archiveError) {
@@ -866,7 +878,7 @@ public final class TournamentManager {
             try {
                 JSONObject activeRoot = TournamentStorage.readActiveRoot(context, fileName);
                 TournamentManager active = new TournamentManager(context, activeRoot, fileName);
-                if (active.isComplete()) {
+                if (active.isComplete() && !TournamentStorage.isManuallyKeptActive(context, fileName)) {
                     // Retry automatic archival when a prior completion save could not
                     // publish its ZIP (for example, transient storage pressure). The
                     // committed active generation remains untouched until ZIP validation.
@@ -1098,6 +1110,24 @@ public final class TournamentManager {
 
     public static boolean isCompletedTournament(Context context, String fileName) {
         return TournamentStorage.hasCompleted(context, fileName);
+    }
+
+    /** Move an active (including unfinished) tournament into the immutable archive list. */
+    public static void moveToArchive(Context context, String fileName) throws IOException, JSONException {
+        if (!TournamentStorage.hasActive(context, fileName) && !TournamentStorage.hasCompleted(context, fileName))
+            restore(context, fileName); // migrates a legacy JSON snapshot into modular active storage
+        if (TournamentStorage.hasCompleted(context, fileName)) return;
+        TournamentStorage.archiveCompleted(context, fileName);
+        deleteLegacySnapshots(context, fileName);
+        TournamentDiagnostics.record("STORAGE", "manual_archive_completed", "file=" + fileName);
+    }
+
+    /** Restore an archive into the active list. The ZIP is retained until the new active
+     * pointer and every generation/PGN reference have been validated. */
+    public static void moveToActive(Context context, String fileName) throws IOException, JSONException {
+        TournamentStorage.restoreCompletedToActive(context, fileName);
+        deleteLegacySnapshots(context, fileName);
+        TournamentDiagnostics.record("STORAGE", "manual_archive_restored_active", "file=" + fileName);
     }
 
     /** Combined compatibility list for callers that still need every saved event. */
@@ -2529,8 +2559,11 @@ public final class TournamentManager {
     public synchronized String externalSaveError() { return externalSaveError; }
 
     public void save() throws IOException, JSONException {
+        final long snapshotBuildStartedNs = System.nanoTime();
         final JSONObject root = new JSONObject();
         final JSONArray standingsSnapshot = new JSONArray();
+        final Map<Integer, String> pgnSnapshot = new HashMap<>();
+        final Set<Integer> changedPgnIndexes = new HashSet<>();
         final long revision;
         synchronized (this) {
             root.put("title", title); root.put("format", format.name()); root.put("gamesPerPair", gamesPerPair);
@@ -2554,7 +2587,29 @@ public final class TournamentManager {
             root.put("anomalyRuleSettingsSaved", anomalyRuleSettingsSaved); root.put("anomalyRulesEnabled", anomalyRulesEnabled);
             root.put("anomalyRuleStartFullMove", anomalyRuleStartFullMove); root.put("anomalyMaximumFullMoves", anomalyMaximumFullMoves);
             JSONArray ea = new JSONArray(); for (Engine e : engines) { JSONObject o = new JSONObject(); o.put("id", e.id); o.put("name", e.displayName); o.put("executableId", e.executableId); ea.put(o); } root.put("engines", ea);
-            JSONArray pa = new JSONArray(); for (Pairing p : pairings) { JSONObject o = new JSONObject(); o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber); o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name()); o.put("pgn", p.pgn); o.put("whiteEvalPawns", Double.isFinite(p.whiteEvalPawns) ? p.whiteEvalPawns : JSONObject.NULL); o.put("blackEvalPawns", Double.isFinite(p.blackEvalPawns) ? p.blackEvalPawns : JSONObject.NULL); o.put("anomalyReviewed", p.anomalyReviewed); o.put("replayPending", p.replayPending); o.put("openingAssigned", p.openingAssigned); o.put("openingIndex", p.openingIndex); o.put("openingName", p.openingName); o.put("openingSanLine", p.openingSanLine); o.put("pgnDate", p.pgnDate); o.put("cupMatchNumber", p.cupMatchNumber); o.put("cupPairNumber", p.cupPairNumber); o.put("cupGameInPair", p.cupGameInPair); if (ratingEnabled) o.put("ratingSequence", p.ratingSequence); o.put("whiteNameAtPlay", p.whiteNameAtPlay); o.put("blackNameAtPlay", p.blackNameAtPlay); pa.put(o); } root.put("pairings", pa);
+            JSONArray pa = new JSONArray(); for (Pairing p : pairings) {
+                JSONObject o = new JSONObject();
+                o.put("index", p.index); o.put("round", p.round); o.put("gameNumber", p.gameNumber);
+                o.put("white", p.whiteEngineId); o.put("black", p.blackEngineId); o.put("outcome", p.outcome.name());
+                String pgn = p.pgn == null ? "" : p.pgn;
+                pgnSnapshot.put(p.index, pgn);
+                String previouslyPersisted = persistedPgnReferences.get(p.index);
+                // PGN values are immutable Strings. The same object is retained by
+                // the pairing between saves, so identity avoids comparing large
+                // historic PGN bodies on every result commit.
+                if ((previouslyPersisted == null && !pgn.isEmpty()) ||
+                        (previouslyPersisted != null && previouslyPersisted != pgn))
+                    changedPgnIndexes.add(p.index);
+                o.put("whiteEvalPawns", Double.isFinite(p.whiteEvalPawns) ? p.whiteEvalPawns : JSONObject.NULL);
+                o.put("blackEvalPawns", Double.isFinite(p.blackEvalPawns) ? p.blackEvalPawns : JSONObject.NULL);
+                o.put("anomalyReviewed", p.anomalyReviewed); o.put("replayPending", p.replayPending);
+                o.put("openingAssigned", p.openingAssigned); o.put("openingIndex", p.openingIndex);
+                o.put("openingName", p.openingName); o.put("openingSanLine", p.openingSanLine); o.put("pgnDate", p.pgnDate);
+                o.put("cupMatchNumber", p.cupMatchNumber); o.put("cupPairNumber", p.cupPairNumber); o.put("cupGameInPair", p.cupGameInPair);
+                if (ratingEnabled) o.put("ratingSequence", p.ratingSequence);
+                o.put("whiteNameAtPlay", p.whiteNameAtPlay); o.put("blackNameAtPlay", p.blackNameAtPlay); pa.put(o);
+            }
+            root.put("pairings", pa);
             if (format == Format.SWISS) {
                 root.put("swissRoundsTotal", swissRoundsTotal);
                 root.put("swissCurrentRound", swissCurrentRound);
@@ -2615,25 +2670,42 @@ public final class TournamentManager {
             }
             revision = ++latestSaveRevision;
         }
+        final long snapshotBuildMs = (System.nanoTime() - snapshotBuildStartedNs) / 1_000_000L;
+        TournamentDiagnostics.record("SAVE", "manager_snapshot_built", "file=" + fileName +
+                " revision=" + revision + " elapsedMs=" + snapshotBuildMs +
+                " pairings=" + pgnSnapshot.size() + " changedPgns=" + changedPgnIndexes.size());
         // Modular modules are committed without reserializing the whole tournament
         // into a monolithic compatibility snapshot on every update.
+        long saveLockWaitStartedNs = System.nanoTime();
         synchronized (saveIoLock) {
+            long saveLockWaitMs = (System.nanoTime() - saveLockWaitStartedNs) / 1_000_000L;
+            TournamentDiagnostics.record("SAVE", "manager_save_lock_acquired", "file=" + fileName +
+                    " revision=" + revision + " waitMs=" + saveLockWaitMs);
             // A newer in-memory snapshot supersedes this one. If it has not yet
             // written, its caller will acquire saveIoLock next and persist it.
             if (revision < latestSaveRevision) return;
 
             long modularStartedNs = System.nanoTime();
             try {
-                TournamentStorage.saveActive(context, fileName, root, standingsSnapshot);
+                TournamentStorage.saveActive(context, fileName, root, standingsSnapshot,
+                        pgnSnapshot, changedPgnIndexes);
             } catch (IOException | JSONException modularError) {
                 TournamentDiagnostics.recordError("SAVE", "modular_primary_commit_failed file=" + fileName, modularError);
                 if (modularError instanceof IOException) throw (IOException) modularError;
                 throw (JSONException) modularError;
             }
             TournamentDiagnostics.record("SAVE", "modular_generation_committed", "file=" + fileName +
-                    " elapsedMs=" + ((System.nanoTime() - modularStartedNs) / 1_000_000L));
+                    " elapsedMs=" + ((System.nanoTime() - modularStartedNs) / 1_000_000L) +
+                    " snapshotBuildMs=" + snapshotBuildMs + " lockWaitMs=" + saveLockWaitMs +
+                    " changedPgns=" + changedPgnIndexes.size());
+            synchronized (this) {
+                if (revision == latestSaveRevision) {
+                    persistedPgnReferences.clear();
+                    persistedPgnReferences.putAll(pgnSnapshot);
+                }
+            }
 
-            if (isComplete()) {
+            if (isComplete() && !TournamentStorage.isManuallyKeptActive(context, fileName)) {
                 try {
                     TournamentStorage.archiveCompleted(context, fileName);
                     deleteLegacySnapshots(context, fileName);

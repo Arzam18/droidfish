@@ -557,8 +557,11 @@ public final class TournamentRunner {
             listener.onTournamentFinished();
             return;
         }
+        long activePairingStartedNs = System.nanoTime();
         try {
             tournament.setActivePairing(pairing.index);
+            TournamentDiagnostics.record("GAME_START", "active_pairing_state_ready", "game=" + pairing.index +
+                    " elapsedMs=" + ((System.nanoTime() - activePairingStartedNs) / 1_000_000L));
         } catch (IOException | JSONException activeSaveError) {
             listener.onError("Could not save active scheduled game", activeSaveError);
             stop();
@@ -1179,13 +1182,17 @@ public final class TournamentRunner {
                 long pgnStartNs = System.nanoTime();
                 String completedPgn = completedTree.toPGN(pgnOptions);
                 long pgnBuildMs = (System.nanoTime() - pgnStartNs) / 1_000_000L;
+                TournamentDiagnostics.record("RESULT", "pgn_serialization_finished", "game=" + completedIndex +
+                        " elapsedMs=" + pgnBuildMs + " chars=" + completedPgn.length());
                 long saveStartNs = System.nanoTime();
                 tournament.recordResultAndSelectNext(completedIndex, outcome, completedPgn, completedWhiteEval, completedBlackEval);
                 gameResultCommittedNs = System.nanoTime();
                 long pendingToCommitMs = gameResultPendingNs == 0L ? -1L :
                         Math.max(0L, (gameResultCommittedNs - gameResultPendingNs) / 1_000_000L);
                 TournamentDiagnostics.record("RESULT", "game_result_committed", "game=" + completedIndex +
-                        " outcome=" + outcome + " pendingToCommitMs=" + pendingToCommitMs);
+                        " outcome=" + outcome + " pendingToCommitMs=" + pendingToCommitMs +
+                        " pgnBuildMs=" + pgnBuildMs + " storageCommitMs=" +
+                        ((gameResultCommittedNs - saveStartNs) / 1_000_000L));
                 long resultSaveMs = (gameResultCommittedNs - saveStartNs) / 1_000_000L;
                 if (pgnBuildMs >= 100L || resultSaveMs >= 100L)
                     Log.w("CET-TournamentSave", "Game " + (completedIndex + 1) +
@@ -1215,6 +1222,8 @@ public final class TournamentRunner {
                 listener.onError("Tournament result was saved, but the result display callback failed", callbackError);
             } finally {
                 long callbackMs = (System.nanoTime() - callbackStartNs) / 1_000_000L;
+                TournamentDiagnostics.record("RESULT", "result_callback_dispatched", "game=" + completedIndex +
+                        " elapsedMs=" + callbackMs);
                 if (callbackMs >= 100L)
                     Log.w("CET-TournamentSave", "Game " + (completedIndex + 1) +
                             " result callback/PGN export=" + callbackMs + "ms");
