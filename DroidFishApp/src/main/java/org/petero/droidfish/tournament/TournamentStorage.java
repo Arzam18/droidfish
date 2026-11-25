@@ -347,9 +347,79 @@ final class TournamentStorage {
     }
 
     /**
+     * Persist the elapsed tournament clock independently of the much larger
+     * immutable result/schedule generation. This value changes every minute but
+     * does not require rebuilding standings, crosstable, graphs or PGN modules.
+     */
+    static void saveElapsedCheckpoint(Context context, String sourceFileName, long elapsedMs)
+            throws IOException, JSONException {
+        if (context == null) throw new IOException("Tournament storage is unavailable");
+        File active = activeTournamentDirectory(context, sourceFileName);
+        if (!active.exists() && !active.mkdirs() && !active.isDirectory())
+            throw new IOException("Cannot create active tournament directory for elapsed checkpoint");
+        JSONObject checkpoint = new JSONObject();
+        checkpoint.put("schemaVersion", 1);
+        checkpoint.put("tournamentId", safeBaseName(sourceFileName));
+        checkpoint.put("elapsedMs", Math.max(elapsedMs, readElapsedCheckpoint(context, sourceFileName, 0L)));
+        checkpoint.put("updatedAt", System.currentTimeMillis());
+        writeJson(new File(active, "elapsed.json"), checkpoint);
+    }
+
+    /** Merge the latest standalone clock checkpoint with the committed generation value. */
+    static long readElapsedCheckpoint(Context context, String sourceFileName, long fallbackMs) {
+        if (context == null) return Math.max(0L, fallbackMs);
+        File active = activeTournamentDirectory(context, sourceFileName);
+        File[] candidates = {
+                new File(active, "elapsed.json"),
+                new File(active, "elapsed.json.previous.bak")
+        };
+        long elapsed = Math.max(0L, fallbackMs);
+        for (File candidate : candidates) {
+            if (!candidate.isFile()) continue;
+            try {
+                JSONObject checkpoint = readJson(candidate);
+                if (checkpoint.optInt("schemaVersion", -1) != 1 ||
+                        !safeBaseName(sourceFileName).equals(checkpoint.optString("tournamentId", "")))
+                    continue;
+                elapsed = Math.max(elapsed, Math.max(0L, checkpoint.optLong("elapsedMs", 0L)));
+            } catch (Exception invalidCheckpoint) {
+                TournamentDiagnostics.recordError("STORAGE", "elapsed_checkpoint_invalid", invalidCheckpoint);
+            }
+        }
+        return elapsed;
+    }
+
+    /** Read the optional elapsed-clock checkpoint preserved inside a completed ZIP. */
+    static long readCompletedElapsedCheckpoint(Context context, String sourceFileName, long fallbackMs) {
+        if (context == null) return Math.max(0L, fallbackMs);
+        File archive = new File(completedTournamentDirectory(context, sourceFileName),
+                safeBaseName(sourceFileName) + ".zip");
+        if (!archive.isFile()) return Math.max(0L, fallbackMs);
+        try (ZipFile zip = new ZipFile(archive)) {
+            ZipEntry entry = zip.getEntry("elapsed.json");
+            if (entry == null) return Math.max(0L, fallbackMs);
+            try (java.io.InputStream input = zip.getInputStream(entry);
+                 ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[4096]; int count;
+                while ((count = input.read(buffer)) != -1) bytes.write(buffer, 0, count);
+                JSONObject checkpoint = new JSONObject(new String(bytes.toByteArray(), UTF8));
+                if (checkpoint.optInt("schemaVersion", -1) != 1 ||
+                        !safeBaseName(sourceFileName).equals(checkpoint.optString("tournamentId", "")))
+                    return Math.max(0L, fallbackMs);
+                return Math.max(Math.max(0L, fallbackMs), Math.max(0L, checkpoint.optLong("elapsedMs", 0L)));
+            }
+        } catch (Exception invalidCheckpoint) {
+            TournamentDiagnostics.recordError("STORAGE", "completed_elapsed_checkpoint_invalid", invalidCheckpoint);
+            return Math.max(0L, fallbackMs);
+        }
+    }
+
+    /**
      * Commit one immutable generation. The current.json pointer is the single
      * publication point, so a crash during module writes leaves the previous
-     * generation readable. Keep the current and one previous generation.
+     * generation readable. Retain recent generations between periodic cleanup
+     * passes; pruning the immutable history on every engine move is too expensive
+     * for mobile storage.
      */
     static void saveActive(Context context, String sourceFileName, JSONObject sourceRoot,
                            JSONArray standingsSnapshot, Map<Integer, String> pgnContents,
@@ -531,15 +601,23 @@ final class TournamentStorage {
         writeJson(new File(active, "current.json"), pointer);
         long pointerPublishMs = (System.nanoTime() - pointerPublishStartedNs) / 1_000_000L;
         long pruneStartedNs = System.nanoTime();
-        pruneGenerations(active, generationName);
-        prunePgnFiles(active);
+        // Retain the recent immutable generations between cleanup passes. The
+        // current pointer and its previous backup remain valid throughout; doing
+        // a full directory walk and PGN-reference sweep on every engine move was
+        // adding 1–1.6 s to otherwise small commits on mobile storage.
+        boolean cleanupDue = generation <= 2L || (generation % 8L) == 0L;
+        if (cleanupDue) {
+            pruneGenerations(active, generationName);
+            prunePgnFiles(active);
+        }
         long pruneMs = (System.nanoTime() - pruneStartedNs) / 1_000_000L;
         TournamentDiagnostics.record("STORAGE", "active_generation_commit_timing",
                 "tournament=" + safeBaseName(sourceFileName) + " generation=" + generation +
                         " totalMs=" + ((System.nanoTime() - commitStartedNs) / 1_000_000L) +
                         " signatureMs=" + signatureBuildMs + " generationBuildMs=" + generationBuildMs +
                         " moduleWriteValidateMs=" + moduleWriteAndValidationMs +
-                        " pointerPublishMs=" + pointerPublishMs + " pruneMs=" + pruneMs);
+                        " pointerPublishMs=" + pointerPublishMs + " pruneMs=" + pruneMs +
+                        " cleanupDue=" + cleanupDue);
     }
 
     private static boolean isCompletedGeneration(File generation) throws IOException, JSONException {
@@ -630,7 +708,7 @@ final class TournamentStorage {
                     if (name == null || name.isEmpty() || name.startsWith("/") || name.contains("..") || name.contains("\\"))
                         throw new IOException("Unsafe completed archive entry");
                     boolean allowedRoot = "tournament.json".equals(name) || "schedule.json".equals(name) ||
-                            "results.jsonl".equals(name) || "standings.json".equals(name) ||
+                            "elapsed.json".equals(name) || "results.jsonl".equals(name) || "standings.json".equals(name) ||
                             "crosstable.json".equals(name) || "graphs.json".equals(name);
                     if (!allowedRoot && !name.startsWith("pgn/")) throw new IOException("Unexpected archive entry: " + name);
                     if (name.startsWith("pgn/") && (name.endsWith("/") || name.length() <= 4))
@@ -764,6 +842,15 @@ final class TournamentStorage {
         try (FileOutputStream output = new FileOutputStream(temp, false); ZipOutputStream zip = new ZipOutputStream(output)) {
             addDirectoryToZip(generation, generation, zip);
             addReferencedPgnFilesToZip(generation, new File(active, "pgn"), zip);
+            File elapsedCheckpoint = new File(active, "elapsed.json");
+            if (elapsedCheckpoint.isFile()) {
+                zip.putNextEntry(new ZipEntry("elapsed.json"));
+                try (FileInputStream input = new FileInputStream(elapsedCheckpoint)) {
+                    byte[] buffer = new byte[8192]; int count;
+                    while ((count = input.read(buffer)) != -1) zip.write(buffer, 0, count);
+                }
+                zip.closeEntry();
+            }
             zip.finish(); zip.flush(); output.getFD().sync();
         }
         validateCompletedArchive(temp, pointer.optString("sourceSignature", ""), pointer.optLong("sourceGeneration", -1L));

@@ -864,6 +864,8 @@ public final class TournamentManager {
             try {
                 JSONObject archivedRoot = TournamentStorage.readCompletedRoot(context, fileName);
                 TournamentManager archived = new TournamentManager(context, archivedRoot, fileName);
+                archived.setTournamentElapsedMs(TournamentStorage.readCompletedElapsedCheckpoint(
+                        context, fileName, archived.tournamentElapsedMs()));
                 // User-archived unfinished tournaments are deliberately view-only while
                 // they remain in completed/. Completion is no longer a ZIP prerequisite.
                 TournamentDiagnostics.record("RESTORE", "completed_archive_restored", "file=" + fileName);
@@ -878,6 +880,8 @@ public final class TournamentManager {
             try {
                 JSONObject activeRoot = TournamentStorage.readActiveRoot(context, fileName);
                 TournamentManager active = new TournamentManager(context, activeRoot, fileName);
+                active.setTournamentElapsedMs(TournamentStorage.readElapsedCheckpoint(
+                        context, fileName, active.tournamentElapsedMs()));
                 if (active.isComplete() && !TournamentStorage.isManuallyKeptActive(context, fileName)) {
                     // Retry automatic archival when a prior completion save could not
                     // publish its ZIP (for example, transient storage pressure). The
@@ -1861,6 +1865,13 @@ public final class TournamentManager {
     /** Total active-play duration accumulated across pauses and app restarts. */
     public synchronized long tournamentElapsedMs() { return tournamentElapsedMs; }
     public synchronized void setTournamentElapsedMs(long elapsedMs) { tournamentElapsedMs = Math.max(tournamentElapsedMs, Math.max(0L, elapsedMs)); }
+
+    /** Lightweight checkpoint for the elapsed clock; does not rebuild tournament modules. */
+    public void saveElapsedCheckpoint() throws IOException, JSONException {
+        final long elapsed;
+        synchronized (this) { elapsed = tournamentElapsedMs; }
+        TournamentStorage.saveElapsedCheckpoint(context, fileName, elapsed);
+    }
     public synchronized boolean hasAnomalyRuleSettings() { return anomalyRuleSettingsSaved; }
     /** Save the automatic-rule start move once per tournament; older JSON receives setup defaults on resume. */
     public synchronized void setAnomalyRuleSettingsIfMissing(boolean enabled, int startFullMove, int maximumFullMoves) throws IOException, JSONException {
@@ -1929,6 +1940,11 @@ public final class TournamentManager {
 
     /** Initialize stable assignments for every PGN opening (or empty assignments when no book is selected). */
     public void prepareOpeningAssignments() throws IOException, JSONException {
+        prepareOpeningAssignments(true);
+    }
+
+    /** Allow the runner to batch opening metadata with the scheduled PGN date in one durable commit. */
+    public boolean prepareOpeningAssignments(boolean persist) throws IOException, JSONException {
         boolean changed = false;
         synchronized (this) {
         // Splitting this 3+ MB string separately for every scheduled game used to
@@ -1973,7 +1989,8 @@ public final class TournamentManager {
             }
         }
         }
-        if (changed) save();
+        if (changed && persist) save();
+        return changed;
     }
 
     private void assignPgnOpeningsInMemory() {
@@ -2007,10 +2024,16 @@ public final class TournamentManager {
 
     /** Store the actual BIN line chosen the first time a pairing runs; never redraw it on replay. */
     public void setPairingOpeningIfMissing(int index, List<String> sanMoves, String name) throws IOException, JSONException {
+        setPairingOpeningIfMissing(index, sanMoves, name, true);
+    }
+
+    /** Persist can be deferred until other per-game start metadata has been prepared. */
+    public boolean setPairingOpeningIfMissing(int index, List<String> sanMoves, String name,
+                                              boolean persist) throws IOException, JSONException {
         boolean changed = false;
         synchronized (this) {
             Pairing p = pairings.get(index);
-            if (p.openingAssigned) return;
+            if (p.openingAssigned) return false;
             String line = joinSan(sanMoves == null ? Collections.emptyList() : sanMoves);
             String label = name == null || name.trim().isEmpty() ? "Starting position" : name.trim();
             // The repeat-opening option pairs adjacent color-reversal games. Whichever
@@ -2038,11 +2061,23 @@ public final class TournamentManager {
                 }
             }
         }
-        if (changed) save();
+        if (changed && persist) save();
+        return changed;
+    }
+
+    /** True when the selected pairing needs a stable PGN date written into the next metadata commit. */
+    public synchronized boolean needsPairingPgnDate(int index) {
+        Pairing p = pairings.get(index);
+        return p.pgnDate == null || !p.pgnDate.matches("\\d{4}\\.\\d{2}\\.\\d{2}");
     }
 
     /** Original PGN date is reused when a scheduled game is replayed, replacing the same record. */
     public String ensurePairingPgnDate(int index) throws IOException, JSONException {
+        return ensurePairingPgnDate(index, true);
+    }
+
+    /** Resolve the stable date now, with optional deferred persistence for startup batching. */
+    public String ensurePairingPgnDate(int index, boolean persist) throws IOException, JSONException {
         String result;
         boolean changed = false;
         synchronized (this) {
@@ -2058,7 +2093,7 @@ public final class TournamentManager {
             }
             result = p.pgnDate;
         }
-        if (changed) save();
+        if (changed && persist) save();
         return result;
     }
 

@@ -645,8 +645,12 @@ public final class TournamentRunner {
                 : (baseTimeMs / 1000) + "+" + String.format(java.util.Locale.US, "%g", incrementMs / 1000.0);
         game.tree.setTournamentMetadata(tournament.pgnEventName(pairing), "DroidFish", pgnRoundNumber(pairing) + "." + gameNumberInRound(pairing),
                 eventType, pgnTimeControl);
+        boolean startMetadataChanged = tournament.needsPairingPgnDate(pairing.index);
         try {
-            game.tree.setTournamentDate(tournament.ensurePairingPgnDate(pairing.index));
+            // The stable date is prepared in memory here and committed together
+            // with the opening assignment below. Two consecutive full generation
+            // writes were previously performed during every game setup.
+            game.tree.setTournamentDate(tournament.ensurePairingPgnDate(pairing.index, false));
         } catch (IOException | JSONException dateError) {
             listener.onError("Could not save scheduled game date", dateError);
             stop();
@@ -666,15 +670,28 @@ public final class TournamentRunner {
             if (!customFenActive && !generatedVariantActive && !pairing.openingAssigned) {
                 if (!tournament.openingBinPath().trim().isEmpty()) {
                     ArrayList<String> selectedLine = selectBinOpeningLine(tournament.openingBinPath());
-                    tournament.setPairingOpeningIfMissing(pairing.index, selectedLine, "Polyglot BIN opening");
+                    startMetadataChanged |= tournament.setPairingOpeningIfMissing(
+                            pairing.index, selectedLine, "Polyglot BIN opening", false);
                 } else {
-                    tournament.prepareOpeningAssignments();
+                    startMetadataChanged |= tournament.prepareOpeningAssignments(false);
                 }
             }
         } catch (IOException | JSONException openingSaveError) {
             listener.onError("Could not save scheduled opening assignment", openingSaveError);
             stop();
             return;
+        }
+        // One durable generation now contains both the PGN date and its stable
+        // opening assignment. Skip the snapshot entirely when both were already
+        // committed for this pairing; otherwise commit once before engine start.
+        if (startMetadataChanged) {
+            try {
+                tournament.save();
+            } catch (IOException | JSONException metadataSaveError) {
+                listener.onError("Could not save scheduled game metadata", metadataSaveError);
+                stop();
+                return;
+            }
         }
         pairing = tournament.pairings().get(pairing.index);
         if (!customFenActive && !generatedVariantActive) {
