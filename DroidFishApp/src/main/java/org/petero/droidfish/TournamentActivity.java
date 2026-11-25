@@ -112,7 +112,8 @@ public final class TournamentActivity extends Activity {
     private String currentWhiteName = "WHITE", currentBlackName = "BLACK";
     private String currentBoardWhiteScore = "", currentBoardBlackScore = "";
     private TextView whiteAnalysisText, blackAnalysisText, whiteAnalysisPvText, blackAnalysisPvText,
-            whiteMoveTimeText, blackMoveTimeText, openingText, mainWhiteEngineTitle, mainBlackEngineTitle;
+            whiteWdlText, blackWdlText, whiteMoveTimeText, blackMoveTimeText, openingText,
+            mainWhiteEngineTitle, mainBlackEngineTitle;
     private LinearLayout mainWhiteAnalysisScroll, mainBlackAnalysisScroll;
     // null preserves the normal side-based placement; a side value makes that engine the shared top output.
     // null = the normal separated Black-top / White-bottom layout; otherwise one shared output panel.
@@ -526,10 +527,15 @@ public final class TournamentActivity extends Activity {
             }
             lastClockRefreshNs = now;
             lastUiHeartbeatNs = now;
-            refreshLiveClocks();
+            if (activityVisible) {
+                refreshLiveClocks();
+                updateExpandedBoardControls();
+            }
+            // Tournament engine workers and durable result commits continue while
+            // another app is foregrounded. Poll advanced timers at a lower rate in
+            // the background; avoid hidden-view refreshes competing for CPU.
             tickAutomaticTimers();
-            updateExpandedBoardControls();
-            uiHandler.postDelayed(this, 100);
+            uiHandler.postDelayed(this, activityVisible ? 100L : 1000L);
         }
     };
 
@@ -1741,8 +1747,8 @@ public final class TournamentActivity extends Activity {
         updateExpandedBoardControls();
     }
 
-    /** Main Board only: a single-line metrics header above a two-line scrollable PV viewport. */
-    private LinearLayout createMainAnalysisPanel(TextView metrics, TextView variation) {
+    /** Tournament Main Board only: metrics, native WDL, then a scrollable PV viewport. */
+    private LinearLayout createMainAnalysisPanel(TextView metrics, TextView wdl, TextView variation) {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(3), dp(2), dp(3), dp(2));
@@ -1759,6 +1765,14 @@ public final class TournamentActivity extends Activity {
         metricsScroll.setHorizontalScrollBarEnabled(false);
         metricsScroll.addView(metrics, new HorizontalScrollView.LayoutParams(-2, -1));
         panel.addView(metricsScroll, new LinearLayout.LayoutParams(-1, dp(31)));
+        wdl.setTextSize(12);
+        wdl.setTypeface(null, android.graphics.Typeface.BOLD);
+        wdl.setTextColor(0xFFD9E2E8);
+        wdl.setSingleLine(true);
+        wdl.setGravity(android.view.Gravity.CENTER_VERTICAL | android.view.Gravity.LEFT);
+        wdl.setPadding(0, 0, 0, 0);
+        wdl.setVisibility(View.GONE);
+        panel.addView(wdl, new LinearLayout.LayoutParams(-1, dp(17)));
         variation.setTextSize(13.5f);
         variation.setTextColor(0xFFF0F0F0);
         variation.setSingleLine(false);
@@ -1853,8 +1867,8 @@ public final class TournamentActivity extends Activity {
         }
         setMainOutputVariationHeight(mainWhiteAnalysisScroll, dp(48));
         setMainOutputVariationHeight(mainBlackAnalysisScroll, shared ? dp(60) : dp(48));
-        setMainOutputPanelHeight(mainBlackAnalysisScroll, shared ? dp(120) : dp(90));
-        setMainOutputPanelHeight(mainWhiteAnalysisScroll, dp(90));
+        setMainOutputPanelHeight(mainBlackAnalysisScroll, shared ? dp(138) : dp(108));
+        setMainOutputPanelHeight(mainWhiteAnalysisScroll, dp(108));
     }
 
     private void setMainOutputPanelHeight(LinearLayout panel, int height) {
@@ -1867,8 +1881,9 @@ public final class TournamentActivity extends Activity {
     }
 
     private void setMainOutputVariationHeight(LinearLayout panel, int height) {
-        if (panel == null || panel.getChildCount() < 3) return;
-        View variationViewport = panel.getChildAt(2);
+        if (panel == null || panel.getChildCount() < 4) return;
+        // Engine title is inserted at index 0, followed by metrics, WDL and PV.
+        View variationViewport = panel.getChildAt(3);
         ViewGroup.LayoutParams lp = variationViewport.getLayoutParams();
         if (lp != null && lp.height != height) {
             lp.height = height;
@@ -1879,6 +1894,7 @@ public final class TournamentActivity extends Activity {
     /** Reorders only the output panels and player rows; the chessboard view is never changed. */
     private void applyMainBoardAnalysisPositions() {
         updateMainOutputTitles();
+        refreshTournamentMainWdlFromCache();
         if (playPage == null || blackClockRow == null || whiteClockRow == null ||
                 mainBlackAnalysisScroll == null || mainWhiteAnalysisScroll == null ||
                 tournamentBoard == null || !(tournamentBoard.getParent() instanceof View)) return;
@@ -1898,7 +1914,7 @@ public final class TournamentActivity extends Activity {
             // Reuse one output panel for whichever engine is currently thinking.
             mainWhiteAnalysisScroll.setVisibility(View.GONE);
             mainBlackAnalysisScroll.setVisibility(View.VISIBLE);
-            LinearLayout.LayoutParams sharedParams = new LinearLayout.LayoutParams(-1, dp(120));
+            LinearLayout.LayoutParams sharedParams = new LinearLayout.LayoutParams(-1, dp(138));
             if (mainBoardSharedOutputTop) {
                 playPage.addView(mainBlackAnalysisScroll, index++, sharedParams);
                 playPage.addView(topPlayer, index++);
@@ -1917,8 +1933,8 @@ public final class TournamentActivity extends Activity {
             // side's own latest analysis before returning to the normal two-panel layout.
             setMainBoardEngineOutput(blackAnalysisText, blackAnalysisPvText, lastBlackAnalysis);
             setMainBoardEngineOutput(whiteAnalysisText, whiteAnalysisPvText, lastWhiteAnalysis);
-            setMainOutputPanelHeight(mainBlackAnalysisScroll, dp(90));
-            setMainOutputPanelHeight(mainWhiteAnalysisScroll, dp(90));
+            setMainOutputPanelHeight(mainBlackAnalysisScroll, dp(108));
+            setMainOutputPanelHeight(mainWhiteAnalysisScroll, dp(108));
             boolean topWhite = tournamentUiFlipped;
             View topOutput = topWhite ? mainWhiteAnalysisScroll : mainBlackAnalysisScroll;
             View bottomOutput = topWhite ? mainBlackAnalysisScroll : mainWhiteAnalysisScroll;
@@ -1957,10 +1973,11 @@ public final class TournamentActivity extends Activity {
         // Upper engine analysis panel, kept above its clock/name row.
         blackAnalysisText = text("Eval: —    Depth: —    Nodes: —    NPS: —");
         blackAnalysisPvText = text("—");
-        mainBlackAnalysisScroll = createMainAnalysisPanel(blackAnalysisText, blackAnalysisPvText);
+        blackWdlText = text("");
+        mainBlackAnalysisScroll = createMainAnalysisPanel(blackAnalysisText, blackWdlText, blackAnalysisPvText);
         mainBlackEngineTitle = createMainOutputTitle(false);
         mainBlackAnalysisScroll.addView(mainBlackEngineTitle, 0, fullWidth());
-        page.addView(mainBlackAnalysisScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(90)));
+        page.addView(mainBlackAnalysisScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(108)));
         attachMainBoardOutputGestures(mainBlackAnalysisScroll, blackAnalysisText, blackAnalysisPvText, false);
 
         blackClockRow = new LinearLayout(this);
@@ -2018,10 +2035,11 @@ public final class TournamentActivity extends Activity {
 
         whiteAnalysisText = text("Eval: —    Depth: —    Nodes: —    NPS: —");
         whiteAnalysisPvText = text("—");
-        mainWhiteAnalysisScroll = createMainAnalysisPanel(whiteAnalysisText, whiteAnalysisPvText);
+        whiteWdlText = text("");
+        mainWhiteAnalysisScroll = createMainAnalysisPanel(whiteAnalysisText, whiteWdlText, whiteAnalysisPvText);
         mainWhiteEngineTitle = createMainOutputTitle(true);
         mainWhiteAnalysisScroll.addView(mainWhiteEngineTitle, 0, fullWidth());
-        page.addView(mainWhiteAnalysisScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(90)));
+        page.addView(mainWhiteAnalysisScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(108)));
         attachMainBoardOutputGestures(mainWhiteAnalysisScroll, whiteAnalysisText, whiteAnalysisPvText, true);
         openingText = text("Opening: Starting position");
         openingText.setTextSize(16);
@@ -2897,8 +2915,10 @@ public final class TournamentActivity extends Activity {
         if (mirrorBlackRow != null) mirrorBlackRow.setVisibility(View.VISIBLE);
         if (mirrorWhiteRow != null) mirrorWhiteRow.setVisibility(View.VISIBLE);
         if (mirrorNavigationMode) {
-            if (mirrorWhiteOutputPanel != null) mirrorWhiteOutputPanel.setVisibility(navigationWhite ? View.VISIBLE : View.GONE);
-            if (mirrorBlackOutputPanel != null) mirrorBlackOutputPanel.setVisibility(navigationWhite ? View.GONE : View.VISIBLE);
+            // Double-tap mode is deliberately navigation-only. Do not reuse either
+            // engine output panel or create/show the focus-analysis substitute here.
+            if (mirrorWhiteOutputPanel != null) mirrorWhiteOutputPanel.setVisibility(View.GONE);
+            if (mirrorBlackOutputPanel != null) mirrorBlackOutputPanel.setVisibility(View.GONE);
             if (mirrorFocusAnalysisContainer != null) mirrorFocusAnalysisContainer.setVisibility(View.GONE);
         } else {
             int playerVisibility = mirrorEngineOutputHidden ? View.GONE : View.VISIBLE;
@@ -2938,6 +2958,12 @@ public final class TournamentActivity extends Activity {
 
     private void updateMirrorFocusPanels() {
         if (mirrorFocusAnalysisText == null || mirrorFocusMovesText == null) return;
+        if (mirrorNavigationMode) {
+            if (mirrorWhiteOutputPanel != null) mirrorWhiteOutputPanel.setVisibility(View.GONE);
+            if (mirrorBlackOutputPanel != null) mirrorBlackOutputPanel.setVisibility(View.GONE);
+            if (mirrorFocusAnalysisContainer != null) mirrorFocusAnalysisContainer.setVisibility(View.GONE);
+            return;
+        }
         ArrayList<Position> positions = currentMirrorPositions();
         int selected = positions.isEmpty() ? 0 : Math.max(0, Math.min(mirrorDisplayedPly(), positions.size() - 1));
         boolean whiteToMove = positions.isEmpty() || positions.get(selected).whiteMove;
@@ -3023,20 +3049,11 @@ public final class TournamentActivity extends Activity {
             mirrorFocusAnalysisPvText.setText(boardVariation);
         }
         if (mirrorNavigationMode) {
-            TextView selectedMetrics = outputWhite ? mirrorWhiteAnalysisText : mirrorBlackAnalysisText;
-            TextView selectedPv = outputWhite ? mirrorWhitePvText : mirrorBlackPvText;
-            MirrorEvaluationBar selectedBar = outputWhite ? mirrorWhiteEvaluationBar : mirrorBlackEvaluationBar;
-            ImageView selectedIcon = outputWhite ? mirrorWhiteIcon : mirrorBlackIcon;
-            LinearLayout selectedPanel = outputWhite ? mirrorWhiteOutputPanel : mirrorBlackOutputPanel;
-            if (selectedMetrics != null) selectedMetrics.setText(analysis.isEmpty()
-                    ? (useExternalAnalysis ? "External analysis running…" : "") : formatMirrorMetrics(analysis));
-            if (selectedPv != null) selectedPv.setText(analysis.isEmpty() ? "—" :
-                    (useExternalAnalysis ? extractLatestMainMirrorVariation(analysis) : extractMirrorMoveVariation(analysis)));
-            if (selectedBar != null) selectedBar.setEngineAnalysis(analysis, outputWhite);
-            if (selectedIcon != null) setMirrorPlayerIcon(selectedIcon, focusEngineId, iconLookupName);
-            if (mirrorWhiteOutputPanel != null) mirrorWhiteOutputPanel.setVisibility(outputWhite ? View.VISIBLE : View.GONE);
-            if (mirrorBlackOutputPanel != null) mirrorBlackOutputPanel.setVisibility(outputWhite ? View.GONE : View.VISIBLE);
-            if (selectedPanel != null) selectedPanel.setAlpha(1.0f);
+            // Double-tap review exposes only the move navigation controls. Analysis
+            // remains available as a temporary selected-move comment when enabled,
+            // but no engine information panel is created or made visible.
+            if (mirrorWhiteOutputPanel != null) mirrorWhiteOutputPanel.setVisibility(View.GONE);
+            if (mirrorBlackOutputPanel != null) mirrorBlackOutputPanel.setVisibility(View.GONE);
             if (mirrorFocusAnalysisContainer != null) mirrorFocusAnalysisContainer.setVisibility(View.GONE);
         }
 
@@ -3694,17 +3711,13 @@ public final class TournamentActivity extends Activity {
                 mirrorWhiteMoveTime.setText(whiteMoveTimeText == null ? "—" : whiteMoveTimeText.getText());
                 mirrorBlackMoveTime.setText(blackMoveTimeText == null ? "—" : blackMoveTimeText.getText());
             }
-            updateMirrorEngineOutputDisplays(lastWhiteAnalysis, lastBlackAnalysis);
-            updateMirrorEvaluationBars(lastWhiteAnalysis, lastBlackAnalysis);
-            updateMirrorRankedNames();
         }
-        if (mirrorPauseButton != null) mirrorPauseButton.setText(runner != null && runner.isPaused() ? "PLAY" : "PAUSE");
-        if (mirrorHeaderText != null) mirrorHeaderText.setText(mirrorHeaderLabel());
-        // The move strip is live board chrome, not a tab-only section. Refresh it
-        // immediately on every position sync so move updates never wait for a tab
-        // navigation or the animated section-refresh callback.
-        if (isMirrorShowing() && !mirrorReplayMode) updateMirrorMoveStrip();
-        updateMirrorNavigationButtons();
+        // Engine metrics, evaluation bars, rank labels and the tournament header
+        // change on their own callbacks/results. Rewriting those view trees for every
+        // ply steals vsync time from the moving pieces on slower phones.
+        if (isMirrorShowing() && !mirrorReplayMode && mirrorSelectedTab == 0)
+            updateMirrorMoveStrip();
+        if (mirrorNavigationMode || mirrorSelectedTab == 0) updateMirrorNavigationButtons();
     }
 
     private boolean samePosition(Position a, Position b) {
@@ -6433,14 +6446,9 @@ public final class TournamentActivity extends Activity {
             mirrorSectionHost.addView(empty, fullWidth());
             return;
         }
-        if (!ensureMirrorScheduleMoveCountsReady(tournament)) {
-            TextView preparing = text(scheduleMoveCountsBuilding ? "Preparing schedule…" : "Schedule preparation unavailable.");
-            preparing.setTextSize(14);
-            preparing.setTextColor(0xFFBFCBD2);
-            preparing.setPadding(dp(12), dp(18), dp(12), dp(18));
-            mirrorSectionHost.addView(preparing, fullWidth());
-            return;
-        }
+        // Schedule rows are useful immediately. Move counts are filled from the
+        // immutable PGN cache when the background preparation worker completes.
+        ensureMirrorScheduleMoveCountsReady(tournament);
         mirrorScheduleRows.clear();
         mirrorSchedulePairingIndexes.clear();
         List<TournamentManager.Engine> engines = new ArrayList<>(tournament.engines());
@@ -6492,7 +6500,7 @@ public final class TournamentActivity extends Activity {
                     : (cup ? "Pair " + pairing.cupPairNumber + " · Game " + pairing.cupGameInPair
                     : Integer.toString(pairing.index + 1));
             String row = prefix + ". " + white + " - " + black + " (" + mirrorScheduleResultLabel(pairing) + ")" + state +
-                    "\n" + cachedFullMoveCount(tournament, pairing) + " moves";
+                    "\n" + scheduleMoveCountLabel(tournament, pairing);
             addMirrorScheduleRow(row, pairing.index);
         }
         if (mirrorScheduleRows.isEmpty()) addMirrorScheduleRow("No scheduled games.", -1);
@@ -6539,7 +6547,7 @@ public final class TournamentActivity extends Activity {
                 row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
                 LinearLayout center = new LinearLayout(TournamentActivity.this); center.setOrientation(LinearLayout.VERTICAL); center.setGravity(android.view.Gravity.CENTER);
                 TextView result = text(mirrorScheduleResultLabel(pairing)); result.setTextSize(14); result.setTypeface(null, android.graphics.Typeface.BOLD);
-                TextView moves = text(cachedFullMoveCount(tournament, pairing) + " Moves"); moves.setTextSize(11); moves.setTextColor(0xFFBFCBD2);
+                TextView moves = text(scheduleMoveCountLabel(tournament, pairing)); moves.setTextSize(11); moves.setTextColor(0xFFBFCBD2);
                 center.addView(result, new LinearLayout.LayoutParams(-2, -2)); center.addView(moves, new LinearLayout.LayoutParams(-2, -2));
                 row.addView(center, new LinearLayout.LayoutParams(dp(82), -2));
                 LinearLayout right = new LinearLayout(TournamentActivity.this); right.setGravity(android.view.Gravity.CENTER_VERTICAL);
@@ -7658,6 +7666,9 @@ public final class TournamentActivity extends Activity {
             if (cachedScheduleDialog != null && cachedScheduleTournament == tournament) {
                 if (cachedScheduleDirty) refreshCachedSchedule(tournament);
                 cachedScheduleDialog.show();
+                // Recheck after show: the background move-count preparation may
+                // have completed between the first refresh and displaying dialog.
+                if (cachedScheduleDirty && scheduleMoveCountsReady) refreshCachedSchedule(tournament);
                 scrollCachedScheduleToCurrentGame();
                 return;
             }
@@ -7740,6 +7751,8 @@ public final class TournamentActivity extends Activity {
             replayGame.setOnClickListener(v -> { cachedScheduleDialog.dismiss(); showReplayGamePicker(tournament); });
             refreshCachedSchedule(tournament);
             cachedScheduleDialog.show();
+            // Build immediately if the worker completed during dialog creation.
+            if (cachedScheduleDirty && scheduleMoveCountsReady) refreshCachedSchedule(tournament);
             scrollCachedScheduleToCurrentGame();
         } catch (Exception e) {
             Toast.makeText(this, "Could not load tournament schedule: " + e.getMessage(), Toast.LENGTH_LONG).show();
@@ -7773,6 +7786,9 @@ public final class TournamentActivity extends Activity {
             cachedScheduleDirty = true;
             return;
         }
+        // Start background move-count preparation, but don't make the user wait
+        // for every historical PGN before the schedule itself becomes visible.
+        boolean moveCountsReady = ensureMirrorScheduleMoveCountsReady(tournament);
         StringBuilder copy = new StringBuilder(Math.max(256, tournament.pairings().size() * 64));
         cachedScheduleRows.clear();
         cachedSchedulePairingIndexes.clear();
@@ -7780,6 +7796,8 @@ public final class TournamentActivity extends Activity {
         cachedScheduleNameRangesByIndex.clear();
         List<TournamentManager.Engine> engines = tournament.engines();
         List<Integer> priorityQueue = tournament.playQueue();
+        HashMap<Integer, Integer> priorityPositions = new HashMap<>();
+        for (int i = 0; i < priorityQueue.size(); i++) priorityPositions.put(priorityQueue.get(i), i + 1);
         boolean swiss = tournament.format() == TournamentManager.Format.SWISS;
         boolean cup = tournament.format() == TournamentManager.Format.CUP;
         int displayedSwissRound = 0, displayedCupStage = -1, displayedCupMatch = -1;
@@ -7834,13 +7852,15 @@ public final class TournamentActivity extends Activity {
                     ? pairing.blackNameAtPlay : engineDisplayName(engines, pairing.blackEngineId);
             String result = pairingResultLabel(pairing.outcome);
             int endedAtMoves = cachedFullMoveCount(tournament, pairing);
-            int queuePosition = priorityQueue.indexOf(pairing.index) + 1;
+            Integer queuedPosition = priorityPositions.get(pairing.index);
+            int queuePosition = queuedPosition == null ? -1 : queuedPosition;
             String state = pairing.replayPending ? " · replay queued" : (queuePosition > 0 ? " · priority #" + queuePosition : "");
             String gamePrefix = swiss ? "R" + pairing.round + "." + pairing.gameNumber
                     : (cup ? "Pair " + pairing.cupPairNumber + " · Game " + pairing.cupGameInPair
                     : Integer.toString(pairing.index + 1));
+            String moveCountLabel = endedAtMoves < 0 ? "Counting moves…" : endedAtMoves + " moves";
             String row = gamePrefix + ". " + white + " - " + black + " (" + result + ")" + state
-                    + "\n" + endedAtMoves + " moves";
+                    + "\n" + moveCountLabel;
             cachedScheduleRows.add(row);
             cachedSchedulePairingIndexes.add(pairing.index);
             cachedSchedulePairingsByIndex.put(pairing.index, pairing);
@@ -7872,7 +7892,7 @@ public final class TournamentActivity extends Activity {
         if (cachedScheduleDialog != null) cachedScheduleDialog.setTitle(scheduleTitle(tournament));
         if (cachedScheduleBracketButton != null)
             cachedScheduleBracketButton.setVisibility(tournament.format() == TournamentManager.Format.CUP ? View.VISIBLE : View.GONE);
-        cachedScheduleDirty = false;
+        cachedScheduleDirty = !moveCountsReady;
         List<TournamentManager.Pairing> timeLosses = tournament.pendingTimeLosses();
         List<TournamentManager.Pairing> drawAnomalies = tournament.pendingDrawAnomalies();
         if (cachedScheduleAnomaliesButton != null)
@@ -9462,12 +9482,16 @@ public final class TournamentActivity extends Activity {
                 while ((pending = PENDING_ELAPSED_SAVE.getAndSet(null)) != null) {
                     long saveStartNs = System.nanoTime();
                     try {
-                        pending.save();
+                        pending.saveElapsedCheckpoint();
                         long saveMs = (System.nanoTime() - saveStartNs) / 1_000_000L;
                         if (saveMs >= 100L)
-                            android.util.Log.w("CET-TournamentSave", "Background checkpoint took " + saveMs + " ms");
-                    } catch (Exception e) {
-                        android.util.Log.e("TournamentSave", "Background elapsed checkpoint failed", e);
+                            android.util.Log.w("CET-TournamentSave", "Lightweight elapsed checkpoint took " + saveMs + " ms");
+                    } catch (Exception checkpointError) {
+                        android.util.Log.e("TournamentSave", "Lightweight elapsed checkpoint failed; falling back to full save", checkpointError);
+                        try { pending.save(); }
+                        catch (Exception fullSaveError) {
+                            android.util.Log.e("TournamentSave", "Background elapsed full-save fallback failed", fullSaveError);
+                        }
                     }
                 }
             } finally {
@@ -10267,6 +10291,7 @@ public final class TournamentActivity extends Activity {
         currentBlackName = "BLACK";
         currentBoardWhiteScore = currentBoardBlackScore = "";
         lastWhiteAnalysis = lastBlackAnalysis = "—";
+        clearTournamentMainWdl();
         updateMirrorEvaluationBars(lastWhiteAnalysis, lastBlackAnalysis);
         if (tournamentTitleText != null) tournamentTitleText.setText(saved.title());
         if (statusText != null) statusText.setText(saved.isComplete() ? "Completed tournament review" : "Saved tournament review");
@@ -10854,6 +10879,45 @@ public final class TournamentActivity extends Activity {
         return white ? lastWhiteAnalysis : lastBlackAnalysis;
     }
 
+    private static final java.util.regex.Pattern NATIVE_WDL_PATTERN = java.util.regex.Pattern.compile(
+            "(?i)Engine\\s+WDL:\\s*W\\s*:?\\s*([0-9]+(?:\\.[0-9]+)?)%?\\s+D\\s*:?\\s*([0-9]+(?:\\.[0-9]+)?)%?\\s+L\\s*:?\\s*([0-9]+(?:\\.[0-9]+)?)%?");
+
+    /** WDL is a live, engine-native metric shown only in the Tournament Main Board panels. */
+    private void updateTournamentMainWdl(boolean white, String analysis) {
+        TextView target = mainBoardSharedOutputTop != null ? blackWdlText :
+                (white ? whiteWdlText : blackWdlText);
+        if (target == null) return;
+        if (mainBoardSharedOutputTop != null && whiteWdlText != null)
+            whiteWdlText.setVisibility(View.GONE);
+        java.util.regex.Matcher matcher = NATIVE_WDL_PATTERN.matcher(analysis == null ? "" : analysis);
+        if (!matcher.find()) {
+            target.setText("");
+            target.setVisibility(View.GONE);
+            return;
+        }
+        String line = "W: " + matcher.group(1) + "   D: " + matcher.group(2) + "   L: " + matcher.group(3);
+        target.setText(line);
+        target.setVisibility(View.VISIBLE);
+        if (mainBoardSharedOutputTop != null) {
+            if (whiteWdlText != null) whiteWdlText.setVisibility(View.GONE);
+        }
+    }
+
+    private void clearTournamentMainWdl() {
+        if (whiteWdlText != null) { whiteWdlText.setText(""); whiteWdlText.setVisibility(View.GONE); }
+        if (blackWdlText != null) { blackWdlText.setText(""); blackWdlText.setVisibility(View.GONE); }
+    }
+
+    private void refreshTournamentMainWdlFromCache() {
+        if (mainBoardSharedOutputTop != null) {
+            updateTournamentMainWdl(mainBoardSharedActiveWhite,
+                    mainBoardSharedActiveWhite ? lastWhiteAnalysis : lastBlackAnalysis);
+        } else {
+            updateTournamentMainWdl(true, lastWhiteAnalysis);
+            updateTournamentMainWdl(false, lastBlackAnalysis);
+        }
+    }
+
     private void applyEngineAnalysisUpdate(boolean white, String analysis) {
         TextView target = isMirrorShowing() ? null : (white ? whiteAnalysisText : blackAnalysisText);
         if (white) lastWhiteAnalysis = analysis; else lastBlackAnalysis = analysis;
@@ -10877,6 +10941,7 @@ public final class TournamentActivity extends Activity {
         } else if (target != null) {
             setMainBoardEngineOutput(target, white ? whiteAnalysisPvText : blackAnalysisPvText, analysis);
         }
+        refreshTournamentMainWdlFromCache();
         updateExpandedEngineMetrics();
         updateExpandedMoveHints();
         scheduleMirrorGraphRefreshAfterAnalysis();
@@ -10956,6 +11021,7 @@ public final class TournamentActivity extends Activity {
                     pendingWhiteEngineAnalysisUi.set(null);
                     pendingBlackEngineAnalysisUi.set(null);
                     lastWhiteAnalysis = "Book."; lastBlackAnalysis = "Book."; mirrorLastMoveTimeMs = 0;
+                    clearTournamentMainWdl();
                     updateMirrorEvaluationBars(lastWhiteAnalysis, lastBlackAnalysis);
                     mirrorLatestAnalysisOutput = "Select an engine, then turn analysis on.";
                     updateMirrorShortcutAnalysisState();
@@ -11070,6 +11136,7 @@ public final class TournamentActivity extends Activity {
                         setMainBoardEngineOutput(blackAnalysisText, blackAnalysisPvText,
                                 whiteToMove ? lastWhiteAnalysis : lastBlackAnalysis);
                         updateMainOutputTitles();
+                        refreshTournamentMainWdlFromCache();
                     }
                     updateTurnNameLabels();
                     if (pgnMoves != null) currentPgnMoves = pgnMoves;
@@ -11176,6 +11243,7 @@ public final class TournamentActivity extends Activity {
             @Override public void onReviewPosition(Position position, int ply, int totalPlies,
                                                    String whiteAnalysis, String blackAnalysis, long moveTimeMs) {
                 runOnUiThread(() -> {
+                    clearTournamentMainWdl();
                     latestPosition = new Position(position);
                     tournamentVariationHints.clear();
                     tournamentVariationPositionHash = Long.MIN_VALUE;
@@ -11470,6 +11538,11 @@ public final class TournamentActivity extends Activity {
                     scheduleMoveCountsBuilding = false;
                     scheduleMoveCountsReady = false;
                     invalidateMirrorSectionCache(2);
+                    if (cachedScheduleDialog != null && cachedScheduleDialog.isShowing() &&
+                            cachedScheduleTournament == tournament) {
+                        cachedScheduleDirty = true;
+                        refreshCachedSchedule(tournament);
+                    }
                     if (isMirrorShowing() && mirrorSelectedTab == 2) renderMirrorSection();
                     return;
                 }
@@ -11478,6 +11551,8 @@ public final class TournamentActivity extends Activity {
                 scheduleMoveCountsBuilding = false;
                 scheduleMoveCountsReady = true;
                 invalidateMirrorSectionCache(2);
+                if (cachedScheduleDialog != null && cachedScheduleDialog.isShowing() && cachedScheduleTournament == tournament)
+                    refreshCachedSchedule(tournament);
                 if (isMirrorShowing() && mirrorSelectedTab == 2) renderMirrorSection();
             });
         });
@@ -11497,9 +11572,14 @@ public final class TournamentActivity extends Activity {
         if (pgn == null || pgn.isEmpty()) return 0;
         ScheduleMoveCountCacheEntry cached = scheduleMoveCountCache.get(pairing.index);
         if (cached != null && cached.pgnReference == pgn) return cached.fullMoves;
-        int count = countFullMoves(pgn);
-        if (pairing.isComplete()) scheduleMoveCountCache.put(pairing.index, new ScheduleMoveCountCacheEntry(pgn, count));
-        return count;
+        // A missing count is prepared asynchronously; never parse a full PGN on
+        // the UI thread while opening or refreshing Schedule.
+        return scheduleMoveCountsBuilding || !scheduleMoveCountsReady ? -1 : 0;
+    }
+
+    private String scheduleMoveCountLabel(TournamentManager tournament, TournamentManager.Pairing pairing) {
+        int count = cachedFullMoveCount(tournament, pairing);
+        return count < 0 ? "Counting moves…" : count + " Moves";
     }
 
     private int countFullMoves(String pgn) {
@@ -11877,14 +11957,12 @@ public final class TournamentActivity extends Activity {
         saveExpandedPanelLayoutPreferences();
         if (mirrorAnalysisEngine != null) { try { mirrorAnalysisEngine.stopSearch(); } catch (RuntimeException ignored) { } }
         saveSetup();
-        if (runner != null && !runner.isPaused()) {
-            runner.pause();
-            freezeTournamentElapsedClock();
-            freezeEventElapsedClock();
-            heatLastResumeNs = 0L;
-            autoPaused = true;
-            if (playPauseButton != null) playPauseButton.setText("Play");
-        }
+        // Backgrounding the Activity is not a tournament pause request. Keep the
+        // runner, clocks, engines and durable result pipeline alive while the user
+        // checks another app. Explicit Pause/Back/Stop actions remain authoritative.
+        TournamentDiagnostics.record("ACTIVITY", "tournament_continues_in_background",
+                "runnerPresent=" + (runner != null) + " paused=" + (runner != null && runner.isPaused()) +
+                " finished=" + (runner != null && runner.isFinished()));
         super.onPause();
     }
 
