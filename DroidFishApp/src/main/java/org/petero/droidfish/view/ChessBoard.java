@@ -85,6 +85,7 @@ public abstract class ChessBoard extends View {
     protected Paint brightPaint;
     private Paint selectedSquarePaint;
     private Paint piecePaint;
+    private Paint animationPiecePaint;
     private Paint labelPaint;
     private Paint decorationPaint;
     private ArrayList<Paint> moveMarkPaint;
@@ -110,6 +111,9 @@ public abstract class ChessBoard extends View {
 
         piecePaint = new Paint();
         piecePaint.setAntiAlias(true);
+        // Animated pieces are translated at fractional pixel coordinates. Bitmap
+        // filtering prevents nearest-neighbour stepping between display frames.
+        animationPiecePaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
         labelPaint = new Paint();
         labelPaint.setAntiAlias(true);
@@ -247,9 +251,15 @@ public abstract class ChessBoard extends View {
             XYCoord crd2 = sqToPix(Position.getX(to), Position.getY(to));
             final int xCrd2 = crd2.x;
             final int yCrd2 = crd2.y;
-            final int xCrd = xCrd1 + (int)Math.round((xCrd2 - xCrd1) * animState);
-            final int yCrd = yCrd1 + (int)Math.round((yCrd2 - yCrd1) * animState);
-            drawPiece(canvas, xCrd, yCrd, piece);
+            // Keep sub-pixel coordinates. Rounding to whole pixels on every frame
+            // made the piece appear to jump one pixel at a time, especially on
+            // shorter tournament/review moves rendered under load.
+            final float xCrd = xCrd1 + (float)((xCrd2 - xCrd1) * animState);
+            final float yCrd = yCrd1 + (float)((yCrd2 - yCrd1) * animState);
+            if (blindMode) return;
+            Bitmap bitmap = PieceSet.instance().getPieceBitmap(piece, sqSize);
+            if (bitmap != null)
+                canvas.drawBitmap(bitmap, xCrd, yCrd, animationPiecePaint);
         }
     }
     private AnimInfo anim = new AnimInfo();
@@ -377,8 +387,14 @@ public abstract class ChessBoard extends View {
         }
         if (setDragStateInternal(-1, 0, 0))
             doInvalidate = true;
-        if (doInvalidate)
-            invalidate();
+        if (doInvalidate) {
+            // Begin the first animation frame on a display vsync, matching the
+            // frame cadence used for every subsequent interpolation step.
+            if (anim.startTime >= 0 && !anim.paused)
+                postInvalidateOnAnimation();
+            else
+                invalidate();
+        }
     }
 
     /** Set the pixel position (xCrd,yCrd) of the currently dragged piece.
