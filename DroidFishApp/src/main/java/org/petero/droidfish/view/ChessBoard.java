@@ -44,6 +44,8 @@ import android.view.MotionEvent;
 import android.view.View;
 
 public abstract class ChessBoard extends View {
+    /** Shared default for every board, including the live, expanded and review boards. */
+    private static final int DEFAULT_MOVE_ANIMATION_MS = 320;
     public Position pos;
 
     public int selectedSquare;
@@ -158,6 +160,7 @@ public abstract class ChessBoard extends View {
         int slowFrameGaps;
         int slowDrawFrames;
         boolean frameStatsReported;
+        int pendingDurationMs;
         int piece1, from1, to1, hide1;
         int piece2, from2, to2, hide2;
 
@@ -224,7 +227,11 @@ public abstract class ChessBoard extends View {
         public final void draw(Canvas canvas) {
             if (!animActive())
                 return;
-            double animState = (now - startTime) / (double)(stopTime - startTime);
+            double linearState = Math.max(0.0, Math.min(1.0,
+                    (now - startTime) / (double)Math.max(1L, stopTime - startTime)));
+            // Smoothstep easing gives the piece a gentle start and stop instead of
+            // the abrupt constant-speed movement that made short animations hard to see.
+            double animState = linearState * linearState * (3.0 - 2.0 * linearState);
             drawAnimPiece(canvas, piece2, from2, to2, animState);
             drawAnimPiece(canvas, piece1, from1, to1, animState);
             // Schedule the next frame on the display's vsync boundary. The move
@@ -259,15 +266,20 @@ public abstract class ChessBoard extends View {
      * @param forward   True if forward direction, false for undo move.
      */
     public final void setAnimMove(Position sourcePos, Move move, boolean forward) {
-        setAnimMove(sourcePos, move, forward, -1);
+        setAnimMove(sourcePos, move, forward, DEFAULT_MOVE_ANIMATION_MS);
     }
 
     /** Set up a move animation using an explicit duration in milliseconds.
-     *  A negative duration keeps the historical distance-based timing; zero disables it.
+     *  A negative duration uses the shared default timing; zero disables it.
      */
     public final void setAnimMove(Position sourcePos, Move move, boolean forward, int durationMs) {
         if (sourcePos == null || move == null) return;
+        // Start the clock only when the matching target position is installed.
+        // Starting here consumed much of a short animation while the UI was still
+        // applying the move and scheduling its first frame.
         anim.startTime = -1;
+        anim.stopTime = -1;
+        anim.pendingDurationMs = 0;
         anim.resetFrameStats();
         anim.paused = true; // Animation starts at next position update
         if (forward) {
@@ -279,17 +291,9 @@ public abstract class ChessBoard extends View {
         } else {
             anim.posHash = sourcePos.zobristHash();
         }
-        int animTime = durationMs; // Negative means use the original distance-based duration.
-        if (animTime < 0) {
-            int dx = Position.getX(move.to) - Position.getX(move.from);
-            int dy = Position.getY(move.to) - Position.getY(move.from);
-            double dist = Math.sqrt(dx * dx + dy * dy);
-            double t = Math.sqrt(dist) * 100;
-            animTime = (int)Math.round(t);
-        }
+        int animTime = durationMs < 0 ? DEFAULT_MOVE_ANIMATION_MS : durationMs;
         if (animTime > 0) {
-            anim.startTime = SystemClock.uptimeMillis();
-            anim.stopTime = anim.startTime + animTime;
+            anim.pendingDurationMs = animTime;
             anim.piece2 = Piece.EMPTY;
             anim.from2 = -1;
             anim.to2 = -1;
@@ -360,6 +364,11 @@ public abstract class ChessBoard extends View {
         boolean doInvalidate = false;
         if (anim.paused) {
             anim.paused = false;
+            if (anim.pendingDurationMs > 0) {
+                anim.startTime = SystemClock.uptimeMillis();
+                anim.stopTime = anim.startTime + anim.pendingDurationMs;
+                anim.pendingDurationMs = 0;
+            }
             doInvalidate = true;
         }
         if (!this.pos.equals(pos)) {
