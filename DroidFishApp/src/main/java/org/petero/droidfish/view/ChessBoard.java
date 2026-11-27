@@ -85,7 +85,6 @@ public abstract class ChessBoard extends View {
     protected Paint brightPaint;
     private Paint selectedSquarePaint;
     private Paint piecePaint;
-    private Paint animatedPiecePaint;
     private Paint labelPaint;
     private Paint decorationPaint;
     private ArrayList<Paint> moveMarkPaint;
@@ -111,7 +110,6 @@ public abstract class ChessBoard extends View {
 
         piecePaint = new Paint();
         piecePaint.setAntiAlias(true);
-        animatedPiecePaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
 
         labelPaint = new Paint();
         labelPaint.setAntiAlias(true);
@@ -252,7 +250,7 @@ public abstract class ChessBoard extends View {
             final float xCrd = xCrd1 + (float)((xCrd2 - xCrd1) * animState);
             final float yCrd = yCrd1 + (float)((yCrd2 - yCrd1) * animState);
             Bitmap bitmap = PieceSet.instance().getPieceBitmap(piece, sqSize);
-            if (bitmap != null) canvas.drawBitmap(bitmap, xCrd, yCrd, animatedPiecePaint);
+            if (bitmap != null) canvas.drawBitmap(bitmap, xCrd, yCrd, piecePaint);
         }
     }
     private AnimInfo anim = new AnimInfo();
